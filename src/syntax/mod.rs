@@ -16,6 +16,26 @@
 mod languages;
 
 pub use languages::{detect, LanguageDef};
+pub(crate) use languages::{find_by_name, names};
+
+/// Resolve a buffer's language, honoring an optional `-Y`/`--syntax` CLI
+/// override (matching nano's `find_and_prime_applicable_syntax`): `"none"`
+/// disables highlighting outright, a recognized name forces that language,
+/// and an unrecognized name falls back to normal detection (nano shows an
+/// "Unknown syntax name" alert in that last case; tico just falls back
+/// silently, since there's no persistent status line to put it on this
+/// early in startup).
+pub fn detect_with_override(
+    path: Option<&std::path::Path>,
+    text: &str,
+    syntax_override: Option<&str>,
+) -> Option<&'static LanguageDef> {
+    match syntax_override {
+        Some("none") => None,
+        Some(name) => find_by_name(name).or_else(|| detect(path, text)),
+        None => detect(path, text),
+    }
+}
 
 use tree_sitter::StreamingIterator;
 
@@ -328,6 +348,33 @@ mod tests {
             spans.iter().any(|s| s.kind == HighlightKind::String && s.start <= body_start && s.end >= body_start + 9),
             "expected the heredoc body to remain a String span, got {spans:?}"
         );
+    }
+
+    #[test]
+    fn override_forces_language_regardless_of_filename() {
+        let lang = detect_with_override(Some(std::path::Path::new("foo.txt")), "", Some("perl")).unwrap();
+        assert_eq!(lang.name, "perl");
+    }
+
+    #[test]
+    fn override_none_disables_detection() {
+        assert!(detect_with_override(Some(std::path::Path::new("foo.pl")), "", Some("none")).is_none());
+    }
+
+    #[test]
+    fn override_unknown_name_falls_back_to_detection() {
+        let lang = detect_with_override(Some(std::path::Path::new("foo.pl")), "", Some("boguslang")).unwrap();
+        assert_eq!(lang.name, "perl");
+    }
+
+    #[test]
+    fn listed_names_are_sorted_and_nonempty() {
+        let names = names();
+        assert!(names.contains(&"perl"));
+        assert!(names.contains(&"sql"));
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(names, sorted);
     }
 
     #[test]

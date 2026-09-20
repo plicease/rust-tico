@@ -16,7 +16,7 @@ fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
 
     if cli.listsyntaxes {
-        println!("(syntax listing not yet implemented)");
+        print_syntax_names();
         return Ok(());
     }
 
@@ -34,12 +34,15 @@ fn main() -> anyhow::Result<()> {
     let mut editor = app::Editor::new(options, loaded.keymap);
     editor.buffers.clear();
 
+    let syntax_override = editor.options.syntax_name.clone();
     if file_args.is_empty() {
-        editor.buffers.push(buffer::Buffer::empty());
+        let mut buf = buffer::Buffer::empty();
+        buf.language = syntax::detect_with_override(None, "", syntax_override.as_deref());
+        editor.buffers.push(buf);
     } else {
         for (i, fa) in file_args.iter().enumerate() {
             let path = std::path::PathBuf::from(&fa.path);
-            let (mut buf, message, level) = open_one(&path, editor.options.locking);
+            let (mut buf, message, level) = open_one(&path, editor.options.locking, syntax_override.as_deref());
             if let Some(line) = fa.line {
                 let target = (line.max(1) as usize) - 1;
                 buf.cursor.line = target.min(buf.line_count().saturating_sub(1));
@@ -76,6 +79,27 @@ fn main() -> anyhow::Result<()> {
         editor.history.save();
     }
     Ok(())
+}
+
+/// Print the names of tico's built-in syntax-highlighting languages, for
+/// `-z`/`--listsyntaxes`. Unlike nano, these aren't read from nanorc `syntax`
+/// definitions (tico intentionally ignores those; see the syntax module),
+/// so this lists the fixed, compiled-in language registry instead, wrapped
+/// the same way nano wraps its own listing.
+fn print_syntax_names() {
+    println!("Available syntaxes:");
+    let mut line = String::new();
+    for name in syntax::names() {
+        if line.chars().count() > 45 {
+            println!("{line}");
+            line.clear();
+        }
+        line.push(' ');
+        line.push_str(name);
+    }
+    if !line.is_empty() {
+        println!("{line}");
+    }
 }
 
 /// When `locking` is on, check for (and take) a vim-style lock on `buf`'s
@@ -132,13 +156,17 @@ fn acquire_lock(editor: &mut app::Editor, buf: &mut buffer::Buffer, interactive:
 /// `ISSET(LOCKING)`-gated check in `has_valid_path()` — warn when a new
 /// file's containing directory isn't writable either. Returns (buffer,
 /// status message, message severity).
-fn open_one(path: &std::path::Path, locking: bool) -> (buffer::Buffer, String, app::StatusLevel) {
+fn open_one(
+    path: &std::path::Path,
+    locking: bool,
+    syntax_override: Option<&str>,
+) -> (buffer::Buffer, String, app::StatusLevel) {
     let (mut buf, msg, level) = open_one_inner(path, locking);
     // Detected once at load time (extension/filename -> shebang -> modeline,
-    // all on by default); the on/off toggle (M-Y) only controls whether
-    // rendering actually uses it, so toggling back on doesn't need to
-    // re-detect.
-    buf.language = syntax::detect(buf.path.as_deref(), &buf.to_string());
+    // all on by default, or forced by -Y/--syntax); the on/off toggle (M-Y)
+    // only controls whether rendering actually uses it, so toggling back on
+    // doesn't need to re-detect.
+    buf.language = syntax::detect_with_override(buf.path.as_deref(), &buf.to_string(), syntax_override);
     (buf, msg, level)
 }
 
