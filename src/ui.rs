@@ -212,6 +212,17 @@ fn handle_prompt_key(editor: &mut Editor, mut prompt: Prompt, key: KeyEvent) {
             editor.mode = Mode::Prompt(prompt);
             return;
         }
+        // Menu-specific bindings (e.g. ^Y/^V to jump straight to the first
+        // or last line from the Search/GotoLine prompts, without needing
+        // to type anything) — see keymap.rs's install_prompt_defaults for
+        // the full, source-verified list.
+        if let Some(Binding::Action(action)) = editor.keymap.lookup_menu_only(prompt.menu, tkey).cloned() {
+            if apply_prompt_action(editor, &mut prompt, action) {
+                return;
+            }
+            editor.mode = Mode::Prompt(prompt);
+            return;
+        }
     }
     if let KeyCode::Char(c) = key.code {
         if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
@@ -221,6 +232,52 @@ fn handle_prompt_key(editor: &mut Editor, mut prompt: Prompt, key: KeyEvent) {
         }
     }
     editor.mode = Mode::Prompt(prompt);
+}
+
+/// Apply an Action bound within a prompt menu, which generally means
+/// something different from its effect while editing the buffer directly.
+/// Returns true if the prompt was closed (editor.mode has already been
+/// set); false if it should stay open (the caller restores
+/// `Mode::Prompt(prompt)`).
+///
+/// Only the bindings that make sense to act on immediately are handled
+/// here; others (FlipReplace/FlipGoto prompt-kind switching, Older/Newer
+/// history recall — history isn't implemented yet) are recognized by the
+/// keymap but not yet wired to a prompt-time effect, and are ignored here
+/// rather than silently doing the wrong thing.
+fn apply_prompt_action(editor: &mut Editor, prompt: &mut Prompt, action: Action) -> bool {
+    match action {
+        Action::FirstLine => {
+            editor.buf_mut().cursor = Pos::new(0, 0);
+            editor.scroll_to_cursor();
+            editor.mode = Mode::Editing;
+            true
+        }
+        Action::LastLine => {
+            let last = editor.buf().line_count().saturating_sub(1);
+            editor.buf_mut().cursor = Pos::new(last, 0);
+            editor.scroll_to_cursor();
+            editor.mode = Mode::Editing;
+            true
+        }
+        Action::CaseSens => {
+            editor.search.case_sensitive = !editor.search.case_sensitive;
+            false
+        }
+        Action::Regexp => {
+            editor.search.use_regex = !editor.search.use_regex;
+            false
+        }
+        Action::Backwards => {
+            editor.search.backwards = !editor.search.backwards;
+            if prompt.menu == Menu::Search {
+                prompt.label =
+                    if editor.search.backwards { "Search backward".to_string() } else { "Search".to_string() };
+            }
+            false
+        }
+        _ => false,
+    }
 }
 
 fn handle_exit_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {

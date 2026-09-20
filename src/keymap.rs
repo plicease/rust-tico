@@ -497,6 +497,17 @@ impl KeyMap {
             .or_else(|| self.table.get(&(Menu::Main, key)))
     }
 
+    /// Like `lookup`, but without the Main-menu fallback: only a binding
+    /// registered for exactly this menu counts. Prompt menus intentionally
+    /// have their own small, curated set of bindings (see
+    /// `install_prompt_defaults`); falling back to Main's editing
+    /// shortcuts there would apply the wrong action to an unrelated key
+    /// (e.g. Main's `Ctrl+Home` = FirstLine leaking into the WriteOut
+    /// prompt and unexpectedly aborting a save).
+    pub fn lookup_menu_only(&self, menu: Menu, key: Key) -> Option<&Binding> {
+        self.table.get(&(menu, key))
+    }
+
     /// Build the default keybinding table, matching GNU nano 8.7.1's
     /// compiled-in defaults for the main editing menu (captured directly
     /// from the running `nano` binary's help viewer), plus conventional
@@ -653,24 +664,46 @@ impl KeyMap {
             self.bind(menu, K::Ctrl('H'), Binding::Action(A::Backspace));
             self.bind(menu, K::Ctrl('D'), Binding::Action(A::Delete));
         }
+        // Verified against nano's src/global.c (add_to_sclist calls), not
+        // guessed: MWHEREIS|MREPLACE share case/regex/backwards toggles and
+        // ^R (flip to replace); MWHEREIS|MGOTOLINE|MFINDINHELP share ^Y/^V
+        // to jump straight to the first/last line (this is the behavior
+        // that prompted double-checking all of these); history recall
+        // (^P/^N) is shared much more broadly, across every prompt that
+        // remembers previous entries.
         self.bind(Menu::Search, K::Ctrl('M'), Binding::Action(A::WhereIs));
         self.bind(Menu::Search, K::Ctrl('R'), Binding::Action(A::FlipReplace));
-        self.bind(Menu::Search, K::Ctrl('Y'), Binding::Action(A::Older));
-        self.bind(Menu::Search, K::Ctrl('T'), Binding::Action(A::Newer));
+        self.bind(Menu::Search, K::Ctrl('T'), Binding::Action(A::FlipGoto));
+        self.bind(Menu::Search, K::Ctrl('Y'), Binding::Action(A::FirstLine));
+        self.bind(Menu::Search, K::Ctrl('V'), Binding::Action(A::LastLine));
         self.bind(Menu::Search, K::Meta('C'), Binding::Action(A::CaseSens));
         self.bind(Menu::Search, K::Meta('R'), Binding::Action(A::Regexp));
         self.bind(Menu::Search, K::Meta('B'), Binding::Action(A::Backwards));
 
         self.bind(Menu::Replace, K::Ctrl('M'), Binding::Action(A::Replace));
+        self.bind(Menu::Replace, K::Ctrl('R'), Binding::Action(A::FlipReplace));
+        self.bind(Menu::Replace, K::Meta('C'), Binding::Action(A::CaseSens));
+        self.bind(Menu::Replace, K::Meta('R'), Binding::Action(A::Regexp));
+        self.bind(Menu::Replace, K::Meta('B'), Binding::Action(A::Backwards));
         self.bind(Menu::ReplaceWith, K::Ctrl('M'), Binding::Action(A::Replace));
 
+        for &menu in &[Menu::Search, Menu::Replace, Menu::ReplaceWith, Menu::Execute] {
+            self.bind(menu, K::Ctrl('P'), Binding::Action(A::Older));
+            self.bind(menu, K::Ctrl('N'), Binding::Action(A::Newer));
+        }
+
         self.bind(Menu::GotoLine, K::Ctrl('M'), Binding::Action(A::GotoLine));
-        self.bind(Menu::GotoLine, K::Meta('T'), Binding::Action(A::FlipGoto));
+        self.bind(Menu::GotoLine, K::Ctrl('T'), Binding::Action(A::FlipGoto));
+        self.bind(Menu::GotoLine, K::Ctrl('Y'), Binding::Action(A::FirstLine));
+        self.bind(Menu::GotoLine, K::Ctrl('V'), Binding::Action(A::LastLine));
+        self.bind(Menu::GotoLine, K::Ctrl('W'), Binding::Action(A::BeginPara));
+        self.bind(Menu::GotoLine, K::Ctrl('O'), Binding::Action(A::EndPara));
 
         // 'Y'es/'N'o/'A'll at yesno prompts are handled specially by the
         // prompt code (they read the literal character), not via the keymap.
 
         self.bind(Menu::WriteOut, K::Ctrl('M'), Binding::Action(A::WriteOut));
+        self.bind(Menu::WriteOut, K::Ctrl('Q'), Binding::Action(A::DiscardBuffer));
         self.bind(Menu::WriteOut, K::Meta('D'), Binding::Action(A::DosFormat));
         self.bind(Menu::WriteOut, K::Meta('M'), Binding::Action(A::MacFormat));
         self.bind(Menu::WriteOut, K::Meta('A'), Binding::Action(A::Append));
@@ -679,11 +712,25 @@ impl KeyMap {
 
         self.bind(Menu::Insert, K::Ctrl('M'), Binding::Action(A::Insert));
         self.bind(Menu::Insert, K::Meta('F'), Binding::Action(A::FlipNewBuffer));
-        self.bind(Menu::Insert, K::Meta('E'), Binding::Action(A::FlipExecute));
+        self.bind(Menu::Insert, K::Meta('N'), Binding::Action(A::FlipConvert));
+        self.bind(Menu::Insert, K::Ctrl('X'), Binding::Action(A::FlipExecute));
 
         self.bind(Menu::Execute, K::Ctrl('M'), Binding::Action(A::Execute));
         self.bind(Menu::Execute, K::Ctrl('G'), Binding::Action(A::Help));
+        self.bind(Menu::Execute, K::Ctrl('T'), Binding::Action(A::Speller));
+        self.bind(Menu::Execute, K::Ctrl('Y'), Binding::Action(A::Linter));
+        self.bind(Menu::Execute, K::Ctrl('O'), Binding::Action(A::Formatter));
+        self.bind(Menu::Execute, K::Ctrl('V'), Binding::Action(A::CutRestOfFile));
+        self.bind(Menu::Execute, K::Ctrl('Z'), Binding::Action(A::Suspend));
+        self.bind(Menu::Execute, K::Ctrl('J'), Binding::Action(A::FullJustify));
+        self.bind(Menu::Execute, K::Ctrl('X'), Binding::Action(A::FlipExecute));
+        self.bind(Menu::Execute, K::Meta('F'), Binding::Action(A::FlipNewBuffer));
+        self.bind(Menu::Execute, K::Meta('\\'), Binding::Action(A::FlipPipe));
 
+        self.bind(Menu::Help, K::Home, Binding::Action(A::FirstLine));
+        self.bind(Menu::Help, K::End, Binding::Action(A::LastLine));
+
+        self.bind(Menu::Linter, K::Ctrl('X'), Binding::Action(A::Cancel));
         self.bind(Menu::Linter, K::Ctrl('C'), Binding::Action(A::Cancel));
         self.bind(Menu::Linter, K::Ctrl('M'), Binding::Action(A::Cancel));
         self.bind(Menu::Linter, K::PageUp, Binding::Action(A::PageUp));
