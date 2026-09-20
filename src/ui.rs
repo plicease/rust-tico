@@ -626,12 +626,15 @@ fn render_title_bar(editor: &Editor, out: &mut impl Write, cols: usize) -> io::R
 fn render_status_line(editor: &Editor, out: &mut impl Write, row: u16, cols: usize) -> io::Result<()> {
     queue!(out, MoveTo(0, row))?;
     if let Mode::Prompt(prompt) = &editor.mode {
+        // nano's promptcolor defaults to the title bar's colors (reverse
+        // video), confirmed against the installed nano's own escape-code
+        // output for both the Search and WriteOut prompts.
         let text = format!("{}: {}", prompt.label, prompt.input);
         let mut s: String = text.chars().take(cols).collect();
         while s.chars().count() < cols {
             s.push(' ');
         }
-        queue!(out, Print(s))
+        queue!(out, SetAttribute(Attribute::Reverse), Print(s), SetAttribute(Attribute::Reset))
     } else if let Some(msg) = &editor.status {
         // nano shows ordinary status-bar messages in reverse video, and
         // Alert-level ones (unwritable file, "is a directory", ...) bold
