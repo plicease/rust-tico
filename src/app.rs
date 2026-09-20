@@ -267,6 +267,21 @@ impl Editor {
         }
     }
 
+    /// Like `scroll_to_cursor`, but when the cursor is off-screen, centers
+    /// it in the viewport instead of scrolling just enough to reveal it.
+    /// Matches nano's `edit_redraw(..., CENTERING)`, which it uses
+    /// specifically for search/find-next/find-previous and replace jumps
+    /// (confirmed directly against the installed nano for both) — ordinary
+    /// cursor movement (arrows, page up/down, ...) keeps the minimal-scroll
+    /// behavior of plain `scroll_to_cursor`.
+    pub fn scroll_to_cursor_centered(&mut self) {
+        let rows = self.text_rows();
+        let buf = self.buf_mut();
+        if buf.cursor.line < buf.top_line || buf.cursor.line >= buf.top_line + rows {
+            buf.top_line = buf.cursor.line.saturating_sub(rows / 2);
+        }
+    }
+
     /// Dispatch one editing action. Returns true if the caller should
     /// re-render (essentially always, but kept for future use).
     pub fn execute(&mut self, action: Action) {
@@ -752,7 +767,7 @@ impl Editor {
         match found {
             Ok(Some((pos, len, wrapped))) => {
                 self.buf_mut().cursor = pos;
-                self.scroll_to_cursor();
+                self.scroll_to_cursor_centered();
                 self.set_spotlight_persistent(pos, len);
                 self.mode = Mode::Prompt(Prompt {
                     kind: PromptKind::ReplaceConfirm(ReplaceLoopState {
@@ -829,7 +844,7 @@ impl Editor {
                         continue;
                     }
                     self.buf_mut().cursor = pos;
-                    self.scroll_to_cursor();
+                    self.scroll_to_cursor_centered();
                     self.set_spotlight_persistent(pos, len);
                     self.mode = Mode::Prompt(Prompt {
                         kind: PromptKind::ReplaceConfirm(state),
@@ -893,7 +908,7 @@ impl Editor {
         match found {
             Some((pos, len)) => {
                 self.buf_mut().cursor = pos;
-                self.scroll_to_cursor();
+                self.scroll_to_cursor_centered();
                 self.search.last_pattern = Some(pattern.to_string());
                 self.set_spotlight_timed(pos, len);
             }
@@ -1178,6 +1193,32 @@ mod tests {
             "match at line 45 should be within the scrolled viewport (top_line={}, rows={rows})",
             ed.buf().top_line
         );
+    }
+
+    #[test]
+    fn search_centers_offscreen_match_like_nano() {
+        // nano's edit_redraw(..., CENTERING) puts the match at row
+        // editwinrows/2 rather than just barely scrolling it into view -
+        // confirmed directly against the installed nano.
+        let text = (0..50).map(|i| format!("line{i}\n")).collect::<String>();
+        let mut ed = test_editor(&text);
+        ed.screen_rows = 24;
+        ed.buf_mut().cursor = Pos::new(0, 0);
+        ed.buf_mut().top_line = 0;
+        ed.run_search("line45".to_string().as_str(), false);
+        let rows = ed.text_rows();
+        assert_eq!(ed.buf().top_line, 45 - rows / 2);
+    }
+
+    #[test]
+    fn search_does_not_scroll_when_match_already_visible() {
+        let text = (0..50).map(|i| format!("line{i}\n")).collect::<String>();
+        let mut ed = test_editor(&text);
+        ed.screen_rows = 24;
+        ed.buf_mut().cursor = Pos::new(0, 0);
+        ed.buf_mut().top_line = 0;
+        ed.run_search("line3".to_string().as_str(), false); // well within the first screenful
+        assert_eq!(ed.buf().top_line, 0, "already-visible match shouldn't move the viewport");
     }
 
     #[test]
