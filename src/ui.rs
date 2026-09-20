@@ -593,19 +593,26 @@ fn render_shortcut_bar(out: &mut impl Write, row: u16, cols: usize) -> io::Resul
 
     for r in 0..2u16 {
         queue!(out, MoveTo(0, row + r))?;
-        let mut line = String::new();
+        let mut written = 0usize;
         for c in 0..n_pairs {
             let idx = c * 2 + r as usize;
-            let cell = if let Some((key, desc)) = entries.get(idx) {
-                format!("{key:<lw$} {desc:<dw$}", lw = max_label, dw = max_desc)
+            if let Some((key, desc)) = entries.get(idx) {
+                // As in nano: the key combo is shown in reverse video, the
+                // description in the terminal's normal colors.
+                let key_padded = format!("{key:<lw$}", lw = max_label);
+                queue!(out, SetAttribute(Attribute::Reverse), Print(&key_padded), SetAttribute(Attribute::Reset))?;
+                let rest = format!(" {desc:<dw$}  ", dw = max_desc);
+                queue!(out, Print(&rest))?;
+                written += key_padded.chars().count() + rest.chars().count();
             } else {
-                " ".repeat(col_width.saturating_sub(2))
-            };
-            line.push_str(&cell);
-            line.push_str("  ");
+                let pad = " ".repeat(col_width);
+                queue!(out, Print(&pad))?;
+                written += pad.chars().count();
+            }
         }
-        let line: String = line.chars().take(cols).collect();
-        queue!(out, Print(format!("{line:<cols$}", cols = cols)))?;
+        if written < cols {
+            queue!(out, Print(" ".repeat(cols - written)))?;
+        }
     }
     Ok(())
 }
