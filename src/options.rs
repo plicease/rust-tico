@@ -1,0 +1,251 @@
+//! The full set of nano-compatible settings ("set" options in nanorc terms),
+//! with their defaults, as documented in `nanorc(5)`.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Color {
+    Black,
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    White,
+    Normal,
+    Rgb(u8, u8, u8),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ColorPair {
+    pub bold: bool,
+    pub italic: bool,
+    pub fg: Option<Color>,
+    pub bg: Option<Color>,
+}
+
+/// All boolean "set"/"unset" toggles from nanorc(5), off by default unless
+/// noted. Field names match the nanorc option names.
+#[derive(Debug, Clone)]
+pub struct Options {
+    // Boolean toggles (all default false unless noted).
+    pub afterends: bool,
+    pub allow_insecure_backup: bool,
+    pub atblanks: bool,
+    pub autoindent: bool,
+    pub backup: bool,
+    pub boldtext: bool,
+    pub bookstyle: bool,
+    pub breaklonglines: bool,
+    pub casesensitive: bool,
+    pub colonparsing: bool,
+    pub constantshow: bool,
+    pub cutfromcursor: bool,
+    pub emptyline: bool,
+    pub historylog: bool,
+    pub indicator: bool,
+    pub jumpyscrolling: bool,
+    pub linenumbers: bool,
+    pub locking: bool,
+    pub magic: bool,
+    pub minibar: bool,
+    pub mouse: bool,
+    pub multibuffer: bool,
+    pub noconvert: bool,
+    pub nohelp: bool,
+    pub nonewlines: bool,
+    pub positionlog: bool,
+    pub preserve: bool,
+    pub quickblank: bool,
+    pub rawsequences: bool,
+    pub rebinddelete: bool,
+    pub regexp: bool,
+    pub saveonexit: bool,
+    pub showcursor: bool,
+    pub smarthome: bool,
+    pub softwrap: bool,
+    pub stateflags: bool,
+    pub tabstospaces: bool,
+    pub trimblanks: bool,
+    pub unix: bool,
+    pub wordbounds: bool,
+    pub zap: bool,
+    pub zero: bool,
+    /// syntax highlighting on by default (per tico's own requirements, unlike
+    /// nano which enables it whenever a syntax matches regardless of a toggle).
+    pub syntax_highlighting: bool,
+
+    // Valued options.
+    pub backupdir: Option<String>,
+    pub brackets: String,
+    pub fill: i32,
+    pub guidestripe: Option<u32>,
+    pub matchbrackets: String,
+    pub operatingdir: Option<String>,
+    pub punct: String,
+    pub quotestr: String,
+    pub speller: Option<String>,
+    pub tabsize: u32,
+    pub whitespace: (char, char),
+    pub wordchars: Option<String>,
+
+    // Colors.
+    pub errorcolor: ColorPair,
+    pub functioncolor: ColorPair,
+    pub keycolor: ColorPair,
+    pub minicolor: ColorPair,
+    pub numbercolor: ColorPair,
+    pub promptcolor: ColorPair,
+    pub scrollercolor: ColorPair,
+    pub selectedcolor: ColorPair,
+    pub spotlightcolor: ColorPair,
+    pub statuscolor: ColorPair,
+    pub stripecolor: ColorPair,
+    pub titlecolor: ColorPair,
+
+    // Other CLI-only / mixed options not exposed as plain "set" booleans
+    // above (nano exposes these as both CLI flags and nanorc `set` names).
+    pub restricted: bool,
+    pub view: bool,
+    pub nowrap: bool,
+    pub ignorercfiles: bool,
+    pub modernbindings: bool,
+    pub stateflags_cli: bool,
+    pub syntax_name: Option<String>,
+    pub rcfile: Option<String>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            afterends: false,
+            allow_insecure_backup: false,
+            atblanks: false,
+            autoindent: false,
+            backup: false,
+            boldtext: false,
+            bookstyle: false,
+            breaklonglines: false,
+            casesensitive: false,
+            colonparsing: false,
+            constantshow: false,
+            cutfromcursor: false,
+            emptyline: false,
+            historylog: false,
+            indicator: false,
+            jumpyscrolling: false,
+            linenumbers: false,
+            locking: false,
+            magic: false,
+            minibar: false,
+            mouse: false,
+            multibuffer: false,
+            noconvert: false,
+            nohelp: false,
+            nonewlines: false,
+            positionlog: false,
+            preserve: false,
+            quickblank: false,
+            rawsequences: false,
+            rebinddelete: false,
+            regexp: false,
+            saveonexit: false,
+            showcursor: false,
+            smarthome: false,
+            softwrap: false,
+            stateflags: false,
+            tabstospaces: false,
+            trimblanks: false,
+            unix: false,
+            wordbounds: false,
+            zap: false,
+            zero: false,
+            syntax_highlighting: true,
+
+            backupdir: None,
+            brackets: "\"')>]}".to_string(),
+            fill: -8,
+            guidestripe: None,
+            matchbrackets: "(<[{)>]}".to_string(),
+            operatingdir: None,
+            punct: "!.?".to_string(),
+            quotestr: "^([ \t]*([!#%:;>|}]|//))+".to_string(),
+            speller: None,
+            tabsize: 8,
+            whitespace: ('\u{bb}', '\u{22c5}'),
+            wordchars: None,
+
+            errorcolor: ColorPair { bold: true, italic: false, fg: Some(Color::White), bg: Some(Color::Red) },
+            functioncolor: ColorPair::default(),
+            keycolor: ColorPair::default(),
+            minicolor: ColorPair::default(),
+            numbercolor: ColorPair::default(),
+            promptcolor: ColorPair::default(),
+            scrollercolor: ColorPair::default(),
+            selectedcolor: ColorPair::default(),
+            spotlightcolor: ColorPair { bold: false, italic: false, fg: Some(Color::Black), bg: Some(Color::Yellow) },
+            statuscolor: ColorPair::default(),
+            stripecolor: ColorPair::default(),
+            titlecolor: ColorPair::default(),
+
+            restricted: false,
+            view: false,
+            nowrap: true,
+            ignorercfiles: false,
+            modernbindings: false,
+            stateflags_cli: false,
+            syntax_name: None,
+            rcfile: None,
+        }
+    }
+}
+
+/// Parse a nanorc-style color spec: `[bold,][italic,]fgcolor[,bgcolor]`.
+pub fn parse_color_pair(spec: &str) -> Option<ColorPair> {
+    let mut cp = ColorPair::default();
+    let mut parts: Vec<&str> = spec.split(',').map(|s| s.trim()).collect();
+    parts.retain(|p| !p.is_empty());
+    let mut colors = Vec::new();
+    for p in parts {
+        match p {
+            "bold" => cp.bold = true,
+            "italic" => cp.italic = true,
+            other => colors.push(other),
+        }
+    }
+    if let Some(fg) = colors.first() {
+        cp.fg = parse_color(fg);
+    }
+    if let Some(bg) = colors.get(1) {
+        cp.bg = parse_color(bg);
+    }
+    Some(cp)
+}
+
+fn parse_color(name: &str) -> Option<Color> {
+    let (name, _light) = if let Some(rest) = name.strip_prefix("light") {
+        (rest, true)
+    } else {
+        (name, false)
+    };
+    if let Some(hex) = name.strip_prefix('#') {
+        if hex.len() == 3 {
+            let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
+            let g = u8::from_str_radix(&hex[1..2], 16).ok()? * 17;
+            let b = u8::from_str_radix(&hex[2..3], 16).ok()? * 17;
+            return Some(Color::Rgb(r, g, b));
+        }
+        return None;
+    }
+    Some(match name {
+        "black" | "grey" | "gray" => Color::Black,
+        "red" => Color::Red,
+        "green" => Color::Green,
+        "yellow" => Color::Yellow,
+        "blue" => Color::Blue,
+        "magenta" => Color::Magenta,
+        "cyan" => Color::Cyan,
+        "white" => Color::White,
+        "normal" => Color::Normal,
+        _ => return None,
+    })
+}

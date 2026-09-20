@@ -1,0 +1,647 @@
+//! Terminal rendering and the interactive event loop, built on crossterm.
+//! The on-screen layout (title bar, buffer, status line, two-line shortcut
+//! bar) mirrors GNU nano's, with "tico" shown wherever nano would show its
+//! own name.
+
+use crate::app::{Editor, Mode, Prompt, PromptKind};
+use crate::buffer::Pos;
+use crate::keymap::{Action, Binding, Key as TKey, Menu};
+use crossterm::cursor::{Hide, MoveTo, Show};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::style::{Attribute, Print, SetAttribute};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, size, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
+};
+use crossterm::{execute, queue};
+use std::io::{self, Write};
+use std::time::Duration;
+
+struct RawModeGuard;
+
+impl RawModeGuard {
+    fn new() -> io::Result<RawModeGuard> {
+        enable_raw_mode()?;
+        execute!(io::stdout(), EnterAlternateScreen, Hide)?;
+        Ok(RawModeGuard)
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+        let _ = disable_raw_mode();
+    }
+}
+
+pub fn run(editor: &mut Editor) -> io::Result<()> {
+    let _guard = RawModeGuard::new()?;
+    if let Ok((cols, rows)) = size() {
+        editor.screen_cols = cols as usize;
+        editor.screen_rows = rows as usize;
+    }
+
+    // Full clear happens exactly once (here) and again on resize; every
+    // other render overwrites each row's full width in place, so nothing
+    // ever needs re-blanking (which is what caused the visible flicker:
+    // clearing the whole screen before every redraw, even when idle).
+    execute!(io::stdout(), Clear(ClearType::All))?;
+    render(editor)?;
+
+    loop {
+        if matches!(editor.mode, Mode::Quit) {
+            break;
+        }
+
+        let mut dirty = false;
+
+        if event::poll(Duration::from_millis(600))? {
+            match event::read()? {
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    handle_key(editor, key);
+                    dirty = true;
+                }
+                Event::Resize(cols, rows) => {
+                    editor.screen_cols = cols as usize;
+                    editor.screen_rows = rows as usize;
+                    execute!(io::stdout(), Clear(ClearType::All))?;
+                    dirty = true;
+                }
+                _ => {}
+            }
+        } else if matches!(editor.mode, Mode::Editing) {
+            dirty = maybe_check_external_change(editor);
+        }
+
+        if dirty {
+            render(editor)?;
+        }
+    }
+    Ok(())
+}
+
+/// Returns true if editor state changed (and so needs a redraw).
+fn maybe_check_external_change(editor: &mut Editor) -> bool {
+    use crate::fileio::ExternalChange;
+    match crate::fileio::check_external_change(editor.buf()) {
+        ExternalChange::Unchanged => return false,
+        ExternalChange::ChangedNoLocalEdits => {
+            let _ = crate::fileio::reload(editor.buf_mut());
+            editor.set_status("File reloaded (changed on disk)");
+        }
+        ExternalChange::ChangedWithLocalEdits => {
+            editor.mode = Mode::Prompt(Prompt {
+                kind: PromptKind::ExternalChangeConflict,
+                menu: Menu::YesNo,
+                label: "File changed on disk and you have unsaved edits: [R]eload  [K]eep mine  [M]erge  [C]ancel"
+                    .to_string(),
+                input: String::new(),
+                cursor: 0,
+            });
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------------------
+// Key handling
+// ---------------------------------------------------------------------
+
+fn handle_key(editor: &mut Editor, key: KeyEvent) {
+    match std::mem::replace(&mut editor.mode, Mode::Editing) {
+        Mode::Editing => {
+            editor.mode = Mode::Editing;
+            handle_editing_key(editor, key);
+        }
+        Mode::Help(lines) => {
+            editor.mode = Mode::Help(lines);
+            // Any key closes the help viewer, matching ^X/Cancel/Exit; full
+            // scrolling within the viewer is not yet implemented.
+            editor.mode = Mode::Editing;
+        }
+        Mode::Prompt(prompt) => handle_prompt_key(editor, prompt, key),
+        Mode::Quit => editor.mode = Mode::Quit,
+    }
+}
+
+fn handle_editing_key(editor: &mut Editor, key: KeyEvent) {
+    if let Some(tkey) = normalize_key(key) {
+        if let Some(binding) = editor.keymap.lookup(Menu::Main, tkey).cloned() {
+            apply_binding(editor, binding);
+            return;
+        }
+    }
+    if let KeyCode::Char(c) = key.code {
+        if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+            editor.insert_char(c);
+        }
+    }
+}
+
+fn apply_binding(editor: &mut Editor, binding: Binding) {
+    match binding {
+        Binding::Action(action) => editor.execute(action),
+        Binding::Macro(text) => {
+            // Literal-string bindings; `{function}` substitution is not yet
+            // implemented, so braces are inserted literally.
+            for c in text.chars() {
+                editor.insert_char(c);
+            }
+        }
+    }
+}
+
+fn handle_prompt_key(editor: &mut Editor, mut prompt: Prompt, key: KeyEvent) {
+    // Single-keystroke choice prompts (yes/no/conflict resolution) are
+    // handled directly, without going through the text-editing path.
+    match &prompt.kind {
+        PromptKind::Exit { .. } => return handle_exit_choice(editor, prompt, key),
+        PromptKind::ExternalChangeConflict => return handle_conflict_choice(editor, key),
+        PromptKind::MergeConflict | PromptKind::MergePreviewClean { .. } => {
+            return handle_merge_preview_choice(editor, prompt, key)
+        }
+        _ => {}
+    }
+
+    if let Some(tkey) = normalize_key(key) {
+        if tkey == TKey::Ctrl('C') || matches!(key.code, KeyCode::Esc) {
+            editor.mode = Mode::Editing;
+            editor.set_status("Cancelled");
+            return;
+        }
+        if tkey == TKey::Ctrl('M') {
+            submit_prompt(editor, prompt);
+            return;
+        }
+        if tkey == TKey::Ctrl('H') {
+            if prompt.cursor > 0 {
+                let idx = prompt.input.char_indices().nth(prompt.cursor - 1).map(|(i, _)| i).unwrap_or(0);
+                prompt.input.remove(idx);
+                prompt.cursor -= 1;
+            }
+            editor.mode = Mode::Prompt(prompt);
+            return;
+        }
+        if tkey == TKey::Left {
+            prompt.cursor = prompt.cursor.saturating_sub(1);
+            editor.mode = Mode::Prompt(prompt);
+            return;
+        }
+        if tkey == TKey::Right {
+            prompt.cursor = (prompt.cursor + 1).min(prompt.input.chars().count());
+            editor.mode = Mode::Prompt(prompt);
+            return;
+        }
+    }
+    if let KeyCode::Char(c) = key.code {
+        if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+            let idx = prompt.input.char_indices().nth(prompt.cursor).map(|(i, _)| i).unwrap_or(prompt.input.len());
+            prompt.input.insert(idx, c);
+            prompt.cursor += 1;
+        }
+    }
+    editor.mode = Mode::Prompt(prompt);
+}
+
+fn handle_exit_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {
+    let PromptKind::Exit { .. } = &prompt.kind else { return };
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            editor.mode = Mode::Editing;
+            editor.begin_writeout_for_exit();
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') => {
+            editor.buffers.remove(editor.current);
+            if editor.buffers.is_empty() {
+                editor.mode = Mode::Quit;
+            } else {
+                if editor.current >= editor.buffers.len() {
+                    editor.current = editor.buffers.len() - 1;
+                }
+                editor.mode = Mode::Editing;
+            }
+        }
+        KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
+            editor.mode = Mode::Editing;
+            editor.set_status("Cancelled");
+        }
+        _ => editor.mode = Mode::Prompt(prompt),
+    }
+}
+
+fn handle_conflict_choice(editor: &mut Editor, key: KeyEvent) {
+    match key.code {
+        KeyCode::Char('r') | KeyCode::Char('R') => {
+            let _ = crate::fileio::reload(editor.buf_mut());
+            editor.mode = Mode::Editing;
+            editor.set_status("Reloaded from disk; local edits discarded");
+        }
+        KeyCode::Char('k') | KeyCode::Char('K') => {
+            if let Some(path) = editor.buf().path.clone() {
+                editor.buf_mut().disk_state = crate::fileio::stat_disk_state(&path);
+            }
+            editor.mode = Mode::Editing;
+            editor.set_status("Kept your local edits");
+        }
+        KeyCode::Char('m') | KeyCode::Char('M') => {
+            editor.begin_merge_preview();
+        }
+        KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
+            editor.mode = Mode::Editing;
+        }
+        _ => {}
+    }
+}
+
+fn handle_merge_preview_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {
+    match &prompt.kind {
+        PromptKind::MergeConflict => {
+            // No automatic resolution possible; return to the main conflict
+            // choice so the user can pick reload/keep instead.
+            if matches!(key.code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char(_)) {
+                editor.mode = Mode::Prompt(Prompt {
+                    kind: PromptKind::ExternalChangeConflict,
+                    menu: Menu::YesNo,
+                    label: "Could not merge automatically: [R]eload  [K]eep mine  [C]ancel".to_string(),
+                    input: String::new(),
+                    cursor: 0,
+                });
+            }
+        }
+        PromptKind::MergePreviewClean { merged_text } => match key.code {
+            KeyCode::Char('a') | KeyCode::Char('A') | KeyCode::Enter => {
+                let text = merged_text.clone();
+                editor.buf_mut().rope = ropey::Rope::from_str(&text);
+                editor.buf_mut().modified = true;
+                if let Some(path) = editor.buf().path.clone() {
+                    editor.buf_mut().disk_state = crate::fileio::stat_disk_state(&path);
+                }
+                editor.mode = Mode::Editing;
+                editor.set_status("Merged");
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
+                editor.mode = Mode::Editing;
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+}
+
+fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
+    let text = prompt.input.clone();
+    match prompt.kind {
+        PromptKind::WhereIs => {
+            editor.mode = Mode::Editing;
+            let backwards = editor.search.backwards;
+            editor.run_search(&text, backwards);
+        }
+        PromptKind::Replace1 => {
+            editor.mode = Mode::Prompt(Prompt {
+                kind: PromptKind::Replace2 { search: text },
+                menu: Menu::ReplaceWith,
+                label: "Replace with".to_string(),
+                input: String::new(),
+                cursor: 0,
+            });
+        }
+        PromptKind::Replace2 { search } => {
+            editor.mode = Mode::Editing;
+            editor.do_replace_all(&search, &text);
+        }
+        PromptKind::GotoLine => {
+            editor.mode = Mode::Editing;
+            let (line_s, col_s) = text.split_once(',').unwrap_or((text.as_str(), ""));
+            if let Ok(line) = line_s.trim().parse::<i64>() {
+                let total = editor.buf().line_count() as i64;
+                let target_line = if line < 0 { (total + line).max(0) } else { (line - 1).max(0) };
+                let col = col_s.trim().parse::<i64>().unwrap_or(1).max(1) as usize - 1;
+                editor.buf_mut().cursor = Pos::new(target_line as usize, col);
+            }
+        }
+        PromptKind::WriteOut { exiting } => {
+            editor.mode = Mode::Editing;
+            let path = std::path::PathBuf::from(text);
+            match crate::fileio::save_file(editor.buf_mut(), &path) {
+                Ok(()) => {
+                    editor.set_status(format!("Wrote {}", path.display()));
+                    if exiting {
+                        editor.buffers.remove(editor.current);
+                        if editor.buffers.is_empty() {
+                            editor.mode = Mode::Quit;
+                        } else if editor.current >= editor.buffers.len() {
+                            editor.current = editor.buffers.len() - 1;
+                        }
+                    }
+                }
+                Err(e) => editor.set_status(format!("Error writing file: {e}")),
+            }
+        }
+        _ => {
+            editor.mode = Mode::Editing;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Crossterm key normalization
+// ---------------------------------------------------------------------
+
+fn normalize_key(key: KeyEvent) -> Option<TKey> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+    match key.code {
+        KeyCode::Backspace => Some(TKey::Ctrl('H')),
+        KeyCode::Tab => Some(TKey::Ctrl('I')),
+        KeyCode::BackTab => Some(TKey::ShiftTab),
+        KeyCode::Enter => Some(TKey::Ctrl('M')),
+        KeyCode::Esc => None,
+        KeyCode::Left if ctrl => Some(TKey::CtrlLeft),
+        KeyCode::Right if ctrl => Some(TKey::CtrlRight),
+        KeyCode::Up if ctrl => Some(TKey::CtrlUp),
+        KeyCode::Down if ctrl => Some(TKey::CtrlDown),
+        KeyCode::Left if alt => Some(TKey::MetaLeft),
+        KeyCode::Right if alt => Some(TKey::MetaRight),
+        KeyCode::Up if alt => Some(TKey::MetaUp),
+        KeyCode::Down if alt => Some(TKey::MetaDown),
+        KeyCode::Left => Some(TKey::Left),
+        KeyCode::Right => Some(TKey::Right),
+        KeyCode::Up => Some(TKey::Up),
+        KeyCode::Down => Some(TKey::Down),
+        KeyCode::Home if ctrl => Some(TKey::CtrlHome),
+        KeyCode::End if ctrl => Some(TKey::CtrlEnd),
+        KeyCode::Home if alt => Some(TKey::MetaHome),
+        KeyCode::End if alt => Some(TKey::MetaEnd),
+        KeyCode::Home => Some(TKey::Home),
+        KeyCode::End => Some(TKey::End),
+        KeyCode::PageUp if alt => Some(TKey::MetaPgUp),
+        KeyCode::PageDown if alt => Some(TKey::MetaPgDn),
+        KeyCode::PageUp => Some(TKey::PageUp),
+        KeyCode::PageDown => Some(TKey::PageDown),
+        KeyCode::Delete if ctrl && shift => Some(TKey::ShiftCtrlDel),
+        KeyCode::Delete if ctrl => Some(TKey::CtrlDel),
+        KeyCode::Delete if alt => Some(TKey::MetaDel),
+        KeyCode::Delete => Some(TKey::Ctrl('D')),
+        KeyCode::Insert if alt => Some(TKey::MetaIns),
+        KeyCode::Insert => Some(TKey::Ins),
+        KeyCode::F(n) => Some(TKey::F(n)),
+        KeyCode::Char(c) if ctrl => {
+            let up = c.to_ascii_uppercase();
+            Some(TKey::Ctrl(up))
+        }
+        KeyCode::Char(c) if alt && shift && c.is_ascii_alphabetic() => Some(TKey::ShiftMeta(c.to_ascii_uppercase())),
+        KeyCode::Char(c) if alt => Some(TKey::Meta(c)),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------
+
+fn render(editor: &Editor) -> io::Result<()> {
+    // No full-screen Clear here: every row below is redrawn at its full
+    // width, so nothing needs re-blanking first (a per-frame Clear was the
+    // cause of visible flicker). The screen is cleared once at startup and
+    // again on resize, in `run()`.
+    let mut out = io::stdout();
+
+    let cols = editor.screen_cols;
+    let rows = editor.screen_rows;
+    if editor.options.zero {
+        render_buffer(editor, &mut out, 0, rows)?;
+        return finish_cursor(editor, &mut out, 0);
+    }
+
+    queue!(out, MoveTo(0, 0))?;
+    render_title_bar(editor, &mut out, cols)?;
+
+    let help_rows = if editor.options.nohelp { 0 } else { 2 };
+    let text_start_row = 1u16;
+    let text_rows = rows.saturating_sub(2 + help_rows);
+    render_buffer(editor, &mut out, text_start_row, text_rows)?;
+
+    let status_row = text_start_row + text_rows as u16;
+    render_status_line(editor, &mut out, status_row, cols)?;
+
+    if help_rows > 0 {
+        render_shortcut_bar(&mut out, status_row + 1, cols)?;
+    }
+
+    finish_cursor(editor, &mut out, text_start_row)?;
+    out.flush()
+}
+
+fn finish_cursor(editor: &Editor, out: &mut impl Write, text_start_row: u16) -> io::Result<()> {
+    if let Mode::Prompt(prompt) = &editor.mode {
+        let row = editor.screen_rows.saturating_sub(if editor.options.nohelp { 1 } else { 3 });
+        let col = prompt.label.chars().count() + 2 + prompt.cursor;
+        queue!(out, MoveTo(col.min(editor.screen_cols.saturating_sub(1)) as u16, row as u16), Show)?;
+    } else {
+        let buf = editor.buf();
+        let screen_line = buf.cursor.line.saturating_sub(buf.top_line);
+        let gutter = line_number_gutter_width(editor);
+        let col = gutter + display_width(&buf.line(buf.cursor.line), buf.cursor.col, editor.options.tabsize as usize);
+        queue!(
+            out,
+            MoveTo(col.min(editor.screen_cols.saturating_sub(1)) as u16, (text_start_row as usize + screen_line) as u16),
+            Show
+        )?;
+    }
+    Ok(())
+}
+
+fn line_number_gutter_width(editor: &Editor) -> usize {
+    if !editor.options.linenumbers {
+        return 0;
+    }
+    let digits = editor.buf().line_count().to_string().len();
+    digits + 1
+}
+
+fn display_width(line: &str, up_to_col: usize, tabsize: usize) -> usize {
+    let mut w = 0;
+    for (i, c) in line.chars().enumerate() {
+        if i >= up_to_col {
+            break;
+        }
+        if c == '\t' {
+            w += tabsize - (w % tabsize);
+        } else {
+            w += unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
+        }
+    }
+    w
+}
+
+fn render_title_bar(editor: &Editor, out: &mut impl Write, cols: usize) -> io::Result<()> {
+    let version = env!("CARGO_PKG_VERSION");
+    let left = format!("  tico {version}");
+    let name = editor
+        .buf()
+        .path
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "New Buffer".to_string());
+    let modified = if editor.buf().modified { " *" } else { "" };
+    let mut center_text = format!("{name}{modified}");
+
+    // Reserve space for the left prefix (plus one column of separation on
+    // each side); if the filename doesn't fit, truncate it, keeping the
+    // tail (the most identifying part of a long path) and prefixing "...".
+    let left_w = left.chars().count();
+    let available = cols.saturating_sub(left_w + 2);
+    if center_text.chars().count() > available {
+        if available > 3 {
+            let tail: String = center_text
+                .chars()
+                .rev()
+                .take(available - 3)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            center_text = format!("...{tail}");
+        } else {
+            center_text.clear();
+        }
+    }
+
+    let mut line = vec![' '; cols];
+    for (i, c) in left.chars().enumerate() {
+        if i < cols {
+            line[i] = c;
+        }
+    }
+    let start = (cols.saturating_sub(center_text.chars().count()) / 2).max(left_w + 1);
+    for (i, c) in center_text.chars().enumerate() {
+        if start + i < cols {
+            line[start + i] = c;
+        }
+    }
+    let s: String = line.into_iter().collect();
+    queue!(out, SetAttribute(Attribute::Reverse), Print(s), SetAttribute(Attribute::Reset))
+}
+
+fn render_status_line(editor: &Editor, out: &mut impl Write, row: u16, cols: usize) -> io::Result<()> {
+    queue!(out, MoveTo(0, row))?;
+    if let Mode::Prompt(prompt) = &editor.mode {
+        let text = format!("{}: {}", prompt.label, prompt.input);
+        let mut s: String = text.chars().take(cols).collect();
+        while s.chars().count() < cols {
+            s.push(' ');
+        }
+        queue!(out, Print(s))
+    } else if let Some(msg) = &editor.status {
+        let bracketed = format!("[ {msg} ]");
+        let pad = cols.saturating_sub(bracketed.chars().count()) / 2;
+        let mut s = String::new();
+        for _ in 0..pad {
+            s.push(' ');
+        }
+        s.push_str(&bracketed);
+        while s.chars().count() < cols {
+            s.push(' ');
+        }
+        let s: String = s.chars().take(cols).collect();
+        queue!(out, Print(s))
+    } else {
+        queue!(out, Print(" ".repeat(cols)))
+    }
+}
+
+/// The default main-menu shortcut priority list, in the exact order GNU
+/// nano 8.7.1 lays them out (captured directly from the installed binary),
+/// as (key label, description) pairs, filled two rows at a time into as
+/// many columns as fit the terminal width.
+const SHORTCUT_PRIORITY: &[(&str, &str)] = &[
+    ("^G", "Help"),
+    ("^X", "Exit"),
+    ("^O", "Write Out"),
+    ("^R", "Read File"),
+    ("^F", "Where Is"),
+    ("^\\", "Replace"),
+    ("^K", "Cut"),
+    ("^U", "Paste"),
+    ("^T", "Execute"),
+    ("^J", "Justify"),
+    ("^C", "Location"),
+    ("^/", "Go To Line"),
+    ("M-U", "Undo"),
+    ("M-E", "Redo"),
+    ("M-A", "Set Mark"),
+    ("M-6", "Copy"),
+    ("M-]", "To Bracket"),
+    ("^B", "Where Was"),
+    ("M-B", "Previous"),
+    ("M-F", "Next"),
+];
+
+fn render_shortcut_bar(out: &mut impl Write, row: u16, cols: usize) -> io::Result<()> {
+    let entries = SHORTCUT_PRIORITY;
+    let max_label = entries.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(2);
+    let max_desc = entries.iter().map(|(_, d)| d.chars().count()).max().unwrap_or(4);
+    let col_width = max_label + 1 + max_desc + 2;
+    let n_cols = (cols / col_width).max(1);
+    let n_pairs = n_cols.min(entries.len().div_ceil(2));
+
+    for r in 0..2u16 {
+        queue!(out, MoveTo(0, row + r))?;
+        let mut line = String::new();
+        for c in 0..n_pairs {
+            let idx = c * 2 + r as usize;
+            let cell = if let Some((key, desc)) = entries.get(idx) {
+                format!("{key:<lw$} {desc:<dw$}", lw = max_label, dw = max_desc)
+            } else {
+                " ".repeat(col_width.saturating_sub(2))
+            };
+            line.push_str(&cell);
+            line.push_str("  ");
+        }
+        let line: String = line.chars().take(cols).collect();
+        queue!(out, Print(format!("{line:<cols$}", cols = cols)))?;
+    }
+    Ok(())
+}
+
+fn render_buffer(editor: &Editor, out: &mut impl Write, start_row: u16, rows: usize) -> io::Result<()> {
+    let buf = editor.buf();
+    let gutter = line_number_gutter_width(editor);
+    let cols = editor.screen_cols;
+    for r in 0..rows {
+        queue!(out, MoveTo(0, start_row + r as u16))?;
+        let line_idx = buf.top_line + r;
+        let mut rendered = String::new();
+        if line_idx < buf.line_count() {
+            if gutter > 0 {
+                rendered.push_str(&format!("{:>width$} ", line_idx + 1, width = gutter - 1));
+            }
+            let raw = buf.line(line_idx);
+            rendered.push_str(&expand_tabs(&raw, editor.options.tabsize as usize));
+        } else if gutter > 0 {
+            rendered.push('~');
+        }
+        let rendered: String = rendered.chars().take(cols).collect();
+        queue!(out, Print(format!("{rendered:<cols$}", cols = cols)))?;
+    }
+    Ok(())
+}
+
+fn expand_tabs(line: &str, tabsize: usize) -> String {
+    let mut out = String::new();
+    let mut w = 0;
+    for c in line.chars() {
+        if c == '\t' {
+            let n = tabsize - (w % tabsize);
+            for _ in 0..n {
+                out.push(' ');
+            }
+            w += n;
+        } else {
+            out.push(c);
+            w += unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
+        }
+    }
+    out
+}

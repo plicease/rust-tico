@@ -1,0 +1,692 @@
+//! Key bindings: the set of rebindable editor functions ("actions"), the menus
+//! they apply to, and the table mapping keystrokes to actions per menu.
+//!
+//! The function names, menu names and default bindings mirror those of GNU
+//! nano 8.7.1 (see `nanorc(5)` and nano's built-in help), so that `~/.nanorc`
+//! and `~/.ticorc` `bind`/`unbind` directives written for nano work unchanged.
+
+use std::collections::HashMap;
+
+/// A rebindable editor function, matching nano's `bind`/`unbind` function names
+/// verbatim (see `nanorc(5)`, section "REBINDING KEYS").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Action {
+    Help,
+    Cancel,
+    Exit,
+    WriteOut,
+    SaveFile,
+    Insert,
+    WhereIs,
+    WhereWas,
+    FindPrevious,
+    FindNext,
+    Replace,
+    Cut,
+    Copy,
+    Paste,
+    Zap,
+    ChopWordLeft,
+    ChopWordRight,
+    CutRestOfFile,
+    Mark,
+    Location,
+    WordCount,
+    Execute,
+    Speller,
+    Formatter,
+    Linter,
+    Justify,
+    FullJustify,
+    Indent,
+    Unindent,
+    Comment,
+    Complete,
+    Left,
+    Right,
+    Up,
+    Down,
+    ScrollUp,
+    ScrollDown,
+    Center,
+    Cycle,
+    PrevWord,
+    NextWord,
+    Home,
+    End,
+    BeginPara,
+    EndPara,
+    PrevBlock,
+    NextBlock,
+    TopRow,
+    BottomRow,
+    PageUp,
+    PageDown,
+    FirstLine,
+    LastLine,
+    GotoLine,
+    FindBracket,
+    Anchor,
+    PrevAnchor,
+    NextAnchor,
+    PrevBuf,
+    NextBuf,
+    Verbatim,
+    Tab,
+    Enter,
+    Delete,
+    Backspace,
+    RecordMacro,
+    RunMacro,
+    Undo,
+    Redo,
+    Refresh,
+    Suspend,
+    CaseSens,
+    Regexp,
+    Backwards,
+    Older,
+    Newer,
+    FlipReplace,
+    FlipGoto,
+    FlipExecute,
+    FlipPipe,
+    FlipNewBuffer,
+    FlipConvert,
+    DosFormat,
+    MacFormat,
+    Append,
+    Prepend,
+    Backup,
+    DiscardBuffer,
+    Browser,
+    GotoDir,
+    FirstFile,
+    LastFile,
+    NoHelp,
+    Zero,
+    ConstantShow,
+    SoftWrap,
+    LineNumbers,
+    WhitespaceDisplay,
+    NoSyntax,
+    SmartHome,
+    AutoIndent,
+    CutFromCursor,
+    BreakLongLines,
+    TabsToSpaces,
+    Mouse,
+    // Internal-only actions not exposed as nano `bind` function names but
+    // reachable via a hardcoded default key (nano does not document a name
+    // for these; they cannot be rebound by name).
+    ScrollLeft,
+    ScrollRight,
+}
+
+impl Action {
+    /// Parse a nano `bind`/`unbind` function name (lowercase, as written in
+    /// nanorc files) into an [`Action`].
+    pub fn from_name(name: &str) -> Option<Action> {
+        use Action::*;
+        Some(match name {
+            "help" => Help,
+            "cancel" => Cancel,
+            "exit" => Exit,
+            "writeout" => WriteOut,
+            "savefile" => SaveFile,
+            "insert" => Insert,
+            "whereis" => WhereIs,
+            "wherewas" => WhereWas,
+            "findprevious" => FindPrevious,
+            "findnext" => FindNext,
+            "replace" => Replace,
+            "cut" => Cut,
+            "copy" => Copy,
+            "paste" => Paste,
+            "zap" => Zap,
+            "chopwordleft" => ChopWordLeft,
+            "chopwordright" => ChopWordRight,
+            "cutrestoffile" => CutRestOfFile,
+            "mark" => Mark,
+            "location" => Location,
+            "wordcount" => WordCount,
+            "execute" => Execute,
+            "speller" => Speller,
+            "formatter" => Formatter,
+            "linter" => Linter,
+            "justify" => Justify,
+            "fulljustify" => FullJustify,
+            "indent" => Indent,
+            "unindent" => Unindent,
+            "comment" => Comment,
+            "complete" => Complete,
+            "left" => Left,
+            "right" => Right,
+            "up" => Up,
+            "down" => Down,
+            "scrollup" => ScrollUp,
+            "scrolldown" => ScrollDown,
+            "center" => Center,
+            "cycle" => Cycle,
+            "prevword" => PrevWord,
+            "nextword" => NextWord,
+            "home" => Home,
+            "end" => End,
+            "beginpara" => BeginPara,
+            "endpara" => EndPara,
+            "prevblock" => PrevBlock,
+            "nextblock" => NextBlock,
+            "toprow" => TopRow,
+            "bottomrow" => BottomRow,
+            "pageup" => PageUp,
+            "pagedown" => PageDown,
+            "firstline" => FirstLine,
+            "lastline" => LastLine,
+            "gotoline" => GotoLine,
+            "findbracket" => FindBracket,
+            "anchor" => Anchor,
+            "prevanchor" => PrevAnchor,
+            "nextanchor" => NextAnchor,
+            "prevbuf" => PrevBuf,
+            "nextbuf" => NextBuf,
+            "verbatim" => Verbatim,
+            "tab" => Tab,
+            "enter" => Enter,
+            "delete" => Delete,
+            "backspace" => Backspace,
+            "recordmacro" => RecordMacro,
+            "runmacro" => RunMacro,
+            "undo" => Undo,
+            "redo" => Redo,
+            "refresh" => Refresh,
+            "suspend" => Suspend,
+            "casesens" => CaseSens,
+            "regexp" => Regexp,
+            "backwards" => Backwards,
+            "older" => Older,
+            "newer" => Newer,
+            "flipreplace" => FlipReplace,
+            "flipgoto" => FlipGoto,
+            "flipexecute" => FlipExecute,
+            "flippipe" => FlipPipe,
+            "flipnewbuffer" => FlipNewBuffer,
+            "flipconvert" => FlipConvert,
+            "dosformat" => DosFormat,
+            "macformat" => MacFormat,
+            "append" => Append,
+            "prepend" => Prepend,
+            "backup" => Backup,
+            "discardbuffer" => DiscardBuffer,
+            "browser" => Browser,
+            "gotodir" => GotoDir,
+            "firstfile" => FirstFile,
+            "lastfile" => LastFile,
+            "nohelp" => NoHelp,
+            "zero" => Zero,
+            "constantshow" => ConstantShow,
+            "softwrap" => SoftWrap,
+            "linenumbers" => LineNumbers,
+            "whitespacedisplay" => WhitespaceDisplay,
+            "nosyntax" => NoSyntax,
+            "smarthome" => SmartHome,
+            "autoindent" => AutoIndent,
+            "cutfromcursor" => CutFromCursor,
+            "breaklonglines" => BreakLongLines,
+            "tabstospaces" => TabsToSpaces,
+            "mouse" => Mouse,
+            _ => return None,
+        })
+    }
+}
+
+/// The menu (keystroke context) a binding applies to, matching nano's menu
+/// names from `nanorc(5)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Menu {
+    Main,
+    Help,
+    Search,
+    Replace,
+    ReplaceWith,
+    YesNo,
+    GotoLine,
+    WriteOut,
+    Insert,
+    Browser,
+    WhereIsFile,
+    GotoDir,
+    Execute,
+    Spell,
+    Linter,
+}
+
+impl Menu {
+    pub fn from_name(name: &str) -> Option<Menu> {
+        use Menu::*;
+        Some(match name {
+            "main" => Main,
+            "help" => Help,
+            "search" => Search,
+            "replace" => Replace,
+            "replacewith" => ReplaceWith,
+            "yesno" => YesNo,
+            "gotoline" => GotoLine,
+            "writeout" => WriteOut,
+            "insert" => Insert,
+            "browser" => Browser,
+            "whereisfile" => WhereIsFile,
+            "gotodir" => GotoDir,
+            "execute" => Execute,
+            "spell" => Spell,
+            "linter" => Linter,
+            _ => return None,
+        })
+    }
+
+    pub const ALL: &'static [Menu] = &[
+        Menu::Main,
+        Menu::Help,
+        Menu::Search,
+        Menu::Replace,
+        Menu::ReplaceWith,
+        Menu::YesNo,
+        Menu::GotoLine,
+        Menu::WriteOut,
+        Menu::Insert,
+        Menu::Browser,
+        Menu::WhereIsFile,
+        Menu::GotoDir,
+        Menu::Execute,
+        Menu::Spell,
+        Menu::Linter,
+    ];
+}
+
+/// A single keystroke, normalized from terminal input. Covers both the
+/// rebindable keys (Ctrl/Meta/Shift-Meta/function keys/Ins/Del) described in
+/// `nanorc(5)`'s "REBINDING KEYS" section, and the dedicated cursor-moving
+/// keys which nano documents as *not* rebindable, but which we still route
+/// through the same dispatch table (config code refuses to rebind them, to
+/// match nano's documented behavior).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Key {
+    /// Ctrl+X. `ch` is the uppercase letter, or one of `@ ] \ ^ _`, or `' '`
+    /// for the word "Space".
+    Ctrl(char),
+    /// Meta (Alt)+X. `ch` is any ASCII character except `[`, or `' '` for Space.
+    Meta(char),
+    /// Shift+Meta+letter.
+    ShiftMeta(char),
+    /// Function key F1..F24.
+    F(u8),
+    Ins,
+    Del,
+    ShiftTab,
+    // Dedicated, non-rebindable navigation keys.
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    CtrlLeft,
+    CtrlRight,
+    CtrlUp,
+    CtrlDown,
+    CtrlHome,
+    CtrlEnd,
+    CtrlDel,
+    ShiftCtrlDel,
+    MetaLeft,
+    MetaRight,
+    MetaUp,
+    MetaDown,
+    MetaHome,
+    MetaEnd,
+    MetaPgUp,
+    MetaPgDn,
+    MetaIns,
+    MetaDel,
+}
+
+/// Keys that nano documents as not being reassignable via `bind`/`unbind`.
+pub fn is_rebindable(key: &Key) -> bool {
+    !matches!(
+        key,
+        Key::Left
+            | Key::Right
+            | Key::Up
+            | Key::Down
+            | Key::Home
+            | Key::End
+            | Key::PageUp
+            | Key::PageDown
+    )
+}
+
+impl Key {
+    /// Parse a key specification as written in a nanorc `bind`/`unbind` line:
+    /// `^X`, `M-X`, `Sh-M-X`, `FN` (F1..F24), `Ins`, or `Del`.
+    pub fn parse(spec: &str) -> Option<Key> {
+        if spec.eq_ignore_ascii_case("ins") {
+            return Some(Key::Ins);
+        }
+        if spec.eq_ignore_ascii_case("del") {
+            return Some(Key::Del);
+        }
+        if let Some(rest) = spec.strip_prefix("F").or_else(|| spec.strip_prefix('f')) {
+            if let Ok(n) = rest.parse::<u8>() {
+                if (1..=24).contains(&n) {
+                    return Some(Key::F(n));
+                }
+            }
+        }
+        if let Some(rest) = spec.strip_prefix("Sh-M-").or_else(|| spec.strip_prefix("sh-m-")) {
+            let ch = normalize_letter(rest)?;
+            return Some(Key::ShiftMeta(ch));
+        }
+        if let Some(rest) = spec.strip_prefix("M-").or_else(|| spec.strip_prefix("m-")) {
+            let ch = normalize_meta_char(rest)?;
+            return Some(Key::Meta(ch));
+        }
+        if let Some(rest) = spec.strip_prefix('^') {
+            let ch = normalize_ctrl_char(rest)?;
+            return Some(Key::Ctrl(ch));
+        }
+        None
+    }
+}
+
+fn normalize_letter(rest: &str) -> Option<char> {
+    let mut chars = rest.chars();
+    let c = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    if c.is_ascii_alphabetic() {
+        Some(c.to_ascii_uppercase())
+    } else {
+        None
+    }
+}
+
+fn normalize_ctrl_char(rest: &str) -> Option<char> {
+    if rest.eq_ignore_ascii_case("space") {
+        return Some(' ');
+    }
+    let mut chars = rest.chars();
+    let c = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    if c.is_ascii_alphabetic() {
+        Some(c.to_ascii_uppercase())
+    } else if matches!(c, '@' | ']' | '\\' | '^' | '_') {
+        Some(c)
+    } else {
+        None
+    }
+}
+
+fn normalize_meta_char(rest: &str) -> Option<char> {
+    if rest.eq_ignore_ascii_case("space") {
+        return Some(' ');
+    }
+    let mut chars = rest.chars();
+    let c = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    if c == '[' {
+        None
+    } else {
+        Some(c)
+    }
+}
+
+/// A binding target: either an [`Action`], or a literal string to type
+/// (nano's `bind key "string" menu` form), which may itself reference
+/// actions by name in `{braces}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Binding {
+    Action(Action),
+    Macro(String),
+}
+
+/// The full key-binding table: (menu, key) -> binding, built from nano's
+/// defaults and then overridden by `bind`/`unbind` directives from
+/// `~/.nanorc` and `~/.ticorc`, in that precedence order.
+#[derive(Debug, Clone, Default)]
+pub struct KeyMap {
+    table: HashMap<(Menu, Key), Binding>,
+}
+
+impl KeyMap {
+    pub fn new() -> KeyMap {
+        KeyMap { table: HashMap::new() }
+    }
+
+    pub fn bind(&mut self, menu: Menu, key: Key, binding: Binding) {
+        self.table.insert((menu, key), binding);
+    }
+
+    pub fn bind_all_menus(&mut self, menus: &[Menu], key: Key, binding: Binding) {
+        for &menu in menus {
+            self.bind(menu, key, binding.clone());
+        }
+    }
+
+    pub fn unbind(&mut self, menu: Menu, key: Key) {
+        self.table.remove(&(menu, key));
+    }
+
+    pub fn unbind_all_menus(&mut self, key: Key) {
+        for &menu in Menu::ALL {
+            self.unbind(menu, key);
+        }
+    }
+
+    /// Look up a key, falling back to the [`Menu::Main`] binding for menus
+    /// that don't have their own entry for a given key (mirrors nano's
+    /// "all menus" semantics for many global keys like ^C=cancel, arrows, etc).
+    pub fn lookup(&self, menu: Menu, key: Key) -> Option<&Binding> {
+        self.table
+            .get(&(menu, key))
+            .or_else(|| self.table.get(&(Menu::Main, key)))
+    }
+
+    /// Build the default keybinding table, matching GNU nano 8.7.1's
+    /// compiled-in defaults for the main editing menu (captured directly
+    /// from the running `nano` binary's help viewer), plus conventional
+    /// bindings for the prompt/list menus.
+    pub fn defaults() -> KeyMap {
+        let mut km = KeyMap::new();
+        km.install_main_defaults();
+        km.install_prompt_defaults();
+        km
+    }
+
+    fn install_main_defaults(&mut self) {
+        use Action as A;
+        use Key as K;
+        let m = Menu::Main;
+        let mut b = |k: Key, a: Action| self.bind(m, k, Binding::Action(a));
+
+        b(K::Ctrl('G'), A::Help);
+        b(K::F(1), A::Help);
+        b(K::Ctrl('X'), A::Exit);
+        b(K::F(2), A::Exit);
+        b(K::Ctrl('O'), A::WriteOut);
+        b(K::F(3), A::WriteOut);
+        b(K::Ctrl('R'), A::Insert);
+        b(K::Ins, A::Insert);
+        b(K::Ctrl('F'), A::WhereIs);
+        b(K::Ctrl('W'), A::WhereIs);
+        b(K::F(6), A::WhereIs);
+        b(K::Ctrl('B'), A::WhereWas);
+        b(K::Ctrl('Q'), A::WhereWas);
+        b(K::Meta('B'), A::FindPrevious);
+        b(K::Meta('Q'), A::FindPrevious);
+        b(K::Meta('F'), A::FindNext);
+        b(K::Meta('W'), A::FindNext);
+        b(K::Ctrl('\\'), A::Replace);
+        b(K::Meta('R'), A::Replace);
+        b(K::Ctrl('K'), A::Cut);
+        b(K::F(9), A::Cut);
+        b(K::Ctrl('U'), A::Paste);
+        b(K::F(10), A::Paste);
+        b(K::Meta('T'), A::CutRestOfFile);
+        b(K::Meta('6'), A::Copy);
+        b(K::Meta('^'), A::Copy);
+        b(K::MetaDel, A::Zap);
+        b(K::ShiftCtrlDel, A::ChopWordLeft);
+        b(K::CtrlDel, A::ChopWordRight);
+        b(K::Ctrl('T'), A::Execute);
+        b(K::F(12), A::Speller);
+        b(K::Ctrl('J'), A::Justify);
+        b(K::F(4), A::Justify);
+        b(K::Meta('J'), A::FullJustify);
+        b(K::Meta('}'), A::Indent);
+        b(K::Meta('{'), A::Unindent);
+        b(K::ShiftTab, A::Unindent);
+        b(K::Meta('3'), A::Comment);
+        b(K::Ctrl(']'), A::Complete);
+        b(K::Left, A::Left);
+        b(K::Right, A::Right);
+        b(K::Up, A::Up);
+        b(K::Down, A::Down);
+        b(K::Ctrl('P'), A::Up);
+        b(K::Ctrl('N'), A::Down);
+        b(K::Meta('-'), A::ScrollUp);
+        b(K::Meta('_'), A::ScrollUp);
+        b(K::MetaUp, A::ScrollUp);
+        b(K::Meta('+'), A::ScrollDown);
+        b(K::Meta('='), A::ScrollDown);
+        b(K::MetaDown, A::ScrollDown);
+        b(K::Ctrl('L'), A::Center);
+        b(K::Meta('%'), A::Cycle);
+        b(K::CtrlLeft, A::PrevWord);
+        b(K::Meta(' '), A::PrevWord);
+        b(K::CtrlRight, A::NextWord);
+        b(K::Ctrl(' '), A::NextWord);
+        b(K::Ctrl('A'), A::Home);
+        b(K::Home, A::Home);
+        b(K::Ctrl('E'), A::End);
+        b(K::End, A::End);
+        b(K::Meta('('), A::BeginPara);
+        b(K::Meta('9'), A::BeginPara);
+        b(K::Meta(')'), A::EndPara);
+        b(K::Meta('0'), A::EndPara);
+        b(K::CtrlUp, A::PrevBlock);
+        b(K::Meta('7'), A::PrevBlock);
+        b(K::CtrlDown, A::NextBlock);
+        b(K::Meta('8'), A::NextBlock);
+        b(K::MetaHome, A::TopRow);
+        b(K::MetaEnd, A::BottomRow);
+        b(K::Ctrl('Y'), A::PageUp);
+        b(K::PageUp, A::PageUp);
+        b(K::Ctrl('V'), A::PageDown);
+        b(K::PageDown, A::PageDown);
+        b(K::Meta('\\'), A::FirstLine);
+        b(K::CtrlHome, A::FirstLine);
+        b(K::Meta('/'), A::LastLine);
+        b(K::CtrlEnd, A::LastLine);
+        b(K::Ctrl('_'), A::GotoLine);
+        b(K::Meta('G'), A::GotoLine);
+        b(K::Meta(']'), A::FindBracket);
+        b(K::Meta('"'), A::Anchor);
+        b(K::MetaIns, A::Anchor);
+        b(K::MetaPgUp, A::PrevAnchor);
+        b(K::MetaPgDn, A::NextAnchor);
+        b(K::Meta('\''), A::NextAnchor);
+        b(K::MetaLeft, A::PrevBuf);
+        b(K::Meta(','), A::PrevBuf);
+        b(K::MetaRight, A::NextBuf);
+        b(K::Meta('.'), A::NextBuf);
+        b(K::Meta('V'), A::Verbatim);
+        b(K::Ctrl('I'), A::Tab);
+        b(K::Ctrl('M'), A::Enter);
+        b(K::Ctrl('D'), A::Delete);
+        b(K::Ctrl('H'), A::Backspace);
+        b(K::Meta(':'), A::RecordMacro);
+        b(K::Meta(';'), A::RunMacro);
+        b(K::Meta('U'), A::Undo);
+        b(K::Meta('E'), A::Redo);
+        b(K::Ctrl('S'), A::SaveFile);
+        b(K::Ctrl('C'), A::Location);
+        b(K::F(11), A::Location);
+        b(K::Meta('D'), A::WordCount);
+        b(K::Meta('<'), A::ScrollLeft);
+        b(K::Meta('>'), A::ScrollRight);
+        b(K::Meta('Z'), A::Zero);
+        b(K::Meta('X'), A::NoHelp);
+        b(K::Meta('C'), A::ConstantShow);
+        b(K::Meta('S'), A::SoftWrap);
+        b(K::Meta('N'), A::LineNumbers);
+        b(K::Meta('P'), A::WhitespaceDisplay);
+        b(K::Meta('Y'), A::NoSyntax);
+        b(K::Meta('H'), A::SmartHome);
+        b(K::Meta('I'), A::AutoIndent);
+        b(K::Meta('K'), A::CutFromCursor);
+        b(K::Meta('L'), A::BreakLongLines);
+        b(K::Meta('O'), A::TabsToSpaces);
+        b(K::Meta('M'), A::Mouse);
+    }
+
+    fn install_prompt_defaults(&mut self) {
+        use Action as A;
+        use Key as K;
+        // Bindings that make sense (and are standard in nano) across every
+        // prompt/list menu: Cancel, and basic line editing on the prompt.
+        for &menu in Menu::ALL {
+            if menu == Menu::Main {
+                continue;
+            }
+            self.bind(menu, K::Ctrl('C'), Binding::Action(A::Cancel));
+            self.bind(menu, K::Ctrl('G'), Binding::Action(A::Help));
+            self.bind(menu, K::Left, Binding::Action(A::Left));
+            self.bind(menu, K::Right, Binding::Action(A::Right));
+            self.bind(menu, K::Home, Binding::Action(A::Home));
+            self.bind(menu, K::End, Binding::Action(A::End));
+            self.bind(menu, K::Ctrl('H'), Binding::Action(A::Backspace));
+            self.bind(menu, K::Ctrl('D'), Binding::Action(A::Delete));
+        }
+        self.bind(Menu::Search, K::Ctrl('M'), Binding::Action(A::WhereIs));
+        self.bind(Menu::Search, K::Ctrl('R'), Binding::Action(A::FlipReplace));
+        self.bind(Menu::Search, K::Ctrl('Y'), Binding::Action(A::Older));
+        self.bind(Menu::Search, K::Ctrl('T'), Binding::Action(A::Newer));
+        self.bind(Menu::Search, K::Meta('C'), Binding::Action(A::CaseSens));
+        self.bind(Menu::Search, K::Meta('R'), Binding::Action(A::Regexp));
+        self.bind(Menu::Search, K::Meta('B'), Binding::Action(A::Backwards));
+
+        self.bind(Menu::Replace, K::Ctrl('M'), Binding::Action(A::Replace));
+        self.bind(Menu::ReplaceWith, K::Ctrl('M'), Binding::Action(A::Replace));
+
+        self.bind(Menu::GotoLine, K::Ctrl('M'), Binding::Action(A::GotoLine));
+        self.bind(Menu::GotoLine, K::Meta('T'), Binding::Action(A::FlipGoto));
+
+        // 'Y'es/'N'o/'A'll at yesno prompts are handled specially by the
+        // prompt code (they read the literal character), not via the keymap.
+
+        self.bind(Menu::WriteOut, K::Ctrl('M'), Binding::Action(A::WriteOut));
+        self.bind(Menu::WriteOut, K::Meta('D'), Binding::Action(A::DosFormat));
+        self.bind(Menu::WriteOut, K::Meta('M'), Binding::Action(A::MacFormat));
+        self.bind(Menu::WriteOut, K::Meta('A'), Binding::Action(A::Append));
+        self.bind(Menu::WriteOut, K::Meta('P'), Binding::Action(A::Prepend));
+        self.bind(Menu::WriteOut, K::Meta('B'), Binding::Action(A::Backup));
+
+        self.bind(Menu::Insert, K::Ctrl('M'), Binding::Action(A::Insert));
+        self.bind(Menu::Insert, K::Meta('F'), Binding::Action(A::FlipNewBuffer));
+        self.bind(Menu::Insert, K::Meta('E'), Binding::Action(A::FlipExecute));
+
+        self.bind(Menu::Execute, K::Ctrl('M'), Binding::Action(A::Execute));
+        self.bind(Menu::Execute, K::Ctrl('G'), Binding::Action(A::Help));
+
+        self.bind(Menu::Linter, K::Ctrl('C'), Binding::Action(A::Cancel));
+        self.bind(Menu::Linter, K::Ctrl('M'), Binding::Action(A::Cancel));
+        self.bind(Menu::Linter, K::PageUp, Binding::Action(A::PageUp));
+        self.bind(Menu::Linter, K::PageDown, Binding::Action(A::PageDown));
+    }
+}
