@@ -690,6 +690,12 @@ impl KeyMap {
         for &menu in &[Menu::Search, Menu::Replace, Menu::ReplaceWith, Menu::Execute] {
             self.bind(menu, K::Ctrl('P'), Binding::Action(A::Older));
             self.bind(menu, K::Ctrl('N'), Binding::Action(A::Newer));
+            // nano also binds the Up/Down arrows themselves to history
+            // recall in these menus (not cursor movement, since there's
+            // nothing to move to above/below a single-line prompt) —
+            // confirmed against the installed nano.
+            self.bind(menu, K::Up, Binding::Action(A::Older));
+            self.bind(menu, K::Down, Binding::Action(A::Newer));
         }
 
         self.bind(Menu::GotoLine, K::Ctrl('M'), Binding::Action(A::GotoLine));

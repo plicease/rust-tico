@@ -73,6 +73,13 @@ pub fn run(editor: &mut Editor) -> io::Result<()> {
             dirty |= editor.tick_spotlight_deadline();
         }
 
+        // Check Quit before rendering: an action (e.g. Exit with no
+        // unsaved changes) may have just closed the last buffer, and
+        // render() assumes there's always at least one to draw.
+        if matches!(editor.mode, Mode::Quit) {
+            break;
+        }
+
         if dirty {
             render_and_ring(editor)?;
         }
@@ -110,6 +117,8 @@ fn maybe_check_external_change(editor: &mut Editor) -> bool {
                     .to_string(),
                 input: String::new(),
                 cursor: 0,
+                history_pos: None,
+                saved_input: None,
             });
         }
     }
@@ -209,6 +218,8 @@ fn handle_prompt_key(editor: &mut Editor, mut prompt: Prompt, key: KeyEvent) {
                 prompt.input.remove(idx);
                 prompt.cursor -= 1;
             }
+            prompt.history_pos = None;
+            prompt.saved_input = None;
             editor.mode = Mode::Prompt(prompt);
             return;
         }
@@ -239,6 +250,8 @@ fn handle_prompt_key(editor: &mut Editor, mut prompt: Prompt, key: KeyEvent) {
             let idx = prompt.input.char_indices().nth(prompt.cursor).map(|(i, _)| i).unwrap_or(prompt.input.len());
             prompt.input.insert(idx, c);
             prompt.cursor += 1;
+            prompt.history_pos = None;
+            prompt.saved_input = None;
         }
     }
     editor.mode = Mode::Prompt(prompt);
@@ -322,7 +335,61 @@ fn apply_prompt_action(editor: &mut Editor, prompt: &mut Prompt, action: Action)
             }
             false
         }
+        Action::Older => {
+            cycle_history(editor, prompt, true);
+            false
+        }
+        Action::Newer => {
+            cycle_history(editor, prompt, false);
+            false
+        }
         _ => false,
+    }
+}
+
+/// Recall history at a Search/Replace/ReplaceWith/Execute prompt with
+/// Older (Up/^P) or Newer (Down/^N) — matches nano's get_older_item()/
+/// get_newer_item(), confirmed against the installed nano: Older steps
+/// backward through that menu's history (most recent first), Newer steps
+/// forward, and stepping Newer past the most recent entry restores
+/// whatever was live-typed before browsing started.
+fn cycle_history(editor: &mut Editor, prompt: &mut Prompt, older: bool) {
+    let list: &[String] = match prompt.menu {
+        Menu::Search | Menu::Replace => &editor.history.search,
+        Menu::ReplaceWith => &editor.history.replace,
+        Menu::Execute => &editor.history.execute,
+        _ => return,
+    };
+    if list.is_empty() {
+        return;
+    }
+    if older {
+        let next = match prompt.history_pos {
+            None => 0,
+            Some(i) if i + 1 < list.len() => i + 1,
+            Some(i) => i,
+        };
+        if prompt.history_pos.is_none() {
+            prompt.saved_input = Some(prompt.input.clone());
+        }
+        prompt.history_pos = Some(next);
+        prompt.input = list[list.len() - 1 - next].clone();
+        prompt.cursor = prompt.input.chars().count();
+    } else {
+        match prompt.history_pos {
+            None => {}
+            Some(0) => {
+                prompt.history_pos = None;
+                prompt.input = prompt.saved_input.take().unwrap_or_default();
+                prompt.cursor = prompt.input.chars().count();
+            }
+            Some(i) => {
+                let next = i - 1;
+                prompt.history_pos = Some(next);
+                prompt.input = list[list.len() - 1 - next].clone();
+                prompt.cursor = prompt.input.chars().count();
+            }
+        }
     }
 }
 
@@ -391,6 +458,8 @@ fn handle_merge_preview_choice(editor: &mut Editor, prompt: Prompt, key: KeyEven
                     label: "Could not merge automatically: [R]eload  [K]eep mine  [C]ancel".to_string(),
                     input: String::new(),
                     cursor: 0,
+                    history_pos: None,
+                    saved_input: None,
                 });
             }
         }
@@ -464,20 +533,37 @@ fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
     let text = prompt.input.clone();
     match prompt.kind {
         PromptKind::WhereIs => {
+            // Pressing Enter with nothing typed reuses the remembered last
+            // search term (shown bracketed in the label) - confirmed
+            // against the installed nano.
+            let text = if text.is_empty() { editor.search.last_pattern.clone().unwrap_or_default() } else { text };
             editor.mode = Mode::Editing;
+            if text.is_empty() {
+                return;
+            }
+            editor.history.add_search(&text);
             let backwards = editor.search.backwards;
             editor.run_search(&text, backwards);
         }
         PromptKind::Replace1 => {
+            let text = if text.is_empty() { editor.search.last_pattern.clone().unwrap_or_default() } else { text };
+            if text.is_empty() {
+                editor.mode = Mode::Editing;
+                return;
+            }
+            editor.history.add_search(&text);
             editor.mode = Mode::Prompt(Prompt {
                 kind: PromptKind::Replace2 { search: text },
                 menu: Menu::ReplaceWith,
                 label: "Replace with".to_string(),
                 input: String::new(),
                 cursor: 0,
+                history_pos: None,
+                saved_input: None,
             });
         }
         PromptKind::Replace2 { search } => {
+            editor.history.add_replace(&text);
             editor.begin_replace_loop(search, text);
         }
         PromptKind::GotoLine => {

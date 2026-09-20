@@ -3,6 +3,7 @@ mod buffer;
 mod cli;
 mod config;
 mod fileio;
+mod history;
 mod keymap;
 mod lockfile;
 mod options;
@@ -69,6 +70,10 @@ fn main() -> anyhow::Result<()> {
     editor.current = 0;
 
     ui::run(&mut editor)?;
+
+    if editor.options.historylog {
+        editor.history.save();
+    }
     Ok(())
 }
 
@@ -109,6 +114,8 @@ fn acquire_lock(editor: &mut app::Editor, buf: &mut buffer::Buffer, interactive:
             ),
             input: String::new(),
             cursor: 0,
+            history_pos: None,
+            saved_input: None,
         }),
         lockfile::LockCheck::Held(_) => {
             let _ = lockfile::write_lock(&lock_path, &target, false);

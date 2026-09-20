@@ -59,6 +59,21 @@ pub struct Prompt {
     pub label: String,
     pub input: String,
     pub cursor: usize,
+    /// Which history entry is currently shown (0 = most recent), while
+    /// browsing history with Older/Newer; `None` means `input` is
+    /// live-typed text, not a history entry.
+    pub history_pos: Option<usize>,
+    /// What `input` was before history browsing started, restored when
+    /// Newer is pressed past the most recent entry.
+    pub saved_input: Option<String>,
+}
+
+impl Prompt {
+    pub fn new(kind: PromptKind, menu: Menu, label: impl Into<String>, input: impl Into<String>) -> Prompt {
+        let input = input.into();
+        let cursor = input.chars().count();
+        Prompt { kind, menu, label: label.into(), input, cursor, history_pos: None, saved_input: None }
+    }
 }
 
 pub enum Mode {
@@ -128,6 +143,10 @@ pub struct Editor {
     /// auto-clears after ~1.5s (or ~0.8s with quickblank) of no input —
     /// confirmed by timing the installed nano directly.
     pub spotlight_deadline: Option<std::time::Instant>,
+    /// Search/Replace/Execute history, recalled with Up/Down or ^P/^N at
+    /// those prompts. Built up in-session regardless of settings; only
+    /// loaded from and saved to disk when `historylog` is on.
+    pub history: crate::history::HistoryStore,
     pub mode: Mode,
     pub screen_rows: usize,
     pub screen_cols: usize,
@@ -140,6 +159,8 @@ impl Editor {
         // either (nano doesn't have one), only the config item.
         let search =
             SearchState { case_sensitive: options.casesensitive, use_regex: options.regexp, ..SearchState::default() };
+        let history =
+            if options.historylog { crate::history::HistoryStore::load() } else { crate::history::HistoryStore::new() };
         Editor {
             buffers: vec![Buffer::empty()],
             current: 0,
@@ -154,6 +175,7 @@ impl Editor {
             bell_pending: false,
             spotlight: None,
             spotlight_deadline: None,
+            history,
             mode: Mode::Editing,
             screen_rows: 24,
             screen_cols: 80,
@@ -398,7 +420,12 @@ impl Editor {
             Backwards => self.search.backwards = !self.search.backwards,
             _ => {}
         }
-        self.scroll_to_cursor();
+        // An action (e.g. Exit with no unsaved changes) may have just
+        // closed the last buffer and set Mode::Quit; nothing left to
+        // scroll in that case.
+        if !self.buffers.is_empty() {
+            self.scroll_to_cursor();
+        }
     }
 
     /// Rewrite this buffer's lock file (if any) with the "modified" flag
@@ -409,6 +436,12 @@ impl Editor {
     /// via several different paths (`execute()`'s actions, plain character
     /// self-insertion, ...).
     pub fn maybe_update_lock_modified_flag(&mut self) {
+        if self.buffers.is_empty() {
+            // The action just closed the last buffer (e.g. Exit with no
+            // unsaved changes), which already set Mode::Quit; nothing left
+            // to update.
+            return;
+        }
         let target = self.buf().path.as_ref().map(|p| p.display().to_string());
         let buf = self.buf_mut();
         if buf.modified && !buf.lock_modified_written {
@@ -622,12 +655,19 @@ impl Editor {
     }
 
     fn begin_search(&mut self) {
+        // The last search term is shown as a bracketed default in the
+        // label (see search_prompt_label), not pre-filled into the input -
+        // confirmed against the installed nano, which leaves the field
+        // empty and reuses the bracketed default only if Enter is pressed
+        // with nothing typed.
         self.mode = Mode::Prompt(Prompt {
             kind: PromptKind::WhereIs,
             menu: Menu::Search,
             label: search_prompt_label("Search", "", &self.search),
-            input: self.search.last_pattern.clone().unwrap_or_default(),
+            input: String::new(),
             cursor: 0,
+            history_pos: None,
+            saved_input: None,
         });
     }
 
@@ -638,6 +678,8 @@ impl Editor {
             label: search_prompt_label("Search", " (to replace)", &self.search),
             input: String::new(),
             cursor: 0,
+            history_pos: None,
+            saved_input: None,
         });
     }
 
@@ -648,6 +690,8 @@ impl Editor {
             label: "Enter line number, column number".to_string(),
             input: String::new(),
             cursor: 0,
+            history_pos: None,
+            saved_input: None,
         });
     }
 
@@ -664,6 +708,8 @@ impl Editor {
             label: "File Name to Write".to_string(),
             cursor: default.chars().count(),
             input: default,
+            history_pos: None,
+            saved_input: None,
         });
     }
 
@@ -689,6 +735,8 @@ impl Editor {
                 ),
                 input: String::new(),
                 cursor: 0,
+                history_pos: None,
+                saved_input: None,
             });
         } else {
             self.close_current_buffer();
@@ -730,6 +778,8 @@ impl Editor {
                     label: format!("{diff}\n[A]pply merge  [C]ancel"),
                     input: String::new(),
                     cursor: 0,
+                    history_pos: None,
+                    saved_input: None,
                 });
             }
             crate::fileio::MergeResult::Conflict { diff } => {
@@ -739,6 +789,8 @@ impl Editor {
                     label: format!("{diff}\nCould not merge automatically (press any key)"),
                     input: String::new(),
                     cursor: 0,
+                    history_pos: None,
+                    saved_input: None,
                 });
             }
         }
@@ -783,6 +835,8 @@ impl Editor {
                     label: "Replace this instance?".to_string(),
                     input: String::new(),
                     cursor: 0,
+                    history_pos: None,
+                    saved_input: None,
                 });
             }
             Ok(None) => {
@@ -852,6 +906,8 @@ impl Editor {
                         label: "Replace this instance?".to_string(),
                         input: String::new(),
                         cursor: 0,
+                        history_pos: None,
+                        saved_input: None,
                     });
                     return;
                 }
@@ -980,6 +1036,15 @@ pub fn search_prompt_label(base: &str, suffix: &str, search: &SearchState) -> St
         label.push_str(" [Backwards]");
     }
     label.push_str(suffix);
+    // The remembered last search term is shown in brackets at the very
+    // end, after any suffix (e.g. "Search [Case Sensitive] (to replace)
+    // [apple]:") - confirmed against the installed nano's exact wording.
+    // Pressing Enter with nothing typed reuses this as the search text.
+    if let Some(default) = &search.last_pattern {
+        if !default.is_empty() {
+            label.push_str(&format!(" [{default}]"));
+        }
+    }
     label
 }
 
@@ -1154,6 +1219,26 @@ mod tests {
         let mut ed = Editor::new(Options::default(), KeyMap::new());
         ed.buffers[0] = Buffer::from_text(text, None);
         ed
+    }
+
+    #[test]
+    fn exiting_the_last_unmodified_buffer_does_not_panic() {
+        // execute() used to end with an unconditional scroll_to_cursor(),
+        // which - like a couple of other post-action steps - assumed there
+        // was always still a buffer to look at. Exiting with nothing to
+        // save closes the last buffer and sets Mode::Quit in the same
+        // call, leaving `buffers` empty.
+        let mut ed = test_editor("hello");
+        ed.execute(Action::Exit);
+        assert!(matches!(ed.mode, Mode::Quit));
+        assert!(ed.buffers.is_empty());
+    }
+
+    #[test]
+    fn lock_flag_update_on_empty_buffers_does_not_panic() {
+        let mut ed = test_editor("hello");
+        ed.buffers.clear();
+        ed.maybe_update_lock_modified_flag(); // must not panic
     }
 
     #[test]
