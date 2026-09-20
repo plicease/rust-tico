@@ -180,6 +180,7 @@ fn handle_prompt_key(editor: &mut Editor, mut prompt: Prompt, key: KeyEvent) {
             return handle_merge_preview_choice(editor, prompt, key)
         }
         PromptKind::LockConflict { .. } => return handle_lock_conflict_choice(editor, prompt, key),
+        PromptKind::ReplaceConfirm(_) => return handle_replace_confirm_choice(editor, prompt, key),
         _ => {}
     }
 
@@ -262,22 +263,66 @@ fn apply_prompt_action(editor: &mut Editor, prompt: &mut Prompt, action: Action)
         }
         Action::CaseSens => {
             editor.search.case_sensitive = !editor.search.case_sensitive;
+            refresh_search_label(editor, prompt);
             false
         }
         Action::Regexp => {
             editor.search.use_regex = !editor.search.use_regex;
+            refresh_search_label(editor, prompt);
             false
         }
         Action::Backwards => {
             editor.search.backwards = !editor.search.backwards;
-            if prompt.menu == Menu::Search {
-                prompt.label =
-                    if editor.search.backwards { "Search backward".to_string() } else { "Search".to_string() };
+            refresh_search_label(editor, prompt);
+            false
+        }
+        // ^R in the Search prompt switches it into a replace operation
+        // (keeping whatever was typed); ^R again from there switches back
+        // to plain search — matches nano's flip_replace, bound to MWHEREIS
+        // and MREPLACE both.
+        Action::FlipReplace => {
+            match prompt.menu {
+                Menu::Search => {
+                    prompt.kind = PromptKind::Replace1;
+                    prompt.menu = Menu::Replace;
+                }
+                Menu::Replace => {
+                    prompt.kind = PromptKind::WhereIs;
+                    prompt.menu = Menu::Search;
+                }
+                _ => return false,
+            }
+            refresh_search_label(editor, prompt);
+            false
+        }
+        // ^T flips between the Search and GotoLine prompts (MWHEREIS and
+        // MGOTOLINE both bind it to flip_goto).
+        Action::FlipGoto => {
+            match prompt.menu {
+                Menu::Search => {
+                    prompt.kind = PromptKind::GotoLine;
+                    prompt.menu = Menu::GotoLine;
+                    prompt.label = "Enter line number, column number".to_string();
+                }
+                Menu::GotoLine => {
+                    prompt.kind = PromptKind::WhereIs;
+                    prompt.menu = Menu::Search;
+                    refresh_search_label(editor, prompt);
+                }
+                _ => return false,
             }
             false
         }
         _ => false,
     }
+}
+
+/// Rebuild a Search/Replace prompt's label from the current toggle state,
+/// preserving whichever suffix belongs to its menu (see
+/// `app::search_prompt_label`).
+fn refresh_search_label(editor: &Editor, prompt: &mut Prompt) {
+    let suffix = if prompt.menu == Menu::Replace { " (to replace)" } else { "" };
+    prompt.label = crate::app::search_prompt_label("Search", suffix, &editor.search);
 }
 
 fn handle_exit_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {
@@ -386,6 +431,26 @@ fn handle_lock_conflict_choice(editor: &mut Editor, prompt: Prompt, key: KeyEven
     }
 }
 
+/// The "Replace this instance?" prompt: Y/y = Yes, N/n = No, A/a = All,
+/// ^C/Esc = Cancel — matches nano's `ask_user(YESORALLORNO, ...)` exactly
+/// (src/prompt.c), including that Esc cancels there too (Cancel is bound
+/// to whatever key the MYESNO menu's cancel function has, which includes
+/// Esc via the generic Ctrl-C/Esc handling used throughout this UI).
+fn handle_replace_confirm_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {
+    let PromptKind::ReplaceConfirm(state) = prompt.kind else { return };
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => editor.replace_choice(state, crate::app::ReplaceChoice::Yes),
+        KeyCode::Char('n') | KeyCode::Char('N') => editor.replace_choice(state, crate::app::ReplaceChoice::No),
+        KeyCode::Char('a') | KeyCode::Char('A') => editor.replace_choice(state, crate::app::ReplaceChoice::All),
+        KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
+            editor.replace_choice(state, crate::app::ReplaceChoice::Cancel)
+        }
+        _ => {
+            editor.mode = Mode::Prompt(Prompt { kind: PromptKind::ReplaceConfirm(state), ..prompt });
+        }
+    }
+}
+
 fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
     let text = prompt.input.clone();
     match prompt.kind {
@@ -404,8 +469,7 @@ fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
             });
         }
         PromptKind::Replace2 { search } => {
-            editor.mode = Mode::Editing;
-            editor.do_replace_all(&search, &text);
+            editor.begin_replace_loop(search, text);
         }
         PromptKind::GotoLine => {
             editor.mode = Mode::Editing;
@@ -481,11 +545,27 @@ fn normalize_key(key: KeyEvent) -> Option<TKey> {
         KeyCode::Insert => Some(TKey::Ins),
         KeyCode::F(n) => Some(TKey::F(n)),
         KeyCode::Char(c) if ctrl => {
-            let up = c.to_ascii_uppercase();
-            Some(TKey::Ctrl(up))
+            // crossterm's unix parser reports Ctrl+\, Ctrl+], Ctrl+^ and
+            // Ctrl+_ (raw bytes 0x1C-0x1F) as Char('4')..Char('7') with
+            // CONTROL set — those bytes are indistinguishable on the wire
+            // from an actual Ctrl+digit, and crossterm picks the digit
+            // form. Map back to the symbol form nano's docs, our keymap
+            // defaults, and nanorc `bind` lines all use.
+            let mapped = match c {
+                '4' => '\\',
+                '5' => ']',
+                '6' => '^',
+                '7' => '_',
+                other => other.to_ascii_uppercase(),
+            };
+            Some(TKey::Ctrl(mapped))
         }
         KeyCode::Char(c) if alt && shift && c.is_ascii_alphabetic() => Some(TKey::ShiftMeta(c.to_ascii_uppercase())),
-        KeyCode::Char(c) if alt => Some(TKey::Meta(c)),
+        // Meta+letter is case-insensitive by default in nano (a bare
+        // Meta+letter keystroke does the same as Shift+Meta+letter unless
+        // a specific Sh-M- binding overrides it), and our keymap stores
+        // Meta letter bindings uppercase, so normalize here too.
+        KeyCode::Char(c) if alt => Some(TKey::Meta(c.to_ascii_uppercase())),
         _ => None,
     }
 }
@@ -525,7 +605,8 @@ fn render(editor: &Editor) -> io::Result<()> {
     render_status_line(editor, &mut out, status_row, cols)?;
 
     if help_rows > 0 {
-        render_shortcut_bar(&mut out, status_row + 1, cols)?;
+        let menu = if let Mode::Prompt(p) = &editor.mode { Some(p.menu) } else { None };
+        render_shortcut_bar(&mut out, status_row + 1, cols, shortcuts_for_menu(menu))?;
     }
 
     finish_cursor(editor, &mut out, text_start_row)?;
@@ -707,8 +788,60 @@ const SHORTCUT_PRIORITY: &[(&str, &str)] = &[
     ("M-F", "Next"),
 ];
 
-fn render_shortcut_bar(out: &mut impl Write, row: u16, cols: usize) -> io::Result<()> {
-    let entries = SHORTCUT_PRIORITY;
+/// The Search (WhereIs) prompt's shortcut list, captured the same way.
+const SEARCH_SHORTCUTS: &[(&str, &str)] = &[
+    ("^G", "Help"),
+    ("^C", "Cancel"),
+    ("M-C", "Case Sens"),
+    ("M-R", "Reg.exp."),
+    ("M-B", "Backwards"),
+    ("^R", "Replace"),
+    ("^P", "Older"),
+    ("^N", "Newer"),
+    ("^T", "Go To Line"),
+];
+
+/// The "Search (to replace)" prompt: same as Search but without ^T
+/// (MREPLACE isn't bound to flip_goto in nano) and ^R now offers to flip
+/// *back* to plain search.
+const REPLACE1_SHORTCUTS: &[(&str, &str)] = &[
+    ("^G", "Help"),
+    ("^C", "Cancel"),
+    ("M-C", "Case Sens"),
+    ("M-R", "Reg.exp."),
+    ("M-B", "Backwards"),
+    ("^R", "No Replace"),
+    ("^P", "Older"),
+    ("^N", "Newer"),
+];
+
+const REPLACEWITH_SHORTCUTS: &[(&str, &str)] = &[("^G", "Help"), ("^C", "Cancel"), ("^P", "Older"), ("^N", "Newer")];
+
+const GOTOLINE_SHORTCUTS: &[(&str, &str)] = &[
+    ("^G", "Help"),
+    ("^C", "Cancel"),
+    ("^W", "Begin of Paragr."),
+    ("^O", "End of Paragraph"),
+    ("^Y", "First Line"),
+    ("^V", "Last Line"),
+    ("^T", "Go To Text"),
+];
+
+/// Which shortcut list to show at the bottom for the given menu — nano
+/// rebuilds its two help lines per-menu (see e.g. ask_user()'s
+/// post_one_key calls); menus not yet curated here fall back to Main's
+/// list rather than showing nothing.
+fn shortcuts_for_menu(menu: Option<Menu>) -> &'static [(&'static str, &'static str)] {
+    match menu {
+        Some(Menu::Search) => SEARCH_SHORTCUTS,
+        Some(Menu::Replace) => REPLACE1_SHORTCUTS,
+        Some(Menu::ReplaceWith) => REPLACEWITH_SHORTCUTS,
+        Some(Menu::GotoLine) => GOTOLINE_SHORTCUTS,
+        _ => SHORTCUT_PRIORITY,
+    }
+}
+
+fn render_shortcut_bar(out: &mut impl Write, row: u16, cols: usize, entries: &[(&str, &str)]) -> io::Result<()> {
     let max_label = entries.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(2);
     let max_desc = entries.iter().map(|(_, d)| d.chars().count()).max().unwrap_or(4);
     let col_width = max_label + 1 + max_desc + 2;

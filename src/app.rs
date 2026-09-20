@@ -12,7 +12,7 @@ pub enum PromptKind {
     WhereIs,
     Replace1, // search term
     Replace2 { search: String }, // replacement term
-    ReplaceConfirm { search: String, replacement: String, regex: bool },
+    ReplaceConfirm(ReplaceLoopState),
     GotoLine,
     WriteOut { exiting: bool },
     Exit { discard_and_quit: bool },
@@ -25,6 +25,31 @@ pub enum PromptKind {
     /// recorded inside it.
     LockConflict { lock_path: std::path::PathBuf, target: String },
     Help,
+}
+
+/// State threaded through an in-progress interactive replace, one match at
+/// a time — matches nano's `do_replace_loop()` in src/search.c: find the
+/// next occurrence, ask "Replace this instance?" (Yes/No/All/Cancel), act,
+/// and repeat, wrapping around the buffer once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaceLoopState {
+    pub search: String,
+    pub replacement: String,
+    pub match_pos: Pos,
+    pub match_len: usize,
+    /// Where this replace operation began (the cursor position when it was
+    /// kicked off); once the search wraps around and reaches here again,
+    /// the loop stops rather than repeating forever.
+    pub session_start: Pos,
+    pub wrapped: bool,
+    pub count: usize,
+}
+
+pub enum ReplaceChoice {
+    Yes,
+    No,
+    All,
+    Cancel,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +123,11 @@ pub struct Editor {
 
 impl Editor {
     pub fn new(options: Options, keymap: crate::keymap::KeyMap) -> Editor {
+        // `set casesensitive` / `set regexp` in nanorc/ticorc set the
+        // default search mode, same as nano; there's no CLI flag for
+        // either (nano doesn't have one), only the config item.
+        let search =
+            SearchState { case_sensitive: options.casesensitive, use_regex: options.regexp, ..SearchState::default() };
         Editor {
             buffers: vec![Buffer::empty()],
             current: 0,
@@ -105,7 +135,7 @@ impl Editor {
             keymap,
             cutbuffer: String::new(),
             cut_was_consecutive: false,
-            search: SearchState::default(),
+            search,
             status: None,
             status_level: StatusLevel::Normal,
             status_countdown: 0,
@@ -534,7 +564,7 @@ impl Editor {
         self.mode = Mode::Prompt(Prompt {
             kind: PromptKind::WhereIs,
             menu: Menu::Search,
-            label: if self.search.backwards { "Search backward" } else { "Search" }.to_string(),
+            label: search_prompt_label("Search", "", &self.search),
             input: self.search.last_pattern.clone().unwrap_or_default(),
             cursor: 0,
         });
@@ -544,7 +574,7 @@ impl Editor {
         self.mode = Mode::Prompt(Prompt {
             kind: PromptKind::Replace1,
             menu: Menu::Replace,
-            label: "Search (to replace)".to_string(),
+            label: search_prompt_label("Search", " (to replace)", &self.search),
             input: String::new(),
             cursor: 0,
         });
@@ -653,44 +683,151 @@ impl Editor {
         }
     }
 
-    /// Replace every occurrence of `search` with `replacement` in the
-    /// buffer, respecting the active case-sensitivity/regex search options.
-    pub fn do_replace_all(&mut self, search: &str, replacement: &str) {
+    /// Kick off an interactive replace: find the first match (from the
+    /// current cursor, wrapping once around the buffer) and, if found,
+    /// open the "Replace this instance?" confirmation prompt. Matches
+    /// nano's do_replace() / do_replace_loop().
+    pub fn begin_replace_loop(&mut self, search: String, replacement: String) {
         if search.is_empty() {
+            self.mode = Mode::Editing;
             return;
         }
-        let text = self.buf().to_string();
-        let new_text = if self.search.use_regex {
-            let pat = if self.search.case_sensitive { search.to_string() } else { format!("(?i){search}") };
-            match regex::Regex::new(&pat) {
-                Ok(re) => re.replace_all(&text, replacement).into_owned(),
+        self.search.last_pattern = Some(search.clone());
+        let session_start = self.buf().cursor;
+        let found = find_next_match_for_replace(
+            self.buf(),
+            session_start,
+            session_start,
+            false,
+            &search,
+            self.search.case_sensitive,
+            self.search.use_regex,
+        );
+        match found {
+            Ok(Some((pos, len, wrapped))) => {
+                self.buf_mut().cursor = pos;
+                self.scroll_to_cursor();
+                self.mode = Mode::Prompt(Prompt {
+                    kind: PromptKind::ReplaceConfirm(ReplaceLoopState {
+                        search,
+                        replacement,
+                        match_pos: pos,
+                        match_len: len,
+                        session_start,
+                        wrapped,
+                        count: 0,
+                    }),
+                    menu: Menu::YesNo,
+                    label: "Replace this instance?".to_string(),
+                    input: String::new(),
+                    cursor: 0,
+                });
+            }
+            Ok(None) => {
+                self.mode = Mode::Editing;
+                self.set_status(format!("\"{search}\" not found"));
+            }
+            Err(e) => {
+                self.mode = Mode::Editing;
+                self.set_status(format!("Invalid regex: {e}"));
+            }
+        }
+    }
+
+    /// Act on the user's Yes/No/All/Cancel answer for the current match,
+    /// then either advance to the next one (opening a fresh confirmation
+    /// prompt) or finish the loop.
+    pub fn replace_choice(&mut self, mut state: ReplaceLoopState, choice: ReplaceChoice) {
+        if matches!(choice, ReplaceChoice::Cancel) {
+            self.mode = Mode::Editing;
+            self.report_replace_count(state.count);
+            return;
+        }
+        let mut do_replace = matches!(choice, ReplaceChoice::Yes | ReplaceChoice::All);
+        let replace_all = matches!(choice, ReplaceChoice::All);
+        loop {
+            let next_from = if do_replace {
+                let expanded = self.expand_replacement(&state.search, &state.replacement, state.match_pos, state.match_len);
+                let end = Pos::new(state.match_pos.line, state.match_pos.col + state.match_len);
+                self.buf_mut().delete_range(state.match_pos, end);
+                self.buf_mut().cursor = state.match_pos;
+                let expanded_len = expanded.chars().count();
+                self.buf_mut().insert_str(&expanded);
+                state.count += 1;
+                Pos::new(state.match_pos.line, state.match_pos.col + expanded_len)
+            } else {
+                // Skip past this match (at least one character, so a
+                // zero-length regex match can't be found again forever).
+                Pos::new(state.match_pos.line, state.match_pos.col + state.match_len.max(1))
+            };
+            let found = find_next_match_for_replace(
+                self.buf(),
+                next_from,
+                state.session_start,
+                state.wrapped,
+                &state.search,
+                self.search.case_sensitive,
+                self.search.use_regex,
+            );
+            match found {
+                Ok(Some((pos, len, wrapped))) => {
+                    state.match_pos = pos;
+                    state.match_len = len;
+                    state.wrapped = wrapped;
+                    if replace_all {
+                        do_replace = true;
+                        continue;
+                    }
+                    self.buf_mut().cursor = pos;
+                    self.scroll_to_cursor();
+                    self.mode = Mode::Prompt(Prompt {
+                        kind: PromptKind::ReplaceConfirm(state),
+                        menu: Menu::YesNo,
+                        label: "Replace this instance?".to_string(),
+                        input: String::new(),
+                        cursor: 0,
+                    });
+                    return;
+                }
+                Ok(None) => {
+                    self.mode = Mode::Editing;
+                    self.report_replace_count(state.count);
+                    return;
+                }
                 Err(e) => {
+                    self.mode = Mode::Editing;
                     self.set_status(format!("Invalid regex: {e}"));
                     return;
                 }
             }
-        } else if self.search.case_sensitive {
-            text.replace(search, replacement)
-        } else {
-            replace_case_insensitive(&text, search, replacement)
-        };
-        let count = if self.search.use_regex {
-            0 // exact count not tracked for the regex path; message kept generic below
-        } else {
-            text.matches(search).count()
-        };
-        let cursor = self.buf().cursor;
-        self.buf_mut().rope = ropey::Rope::from_str(&new_text);
-        self.buf_mut().modified = true;
-        self.buf_mut().cursor = cursor;
-        let max_line = self.buf().line_count().saturating_sub(1);
-        self.buf_mut().cursor.line = self.buf().cursor.line.min(max_line);
-        if count > 0 {
-            self.set_status(format!("Replaced {count} occurrence(s)"));
-        } else {
-            self.set_status("Replacement complete");
         }
-        self.search.last_pattern = Some(search.to_string());
+    }
+
+    fn report_replace_count(&mut self, count: usize) {
+        match count {
+            0 => self.set_status("No replacements made"),
+            1 => self.set_status("Replaced 1 occurrence"),
+            n => self.set_status(format!("Replaced {n} occurrences")),
+        }
+    }
+
+    /// Build the literal text to insert for one match: for a regex search,
+    /// expands nano-style `\1`-`\9` backreferences (verified against
+    /// nano's `replace_regexp()` in src/search.c); a literal-string search
+    /// uses the replacement text as-is, with no backreference processing —
+    /// nano does the same (`replace_line()` only calls `replace_regexp()`
+    /// when `ISSET(USE_REGEXP)`).
+    fn expand_replacement(&self, search: &str, replacement: &str, match_pos: Pos, match_len: usize) -> String {
+        if !self.search.use_regex {
+            return replacement.to_string();
+        }
+        let pat = if self.search.case_sensitive { search.to_string() } else { format!("(?i){search}") };
+        let Ok(re) = regex::Regex::new(&pat) else { return replacement.to_string() };
+        let line_chars: Vec<char> = self.buf().line(match_pos.line).chars().collect();
+        let end = (match_pos.col + match_len).min(line_chars.len());
+        let matched_text: String = line_chars[match_pos.col..end].iter().collect();
+        let Some(caps) = re.captures(&matched_text) else { return replacement.to_string() };
+        expand_backreferences(replacement, &caps)
     }
 
     pub fn run_search(&mut self, pattern: &str, backwards: bool) {
@@ -756,6 +893,116 @@ fn word_right_pos(buf: &Buffer, from: Pos) -> Pos {
     }
 }
 
+/// Build a Search/Replace prompt's label the way nano does: the base text,
+/// then a bracketed flag for each active toggle in this exact order —
+/// `[Case Sensitive]`, `[Regexp]`, `[Backwards]` — then an optional suffix
+/// like `" (to replace)"`. Confirmed against the installed nano's actual
+/// prompt text (e.g. `Search [Case Sensitive] [Regexp] (to replace):`).
+pub fn search_prompt_label(base: &str, suffix: &str, search: &SearchState) -> String {
+    let mut label = base.to_string();
+    if search.case_sensitive {
+        label.push_str(" [Case Sensitive]");
+    }
+    if search.use_regex {
+        label.push_str(" [Regexp]");
+    }
+    if search.backwards {
+        label.push_str(" [Backwards]");
+    }
+    label.push_str(suffix);
+    label
+}
+
+/// Expand nano-style `\1`-`\9` backreferences in `template` using `caps`
+/// (a valid group number that didn't participate in the match expands to
+/// nothing; a `\` followed by anything else — including a digit that isn't
+/// a valid group number for this pattern — is copied through literally).
+fn expand_backreferences(template: &str, caps: &regex::Captures) -> String {
+    let chars: Vec<char> = template.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit() && chars[i + 1] != '0' {
+            let n = chars[i + 1].to_digit(10).unwrap() as usize;
+            if n < caps.len() {
+                if let Some(m) = caps.get(n) {
+                    out.push_str(m.as_str());
+                }
+                i += 2;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Find the next match of `pattern` at or after `from`, wrapping around the
+/// buffer once (but not past `session_start`, if already wrapped) —
+/// matches nano's search wraparound ("came_full_circle") so a replace loop
+/// can't repeat forever. Returns (match position, match length in chars,
+/// whether the search has now wrapped).
+#[allow(clippy::too_many_arguments)]
+fn find_next_match_for_replace(
+    buf: &Buffer,
+    from: Pos,
+    session_start: Pos,
+    already_wrapped: bool,
+    pattern: &str,
+    case_sensitive: bool,
+    use_regex: bool,
+) -> Result<Option<(Pos, usize, bool)>, String> {
+    let re = if use_regex {
+        let pat = if case_sensitive { pattern.to_string() } else { format!("(?i){pattern}") };
+        Some(regex::Regex::new(&pat).map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
+    let matches_at = |line: &str| -> Vec<(usize, usize)> {
+        if let Some(re) = &re {
+            re.find_iter(line)
+                .map(|m| (line[..m.start()].chars().count(), line[m.start()..m.end()].chars().count()))
+                .collect()
+        } else if case_sensitive {
+            line.char_indices()
+                .filter(|(i, _)| line[*i..].starts_with(pattern))
+                .map(|(i, _)| (line[..i].chars().count(), pattern.chars().count()))
+                .collect()
+        } else {
+            let lower_line = line.to_lowercase();
+            let lower_needle = pattern.to_lowercase();
+            lower_line
+                .char_indices()
+                .filter(|(i, _)| lower_line[*i..].starts_with(&lower_needle))
+                .map(|(i, _)| (lower_line[..i].chars().count(), lower_needle.chars().count()))
+                .collect()
+        }
+    };
+
+    let n = buf.line_count();
+    for line_idx in from.line..n {
+        let raw = buf.line(line_idx);
+        for (c, len) in matches_at(&raw) {
+            if line_idx != from.line || c >= from.col {
+                return Ok(Some((Pos::new(line_idx, c), len, already_wrapped)));
+            }
+        }
+    }
+    if already_wrapped {
+        return Ok(None);
+    }
+    for line_idx in 0..=session_start.line.min(n.saturating_sub(1)) {
+        let raw = buf.line(line_idx);
+        for (c, len) in matches_at(&raw) {
+            if line_idx < session_start.line || c < session_start.col {
+                return Ok(Some((Pos::new(line_idx, c), len, true)));
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn find_in_lines(
     lines: &[&str],
     from: Pos,
@@ -815,42 +1062,6 @@ fn find_in_lines(
     None
 }
 
-/// Case-insensitive replace-all, implemented char-by-char (rather than by
-/// slicing a separately-lowercased copy) so it can't panic on the rare
-/// characters whose lowercase form has a different UTF-8 byte length.
-fn replace_case_insensitive(haystack: &str, needle: &str, replacement: &str) -> String {
-    if needle.is_empty() {
-        return haystack.to_string();
-    }
-    let needle_lower: Vec<char> = needle.chars().flat_map(|c| c.to_lowercase()).collect();
-    let hay: Vec<char> = haystack.chars().collect();
-    let mut out = String::new();
-    let mut i = 0usize;
-    while i < hay.len() {
-        let mut hi = i;
-        let mut matched = true;
-        for &nc in &needle_lower {
-            if hi >= hay.len() {
-                matched = false;
-                break;
-            }
-            let mut hc_lower = hay[hi].to_lowercase();
-            if hc_lower.next() != Some(nc) || hc_lower.next().is_some() {
-                matched = false;
-                break;
-            }
-            hi += 1;
-        }
-        if matched {
-            out.push_str(replacement);
-            i = hi;
-        } else {
-            out.push(hay[i]);
-            i += 1;
-        }
-    }
-    out
-}
 
 fn help_text() -> Vec<String> {
     vec![
@@ -859,4 +1070,138 @@ fn help_text() -> Vec<String> {
         "tico is a nano-compatible text editor.".to_string(),
         "Press ^X to close this help.".to_string(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keymap::KeyMap;
+    use crate::options::Options;
+
+    fn test_editor(text: &str) -> Editor {
+        let mut ed = Editor::new(Options::default(), KeyMap::new());
+        ed.buffers[0] = Buffer::from_text(text, None);
+        ed
+    }
+
+    #[test]
+    fn backreference_expansion_basic() {
+        let re = regex::Regex::new(r"(\w+)@(\w+)").unwrap();
+        let caps = re.captures("alice@example").unwrap();
+        assert_eq!(expand_backreferences(r"\2:\1", &caps), "example:alice");
+    }
+
+    #[test]
+    fn backreference_nonparticipating_group_is_empty() {
+        let re = regex::Regex::new(r"(a)|(b)").unwrap();
+        let caps = re.captures("b").unwrap();
+        assert_eq!(expand_backreferences(r"[\1][\2]", &caps), "[][b]");
+    }
+
+    #[test]
+    fn backreference_out_of_range_is_literal() {
+        let re = regex::Regex::new(r"(a)").unwrap();
+        let caps = re.captures("a").unwrap();
+        // Only group 1 exists; \5 isn't a valid group so stays literal.
+        assert_eq!(expand_backreferences(r"\5-\1", &caps), r"\5-a");
+    }
+
+    #[test]
+    fn config_options_seed_initial_search_state() {
+        let mut opts = Options::default();
+        opts.casesensitive = true;
+        opts.regexp = true;
+        let ed = Editor::new(opts, KeyMap::new());
+        assert!(ed.search.case_sensitive);
+        assert!(ed.search.use_regex);
+    }
+
+    #[test]
+    fn replace_all_literal_case_insensitive() {
+        let mut ed = test_editor("Foo bar foo BAR foo");
+        ed.buf_mut().cursor = Pos::new(0, 0);
+        ed.begin_replace_loop("foo".to_string(), "X".to_string());
+        // First match should be found and awaiting confirmation.
+        let Mode::Prompt(Prompt { kind: PromptKind::ReplaceConfirm(state), .. }) = &ed.mode else {
+            panic!("expected a replace-confirm prompt");
+        };
+        assert_eq!(state.match_pos, Pos::new(0, 0));
+        let state = state.clone();
+        ed.replace_choice(state, ReplaceChoice::All);
+        assert_eq!(ed.buf().to_string(), "X bar X BAR X");
+        assert!(matches!(ed.mode, Mode::Editing));
+    }
+
+    #[test]
+    fn replace_yes_no_skips_and_replaces_selectively() {
+        let mut ed = test_editor("cat cat cat");
+        ed.buf_mut().cursor = Pos::new(0, 0);
+        ed.begin_replace_loop("cat".to_string(), "dog".to_string());
+        let state = match &ed.mode {
+            Mode::Prompt(Prompt { kind: PromptKind::ReplaceConfirm(s), .. }) => s.clone(),
+            _ => panic!("expected prompt"),
+        };
+        ed.replace_choice(state, ReplaceChoice::No); // skip first "cat"
+        let state = match &ed.mode {
+            Mode::Prompt(Prompt { kind: PromptKind::ReplaceConfirm(s), .. }) => s.clone(),
+            _ => panic!("expected prompt after No"),
+        };
+        ed.replace_choice(state, ReplaceChoice::Yes); // replace second "cat"
+        assert_eq!(ed.buf().to_string(), "cat dog cat");
+        let state = match &ed.mode {
+            Mode::Prompt(Prompt { kind: PromptKind::ReplaceConfirm(s), .. }) => s.clone(),
+            _ => panic!("expected prompt after Yes"),
+        };
+        ed.replace_choice(state, ReplaceChoice::Cancel);
+        assert_eq!(ed.buf().to_string(), "cat dog cat");
+        assert!(matches!(ed.mode, Mode::Editing));
+    }
+
+    #[test]
+    fn replace_regex_with_backreferences() {
+        let mut ed = test_editor("2024-01-15");
+        ed.buf_mut().cursor = Pos::new(0, 0);
+        ed.search.use_regex = true;
+        ed.begin_replace_loop(r"(\d+)-(\d+)-(\d+)".to_string(), r"\3/\2/\1".to_string());
+        let state = match &ed.mode {
+            Mode::Prompt(Prompt { kind: PromptKind::ReplaceConfirm(s), .. }) => s.clone(),
+            _ => panic!("expected prompt"),
+        };
+        ed.replace_choice(state, ReplaceChoice::Yes);
+        assert_eq!(ed.buf().to_string(), "15/01/2024");
+    }
+
+    #[test]
+    fn replace_wraps_around_once_then_stops() {
+        // Cursor starts on the second "x"; with wraparound both should be
+        // found (in order: second, then first on wrap), but not forever.
+        let mut ed = test_editor("x y x");
+        ed.buf_mut().cursor = Pos::new(0, 4); // at the second 'x'
+        ed.begin_replace_loop("x".to_string(), "Z".to_string());
+        let state = match &ed.mode {
+            Mode::Prompt(Prompt { kind: PromptKind::ReplaceConfirm(s), .. }) => s.clone(),
+            _ => panic!("expected prompt"),
+        };
+        assert_eq!(state.match_pos, Pos::new(0, 4));
+        ed.replace_choice(state, ReplaceChoice::All);
+        assert_eq!(ed.buf().to_string(), "Z y Z");
+        assert!(matches!(ed.mode, Mode::Editing));
+    }
+
+    #[test]
+    fn replace_not_found_reports_status() {
+        let mut ed = test_editor("hello world");
+        ed.begin_replace_loop("zzz".to_string(), "y".to_string());
+        assert!(matches!(ed.mode, Mode::Editing));
+        assert_eq!(ed.status.as_deref(), Some("\"zzz\" not found"));
+    }
+
+    #[test]
+    fn invalid_regex_reports_status_not_panic() {
+        let mut ed = test_editor("hello world");
+        ed.search.use_regex = true;
+        ed.begin_replace_loop("(unclosed".to_string(), "y".to_string());
+        assert!(matches!(ed.mode, Mode::Editing));
+        assert!(ed.status.as_deref().unwrap_or("").starts_with("Invalid regex"));
+    }
 }
