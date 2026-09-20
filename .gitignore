@@ -14,4 +14,7 @@
 # RustRover
 .idea/
 
+# Vim swap files
+*.swp
+
 /setup.sh
