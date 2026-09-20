@@ -17,13 +17,24 @@ pub struct LoadedConfig {
     pub warnings: Vec<String>,
 }
 
-fn nanorc_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Ok(sys) = std::env::var("TICO_SYSTEM_NANORC") {
-        paths.push(PathBuf::from(sys));
+/// The system config directory, baked in at build time by `build.rs`
+/// (mirrors nano's `--sysconfdir` configure option). Empty means system-wide
+/// config lookup was disabled at build time (`TICO_SYSCONFDIR=` when
+/// building); see `build.rs` for how to override it.
+const SYSCONFDIR: &str = env!("TICO_SYSCONFDIR");
+
+/// The system-wide nanorc path (`$(sysconfdir)/nanorc`, e.g. `/etc/nanorc`),
+/// or `None` if system-wide config lookup was disabled at build time.
+fn system_nanorc_path() -> Option<PathBuf> {
+    if SYSCONFDIR.is_empty() {
+        None
     } else {
-        paths.push(PathBuf::from("/etc/nanorc"));
+        Some(PathBuf::from(SYSCONFDIR).join("nanorc"))
     }
+}
+
+fn user_nanorc_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
     if let Some(home) = dirs::home_dir() {
         if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
             paths.push(PathBuf::from(xdg).join("nano/nanorc"));
@@ -69,13 +80,15 @@ pub fn load(explicit_rcfile: Option<&str>, ignore_rcfiles: bool) -> LoadedConfig
             warnings.push(format!("could not read rcfile: {path}"));
         }
     } else {
-        // System-wide file, always read if present.
-        if let Ok(text) = std::fs::read_to_string("/etc/nanorc") {
-            nanorc::parse(&text, &mut options, &mut keymap, &mut warnings);
+        // System-wide file (unless disabled at build time), always read if
+        // present.
+        if let Some(sys_path) = system_nanorc_path() {
+            if let Ok(text) = std::fs::read_to_string(&sys_path) {
+                nanorc::parse(&text, &mut options, &mut keymap, &mut warnings);
+            }
         }
         // First user nanorc found, in nano's documented search order.
-        let candidates = nanorc_paths();
-        for path in candidates.into_iter().skip(1) {
+        for path in user_nanorc_paths() {
             if let Ok(text) = std::fs::read_to_string(&path) {
                 nanorc::parse(&text, &mut options, &mut keymap, &mut warnings);
                 break;
