@@ -100,6 +100,21 @@ fn render_and_ring(editor: &mut Editor) -> io::Result<()> {
     Ok(())
 }
 
+/// Build the "file changed on disk, you have unsaved edits" choice prompt —
+/// shared by the initial detection and by backing out of the merge-diff
+/// viewer, so both offer the same [R]eload/[K]eep/[M]erge/[C]ancel choice.
+fn external_conflict_prompt() -> Prompt {
+    Prompt {
+        kind: PromptKind::ExternalChangeConflict,
+        menu: Menu::YesNo,
+        label: "File changed on disk and you have unsaved edits: [R]eload  [K]eep mine  [M]erge  [C]ancel".to_string(),
+        input: String::new(),
+        cursor: 0,
+        history_pos: None,
+        saved_input: None,
+    }
+}
+
 /// Returns true if editor state changed (and so needs a redraw).
 fn maybe_check_external_change(editor: &mut Editor) -> bool {
     use crate::fileio::ExternalChange;
@@ -110,16 +125,7 @@ fn maybe_check_external_change(editor: &mut Editor) -> bool {
             editor.set_status("File reloaded (changed on disk)");
         }
         ExternalChange::ChangedWithLocalEdits => {
-            editor.mode = Mode::Prompt(Prompt {
-                kind: PromptKind::ExternalChangeConflict,
-                menu: Menu::YesNo,
-                label: "File changed on disk and you have unsaved edits: [R]eload  [K]eep mine  [M]erge  [C]ancel"
-                    .to_string(),
-                input: String::new(),
-                cursor: 0,
-                history_pos: None,
-                saved_input: None,
-            });
+            editor.mode = Mode::Prompt(external_conflict_prompt());
         }
     }
     true
@@ -484,6 +490,13 @@ fn handle_conflict_choice(editor: &mut Editor, key: KeyEvent) {
             editor.begin_merge_preview();
         }
         KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
+            // Acknowledge this on-disk change (same as [K]eep, just without
+            // claiming to have made any decision about the content) so the
+            // idle poll doesn't immediately re-flag it and pop this same
+            // prompt up again; a *further* change to the file still will.
+            if let Some(path) = editor.buf().path.clone() {
+                editor.buf_mut().disk_state = crate::fileio::stat_disk_state(&path);
+            }
             editor.mode = Mode::Editing;
         }
         _ => {}
@@ -530,7 +543,10 @@ fn handle_diff_key(editor: &mut Editor, lines: Vec<String>, top: usize, outcome:
                 return;
             }
             KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
-                editor.mode = Mode::Editing;
+                // Back out to the reload/keep/merge/cancel choice, not
+                // straight to editing — this is a step within resolving
+                // the conflict, not a dismissal of it.
+                editor.mode = Mode::Prompt(external_conflict_prompt());
                 return;
             }
             KeyCode::Up => top = top.saturating_sub(1),
