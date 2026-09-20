@@ -1,6 +1,9 @@
 //! The full set of nano-compatible settings ("set" options in nanorc terms),
 //! with their defaults, as documented in `nanorc(5)`.
 
+/// A named color, with the "light" (bright) intensity nano's `light`-prefix
+/// convention selects (e.g. `lightyellow`) tracked explicitly — `light` has
+/// no effect for `Normal` or `Rgb`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {
     Black,
@@ -15,12 +18,28 @@ pub enum Color {
     Rgb(u8, u8, u8),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NamedColor {
+    pub color: Color,
+    pub light: bool,
+}
+
+impl NamedColor {
+    const fn new(color: Color) -> NamedColor {
+        NamedColor { color, light: false }
+    }
+
+    const fn light(color: Color) -> NamedColor {
+        NamedColor { color, light: true }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ColorPair {
     pub bold: bool,
     pub italic: bool,
-    pub fg: Option<Color>,
-    pub bg: Option<Color>,
+    pub fg: Option<NamedColor>,
+    pub bg: Option<NamedColor>,
 }
 
 /// All boolean "set"/"unset" toggles from nanorc(5), off by default unless
@@ -174,7 +193,12 @@ impl Default for Options {
             whitespace: ('\u{bb}', '\u{22c5}'),
             wordchars: None,
 
-            errorcolor: ColorPair { bold: true, italic: false, fg: Some(Color::White), bg: Some(Color::Red) },
+            errorcolor: ColorPair {
+                bold: true,
+                italic: false,
+                fg: Some(NamedColor::new(Color::White)),
+                bg: Some(NamedColor::new(Color::Red)),
+            },
             functioncolor: ColorPair::default(),
             keycolor: ColorPair::default(),
             minicolor: ColorPair::default(),
@@ -182,7 +206,12 @@ impl Default for Options {
             promptcolor: ColorPair::default(),
             scrollercolor: ColorPair::default(),
             selectedcolor: ColorPair::default(),
-            spotlightcolor: ColorPair { bold: false, italic: false, fg: Some(Color::Black), bg: Some(Color::Yellow) },
+            spotlightcolor: ColorPair {
+                bold: false,
+                italic: false,
+                fg: Some(NamedColor::new(Color::Black)),
+                bg: Some(NamedColor::light(Color::Yellow)),
+            },
             statuscolor: ColorPair::default(),
             stripecolor: ColorPair::default(),
             titlecolor: ColorPair::default(),
@@ -221,8 +250,14 @@ pub fn parse_color_pair(spec: &str) -> Option<ColorPair> {
     Some(cp)
 }
 
-fn parse_color(name: &str) -> Option<Color> {
-    let (name, _light) = if let Some(rest) = name.strip_prefix("light") {
+fn parse_color(name: &str) -> Option<NamedColor> {
+    // "grey"/"gray" is documented as a synonym for lightblack, so it
+    // carries its own light-ness rather than going through the general
+    // light-prefix stripping below.
+    if name == "grey" || name == "gray" {
+        return Some(NamedColor::light(Color::Black));
+    }
+    let (name, light) = if let Some(rest) = name.strip_prefix("light") {
         (rest, true)
     } else {
         (name, false)
@@ -232,12 +267,12 @@ fn parse_color(name: &str) -> Option<Color> {
             let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
             let g = u8::from_str_radix(&hex[1..2], 16).ok()? * 17;
             let b = u8::from_str_radix(&hex[2..3], 16).ok()? * 17;
-            return Some(Color::Rgb(r, g, b));
+            return Some(NamedColor::new(Color::Rgb(r, g, b)));
         }
         return None;
     }
-    Some(match name {
-        "black" | "grey" | "gray" => Color::Black,
+    let color = match name {
+        "black" => Color::Black,
         "red" => Color::Red,
         "green" => Color::Green,
         "yellow" => Color::Yellow,
@@ -247,5 +282,6 @@ fn parse_color(name: &str) -> Option<Color> {
         "white" => Color::White,
         "normal" => Color::Normal,
         _ => return None,
-    })
+    };
+    Some(NamedColor { color, light })
 }

@@ -116,6 +116,18 @@ pub struct Editor {
     /// the terminal bell once and clears this, matching nano's beep() in
     /// statusline() for ALERT-importance messages.
     pub bell_pending: bool,
+    /// The currently highlighted search/replace match, if any (position +
+    /// length in characters), rendered black-on-yellow like nano's
+    /// `spotlightcolor` (confirmed against the installed nano's own
+    /// escape-code output).
+    pub spotlight: Option<(Pos, usize)>,
+    /// When the spotlight should be cleared on its own — `None` means it
+    /// persists until something else clears it (used for the "Replace
+    /// this instance?" match, which stays lit for as long as that prompt
+    /// is up); `Some(deadline)` means a plain search match, which nano
+    /// auto-clears after ~1.5s (or ~0.8s with quickblank) of no input —
+    /// confirmed by timing the installed nano directly.
+    pub spotlight_deadline: Option<std::time::Instant>,
     pub mode: Mode,
     pub screen_rows: usize,
     pub screen_cols: usize,
@@ -140,6 +152,8 @@ impl Editor {
             status_level: StatusLevel::Normal,
             status_countdown: 0,
             bell_pending: false,
+            spotlight: None,
+            spotlight_deadline: None,
             mode: Mode::Editing,
             screen_rows: 24,
             screen_cols: 80,
@@ -177,6 +191,38 @@ impl Editor {
         self.status = Some(msg.into());
         self.status_level = StatusLevel::Mild;
         self.status_countdown = if self.options.quickblank { 1 } else { 20 };
+    }
+
+    /// Highlight a plain search match, auto-clearing after ~1.5s (0.8s with
+    /// quickblank) of no further input.
+    fn set_spotlight_timed(&mut self, pos: Pos, len: usize) {
+        self.spotlight = Some((pos, len));
+        let ms = if self.options.quickblank { 800 } else { 1500 };
+        self.spotlight_deadline = Some(std::time::Instant::now() + std::time::Duration::from_millis(ms));
+    }
+
+    /// Highlight the match currently up for replace confirmation; persists
+    /// until explicitly cleared (when the prompt is answered), not timed.
+    pub fn set_spotlight_persistent(&mut self, pos: Pos, len: usize) {
+        self.spotlight = Some((pos, len));
+        self.spotlight_deadline = None;
+    }
+
+    pub fn clear_spotlight(&mut self) {
+        self.spotlight = None;
+        self.spotlight_deadline = None;
+    }
+
+    /// If a timed spotlight's deadline has passed, clear it. Returns true
+    /// if it just got cleared (so the caller knows to redraw).
+    pub fn tick_spotlight_deadline(&mut self) -> bool {
+        if let Some(deadline) = self.spotlight_deadline {
+            if std::time::Instant::now() >= deadline {
+                self.clear_spotlight();
+                return true;
+            }
+        }
+        false
     }
 
     /// Call once per keystroke handled while focused on the main edit
@@ -707,6 +753,7 @@ impl Editor {
             Ok(Some((pos, len, wrapped))) => {
                 self.buf_mut().cursor = pos;
                 self.scroll_to_cursor();
+                self.set_spotlight_persistent(pos, len);
                 self.mode = Mode::Prompt(Prompt {
                     kind: PromptKind::ReplaceConfirm(ReplaceLoopState {
                         search,
@@ -725,10 +772,12 @@ impl Editor {
             }
             Ok(None) => {
                 self.mode = Mode::Editing;
+                self.clear_spotlight();
                 self.set_status(format!("\"{search}\" not found"));
             }
             Err(e) => {
                 self.mode = Mode::Editing;
+                self.clear_spotlight();
                 self.set_status(format!("Invalid regex: {e}"));
             }
         }
@@ -740,6 +789,7 @@ impl Editor {
     pub fn replace_choice(&mut self, mut state: ReplaceLoopState, choice: ReplaceChoice) {
         if matches!(choice, ReplaceChoice::Cancel) {
             self.mode = Mode::Editing;
+            self.clear_spotlight();
             self.report_replace_count(state.count);
             return;
         }
@@ -780,6 +830,7 @@ impl Editor {
                     }
                     self.buf_mut().cursor = pos;
                     self.scroll_to_cursor();
+                    self.set_spotlight_persistent(pos, len);
                     self.mode = Mode::Prompt(Prompt {
                         kind: PromptKind::ReplaceConfirm(state),
                         menu: Menu::YesNo,
@@ -791,11 +842,13 @@ impl Editor {
                 }
                 Ok(None) => {
                     self.mode = Mode::Editing;
+                    self.clear_spotlight();
                     self.report_replace_count(state.count);
                     return;
                 }
                 Err(e) => {
                     self.mode = Mode::Editing;
+                    self.clear_spotlight();
                     self.set_status(format!("Invalid regex: {e}"));
                     return;
                 }
@@ -838,9 +891,10 @@ impl Editor {
         let hay: Vec<&str> = text.split_inclusive('\n').collect();
         let found = find_in_lines(&hay, self.buf().cursor, pattern, backwards, self.search.case_sensitive, self.search.use_regex);
         match found {
-            Some(pos) => {
+            Some((pos, len)) => {
                 self.buf_mut().cursor = pos;
                 self.search.last_pattern = Some(pattern.to_string());
+                self.set_spotlight_timed(pos, len);
             }
             None => self.set_status(format!("\"{pattern}\" not found")),
         }
@@ -1010,20 +1064,22 @@ fn find_in_lines(
     backwards: bool,
     case_sensitive: bool,
     use_regex: bool,
-) -> Option<Pos> {
+) -> Option<(Pos, usize)> {
     let re = if use_regex {
         let pat = if case_sensitive { pattern.to_string() } else { format!("(?i){pattern}") };
         regex::Regex::new(&pat).ok()
     } else {
         None
     };
-    let matches_at = |line: &str, needle: &str| -> Vec<usize> {
+    let matches_at = |line: &str, needle: &str| -> Vec<(usize, usize)> {
         if let Some(re) = &re {
-            re.find_iter(line).map(|m| line[..m.start()].chars().count()).collect()
+            re.find_iter(line)
+                .map(|m| (line[..m.start()].chars().count(), line[m.start()..m.end()].chars().count()))
+                .collect()
         } else if case_sensitive {
             line.char_indices()
                 .filter(|(i, _)| line[*i..].starts_with(needle))
-                .map(|(i, _)| line[..i].chars().count())
+                .map(|(i, _)| (line[..i].chars().count(), needle.chars().count()))
                 .collect()
         } else {
             let lower_line = line.to_lowercase();
@@ -1031,7 +1087,7 @@ fn find_in_lines(
             lower_line
                 .char_indices()
                 .filter(|(i, _)| lower_line[*i..].starts_with(&lower_needle))
-                .map(|(i, _)| lower_line[..i].chars().count())
+                .map(|(i, _)| (lower_line[..i].chars().count(), lower_needle.chars().count()))
                 .collect()
         }
     };
@@ -1050,13 +1106,13 @@ fn find_in_lines(
         let raw = lines[line_idx].trim_end_matches(['\n', '\r']);
         let mut cols = matches_at(raw, pattern);
         if !backwards {
-            cols.retain(|&c| line_idx != from.line || c > from.col);
+            cols.retain(|&(c, _)| line_idx != from.line || c > from.col);
         } else {
             cols.reverse();
-            cols.retain(|&c| line_idx != from.line || c < from.col);
+            cols.retain(|&(c, _)| line_idx != from.line || c < from.col);
         }
-        if let Some(&c) = cols.first() {
-            return Some(Pos::new(line_idx, c));
+        if let Some(&(c, len)) = cols.first() {
+            return Some((Pos::new(line_idx, c), len));
         }
     }
     None

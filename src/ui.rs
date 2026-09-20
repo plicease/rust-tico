@@ -70,6 +70,7 @@ pub fn run(editor: &mut Editor) -> io::Result<()> {
             }
         } else if matches!(editor.mode, Mode::Editing) {
             dirty = maybe_check_external_change(editor);
+            dirty |= editor.tick_spotlight_deadline();
         }
 
         if dirty {
@@ -128,6 +129,14 @@ fn handle_key(editor: &mut Editor, key: KeyEvent) {
             // keystroke is dispatched (so if the dispatch itself shows a
             // fresh message, this tick doesn't immediately eat into it).
             editor.tick_status_countdown();
+            // A search match's highlight is cleared by the very next
+            // keystroke, same as its status-message countdown above —
+            // confirmed by timing the installed nano (a key press ends its
+            // half-delay wait immediately, rather than waiting out the
+            // ~1.5s timeout). Any spotlight still around here is a timed
+            // one; the persistent replace-confirm kind only exists while
+            // in Mode::Prompt, not here.
+            editor.clear_spotlight();
             handle_editing_key(editor, key);
         }
         Mode::Help(lines) => {
@@ -878,23 +887,132 @@ fn render_buffer(editor: &Editor, out: &mut impl Write, start_row: u16, rows: us
     let buf = editor.buf();
     let gutter = line_number_gutter_width(editor);
     let cols = editor.screen_cols;
+    let tabsize = editor.options.tabsize as usize;
     for r in 0..rows {
         queue!(out, MoveTo(0, start_row + r as u16))?;
         let line_idx = buf.top_line + r;
         let mut rendered = String::new();
+        // Character range within `rendered` (post-gutter, post-tab-expansion)
+        // to paint with spotlightcolor, if the active search/replace match
+        // is on this line.
+        let mut highlight: Option<(usize, usize)> = None;
         if line_idx < buf.line_count() {
             if gutter > 0 {
                 rendered.push_str(&format!("{:>width$} ", line_idx + 1, width = gutter - 1));
             }
             let raw = buf.line(line_idx);
-            rendered.push_str(&expand_tabs(&raw, editor.options.tabsize as usize));
+            let gutter_chars = rendered.chars().count();
+            rendered.push_str(&expand_tabs(&raw, tabsize));
+            if let Some((pos, len)) = editor.spotlight {
+                if pos.line == line_idx {
+                    let start = gutter_chars + display_width(&raw, pos.col, tabsize);
+                    let end = gutter_chars + display_width(&raw, pos.col + len, tabsize);
+                    if end > start {
+                        highlight = Some((start, end));
+                    }
+                }
+            }
         } else if gutter > 0 {
             rendered.push('~');
         }
-        let rendered: String = rendered.chars().take(cols).collect();
-        queue!(out, Print(format!("{rendered:<cols$}", cols = cols)))?;
+
+        let chars: Vec<char> = rendered.chars().take(cols).collect();
+        let len = chars.len();
+        match highlight.map(|(s, e)| (s.min(len), e.min(len))) {
+            Some((s, e)) if s < e => {
+                let (fg, bg) = spotlight_colors(&editor.options.spotlightcolor);
+                let before: String = chars[..s].iter().collect();
+                let mid: String = chars[s..e].iter().collect();
+                let after: String = chars[e..].iter().collect();
+                queue!(out, Print(before))?;
+                queue!(out, SetForegroundColor(fg), SetBackgroundColor(bg), Print(mid), SetAttribute(Attribute::Reset))?;
+                queue!(out, Print(after))?;
+                if len < cols {
+                    queue!(out, Print(" ".repeat(cols - len)))?;
+                }
+            }
+            _ => {
+                let s: String = chars.into_iter().collect();
+                queue!(out, Print(format!("{s:<cols$}", cols = cols)))?;
+            }
+        }
     }
     Ok(())
+}
+
+/// Map a nanorc color spec to the crossterm colors that produce the same
+/// escape codes as nano itself (crossterm's naming is inverted from
+/// nano's: `Color::Red` is bright/light red, `Color::DarkRed` is the
+/// standard-intensity red nano means by plain "red" — confirmed against
+/// crossterm's own SGR-generation source).
+fn spotlight_colors(cp: &crate::options::ColorPair) -> (Color, Color) {
+    let fg = cp.fg.map(map_named_color).unwrap_or(Color::Black);
+    let bg = cp.bg.map(map_named_color).unwrap_or(Color::Yellow);
+    (fg, bg)
+}
+
+fn map_named_color(nc: crate::options::NamedColor) -> Color {
+    use crate::options::Color as OC;
+    match nc.color {
+        OC::Black => {
+            if nc.light {
+                Color::DarkGrey
+            } else {
+                Color::Black
+            }
+        }
+        OC::Red => {
+            if nc.light {
+                Color::Red
+            } else {
+                Color::DarkRed
+            }
+        }
+        OC::Green => {
+            if nc.light {
+                Color::Green
+            } else {
+                Color::DarkGreen
+            }
+        }
+        OC::Yellow => {
+            if nc.light {
+                Color::Yellow
+            } else {
+                Color::DarkYellow
+            }
+        }
+        OC::Blue => {
+            if nc.light {
+                Color::Blue
+            } else {
+                Color::DarkBlue
+            }
+        }
+        OC::Magenta => {
+            if nc.light {
+                Color::Magenta
+            } else {
+                Color::DarkMagenta
+            }
+        }
+        OC::Cyan => {
+            if nc.light {
+                Color::Cyan
+            } else {
+                Color::DarkCyan
+            }
+        }
+        OC::White => {
+            if nc.light {
+                Color::White
+            } else {
+                Color::Grey
+            }
+        }
+        OC::Normal => Color::Reset,
+        OC::Rgb(r, g, b) => Color::Rgb { r, g, b },
+    }
 }
 
 fn expand_tabs(line: &str, tabsize: usize) -> String {
