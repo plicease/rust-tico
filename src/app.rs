@@ -893,6 +893,7 @@ impl Editor {
         match found {
             Some((pos, len)) => {
                 self.buf_mut().cursor = pos;
+                self.scroll_to_cursor();
                 self.search.last_pattern = Some(pattern.to_string());
                 self.set_spotlight_timed(pos, len);
             }
@@ -1160,6 +1161,23 @@ mod tests {
         let caps = re.captures("a").unwrap();
         // Only group 1 exists; \5 isn't a valid group so stays literal.
         assert_eq!(expand_backreferences(r"\5-\1", &caps), r"\5-a");
+    }
+
+    #[test]
+    fn search_scrolls_offscreen_match_into_view() {
+        let text = (0..50).map(|i| format!("line{i}\n")).collect::<String>();
+        let mut ed = test_editor(&text);
+        ed.screen_rows = 24; // text_rows() ~= 20 with default title/status/help rows
+        ed.buf_mut().cursor = Pos::new(0, 0);
+        ed.buf_mut().top_line = 0;
+        ed.run_search("line45".to_string().as_str(), false);
+        assert_eq!(ed.buf().cursor.line, 45);
+        let rows = ed.text_rows();
+        assert!(
+            ed.buf().top_line <= 45 && 45 < ed.buf().top_line + rows,
+            "match at line 45 should be within the scrolled viewport (top_line={}, rows={rows})",
+            ed.buf().top_line
+        );
     }
 
     #[test]
