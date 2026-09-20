@@ -1,0 +1,25 @@
+[package]
+name = "tico"
+version = "0.1.0"
+edition = "2024"
+description = "Yet Another Text Editor"
+repository = "https://github.com/plicease/tico"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0.104"
+
+
+[package.metadata.deb]
+maintainer = "Nobody <devnull@wdlabs.com>"
+copyright = "Nobody"
+extended-description = """\
+Yet Another Text Editor"""
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/tico", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/tico/README.md", "644"],
+    ["LICENSE", "usr/share/doc/tico/LICENSE", "644"],
+]
+
