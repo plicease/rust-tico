@@ -170,6 +170,10 @@ fn handle_editing_key(editor: &mut Editor, key: KeyEvent) {
     if let KeyCode::Char(c) = key.code {
         if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
             editor.insert_char(c);
+            // Plain self-insertion bypasses execute(), which is what
+            // normally keeps the cursor in view (vertically and, for a
+            // long line, horizontally) after an action.
+            editor.scroll_to_cursor();
         }
     }
     editor.maybe_update_lock_modified_flag();
@@ -716,8 +720,13 @@ fn finish_cursor(editor: &Editor, out: &mut impl Write, text_start_row: u16) -> 
     } else {
         let buf = editor.buf();
         let screen_line = buf.cursor.line.saturating_sub(buf.top_line);
-        let gutter = line_number_gutter_width(editor);
-        let col = gutter + display_width(&buf.line(buf.cursor.line), buf.cursor.col, editor.options.tabsize as usize);
+        let gutter = editor.gutter_width();
+        let cursor_col = crate::buffer::display_width(&buf.line(buf.cursor.line), buf.cursor.col, editor.options.tabsize as usize);
+        // `left_col` is only ever nonzero for the cursor's own line (see
+        // `render_buffer`), and a `<` marker takes up one column whenever
+        // it's scrolled, shifting everything after it right by one.
+        let show_left = buf.left_col > 0;
+        let col = gutter + if show_left { 1 } else { 0 } + cursor_col.saturating_sub(buf.left_col);
         queue!(
             out,
             MoveTo(col.min(editor.screen_cols.saturating_sub(1)) as u16, (text_start_row as usize + screen_line) as u16),
@@ -725,29 +734,6 @@ fn finish_cursor(editor: &Editor, out: &mut impl Write, text_start_row: u16) -> 
         )?;
     }
     Ok(())
-}
-
-fn line_number_gutter_width(editor: &Editor) -> usize {
-    if !editor.options.linenumbers {
-        return 0;
-    }
-    let digits = editor.buf().line_count().to_string().len();
-    digits + 1
-}
-
-fn display_width(line: &str, up_to_col: usize, tabsize: usize) -> usize {
-    let mut w = 0;
-    for (i, c) in line.chars().enumerate() {
-        if i >= up_to_col {
-            break;
-        }
-        if c == '\t' {
-            w += tabsize - (w % tabsize);
-        } else {
-            w += unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
-        }
-    }
-    w
 }
 
 fn render_title_bar(editor: &Editor, out: &mut impl Write, cols: usize) -> io::Result<()> {
@@ -971,7 +957,7 @@ fn render_shortcut_bar(out: &mut impl Write, row: u16, cols: usize, entries: &[(
 
 fn render_buffer(editor: &Editor, out: &mut impl Write, start_row: u16, rows: usize) -> io::Result<()> {
     let buf = editor.buf();
-    let gutter = line_number_gutter_width(editor);
+    let gutter = editor.gutter_width();
     let cols = editor.screen_cols;
     let tabsize = editor.options.tabsize as usize;
 
@@ -991,18 +977,22 @@ fn render_buffer(editor: &Editor, out: &mut impl Write, start_row: u16, rows: us
         let mut rendered = String::new();
         // Syntax-highlight classification, one entry per char of `rendered`.
         let mut kinds: Vec<Option<crate::syntax::HighlightKind>> = Vec::new();
-        // Character range within `rendered` (post-gutter, post-tab-expansion)
-        // to paint with spotlightcolor, taking precedence over syntax colors,
-        // if the active search/replace match is on this line.
+        // Character range within `rendered` (post-gutter, post-tab-expansion,
+        // pre-horizontal-scroll) to paint with spotlightcolor, taking
+        // precedence over syntax colors, if the active search/replace match
+        // is on this line.
         let mut highlight: Option<(usize, usize)> = None;
-        if line_idx < buf.line_count() {
+        let mut gutter_chars = 0;
+        let is_real_line = line_idx < buf.line_count();
+
+        if is_real_line {
             if gutter > 0 {
                 let prefix = format!("{:>width$} ", line_idx + 1, width = gutter - 1);
                 kinds.extend(prefix.chars().map(|_| None));
                 rendered.push_str(&prefix);
             }
             let raw = buf.line(line_idx);
-            let gutter_chars = rendered.chars().count();
+            gutter_chars = rendered.chars().count();
 
             let mut char_kinds: Vec<Option<crate::syntax::HighlightKind>> = vec![None; raw.chars().count()];
             if !spans.is_empty() {
@@ -1028,8 +1018,8 @@ fn render_buffer(editor: &Editor, out: &mut impl Write, start_row: u16, rows: us
 
             if let Some((pos, len)) = editor.spotlight {
                 if pos.line == line_idx {
-                    let start = gutter_chars + display_width(&raw, pos.col, tabsize);
-                    let end = gutter_chars + display_width(&raw, pos.col + len, tabsize);
+                    let start = gutter_chars + crate::buffer::display_width(&raw, pos.col, tabsize);
+                    let end = gutter_chars + crate::buffer::display_width(&raw, pos.col + len, tabsize);
                     if end > start {
                         highlight = Some((start, end));
                     }
@@ -1040,7 +1030,47 @@ fn render_buffer(editor: &Editor, out: &mut impl Write, start_row: u16, rows: us
             kinds.push(None);
         }
 
-        let chars: Vec<char> = rendered.chars().take(cols).collect();
+        // Horizontal scroll: only the cursor's own line ever gets a nonzero
+        // offset (nano scrolls just the current line sideways, not the
+        // whole viewport — confirmed against the installed nano). A `<`
+        // marker appears once scrolled; a `>` marker appears whenever the
+        // line's text still overflows the available width, on any line.
+        let full_chars: Vec<char> = rendered.chars().collect();
+        let text_total = full_chars.len().saturating_sub(gutter_chars);
+        let left = if is_real_line && line_idx == buf.cursor.line { buf.left_col.min(text_total) } else { 0 };
+        let content_width = cols.saturating_sub(gutter_chars);
+        let show_left = left > 0;
+        let mut capacity = content_width.saturating_sub(if show_left { 1 } else { 0 });
+        let show_right = left + capacity < text_total;
+        if show_right {
+            capacity = capacity.saturating_sub(1);
+        }
+        let vis_start = gutter_chars + left;
+        let vis_end = (vis_start + capacity).min(full_chars.len());
+
+        let mut chars: Vec<char> = full_chars[..gutter_chars].to_vec();
+        if show_left {
+            chars.push('<');
+        }
+        chars.extend_from_slice(&full_chars[vis_start..vis_end]);
+        if show_right {
+            chars.push('>');
+        }
+        let mut windowed_kinds: Vec<Option<crate::syntax::HighlightKind>> = kinds[..gutter_chars].to_vec();
+        if show_left {
+            windowed_kinds.push(None);
+        }
+        windowed_kinds.extend_from_slice(&kinds[vis_start..vis_end]);
+        if show_right {
+            windowed_kinds.push(None);
+        }
+        let kinds = windowed_kinds;
+        let marker_shift = gutter_chars + if show_left { 1 } else { 0 };
+        let highlight = highlight.map(|(s, e)| {
+            let clamp = |x: usize| marker_shift + x.clamp(vis_start, vis_end) - vis_start;
+            (clamp(s), clamp(e))
+        });
+
         let len = chars.len();
         let spot = highlight.map(|(s, e)| (s.min(len), e.min(len))).filter(|(s, e)| s < e);
 

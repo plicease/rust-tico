@@ -279,6 +279,17 @@ impl Editor {
         self.screen_rows.saturating_sub(used).max(1)
     }
 
+    /// Width, in columns, of the line-number margin (0 when `linenumbers`
+    /// is off) — the text area proper is `screen_cols - gutter_width()`
+    /// wide.
+    pub fn gutter_width(&self) -> usize {
+        if !self.options.linenumbers {
+            return 0;
+        }
+        let digits = self.buf().line_count().to_string().len();
+        digits + 1
+    }
+
     pub fn scroll_to_cursor(&mut self) {
         let rows = self.text_rows();
         let buf = self.buf_mut();
@@ -287,6 +298,38 @@ impl Editor {
         } else if buf.cursor.line >= buf.top_line + rows {
             buf.top_line = buf.cursor.line + 1 - rows;
         }
+        self.scroll_horizontal_to_cursor();
+    }
+
+    /// Horizontal counterpart of `scroll_to_cursor`, for lines too long to
+    /// fit the screen (relevant only when `softwrap` is off, since a
+    /// soft-wrapped line never needs sideways scrolling). Adjusts
+    /// `buf.left_col` — the display-column offset applied when rendering
+    /// just the cursor's current line — using the same "cushion" scheme
+    /// nano uses when not soft-wrapping (its `united_sidescroll`, see
+    /// `get_page_start()` in nano's src/utils.c): scrolling only kicks in
+    /// within a few columns of either edge, and then jumps just enough to
+    /// restore that margin, rather than moving one column at a time.
+    fn scroll_horizontal_to_cursor(&mut self) {
+        const CUSHION: usize = 3;
+        let tabsize = self.options.tabsize as usize;
+        let width = self.screen_cols.saturating_sub(self.gutter_width());
+        let buf = self.buf_mut();
+        let cursor_col = crate::buffer::display_width(&buf.line(buf.cursor.line), buf.cursor.col, tabsize);
+        let left = buf.left_col;
+        buf.left_col = if width <= 2 * CUSHION + 1 {
+            // Too narrow for a cushioned scroll; just keep the cursor in
+            // view.
+            cursor_col.saturating_sub(width.saturating_sub(1))
+        } else if cursor_col < CUSHION {
+            0
+        } else if cursor_col < left + CUSHION {
+            cursor_col - CUSHION
+        } else if cursor_col > left + width - CUSHION - 1 {
+            cursor_col + CUSHION + 1 - width
+        } else {
+            left
+        };
     }
 
     /// Like `scroll_to_cursor`, but when the cursor is off-screen, centers
@@ -302,6 +345,7 @@ impl Editor {
         if buf.cursor.line < buf.top_line || buf.cursor.line >= buf.top_line + rows {
             buf.top_line = buf.cursor.line.saturating_sub(rows / 2);
         }
+        self.scroll_horizontal_to_cursor();
     }
 
     /// Dispatch one editing action. Returns true if the caller should
@@ -1404,4 +1448,61 @@ mod tests {
         assert!(matches!(ed.mode, Mode::Editing));
         assert!(ed.status.as_deref().unwrap_or("").starts_with("Invalid regex"));
     }
+
+    #[test]
+    fn short_line_never_scrolls_horizontally() {
+        let mut ed = test_editor("short");
+        ed.screen_cols = 60;
+        ed.buf_mut().cursor.col = 5;
+        ed.scroll_to_cursor();
+        assert_eq!(ed.buf().left_col, 0);
+    }
+
+    #[test]
+    fn long_line_scrolls_to_keep_cursor_visible() {
+        // Regression test: the first cut of this formula underflowed
+        // (`cursor_col - width + CUSHION + 1` computed left-to-right in
+        // usize) for exactly this kind of case, panicking in a debug
+        // build the moment the cursor crossed the scroll threshold.
+        let mut ed = test_editor(&"x".repeat(200));
+        ed.screen_cols = 60;
+        for _ in 0..65 {
+            ed.execute(Action::Right);
+        }
+        assert_eq!(ed.buf().cursor.col, 65);
+        assert!(ed.buf().left_col > 0, "cursor at column 65 in a 60-wide view should have scrolled");
+        // The cursor itself must still land within the visible window
+        // (leaving room for the '<' marker its scroll implies).
+        assert!(
+            ed.buf().cursor.col > ed.buf().left_col && ed.buf().cursor.col < ed.buf().left_col + ed.screen_cols,
+            "cursor (col={}) should be inside the scrolled window (left_col={})",
+            ed.buf().cursor.col,
+            ed.buf().left_col
+        );
+    }
+
+    #[test]
+    fn scroll_resets_when_cursor_returns_near_start() {
+        let mut ed = test_editor(&"x".repeat(200));
+        ed.screen_cols = 60;
+        for _ in 0..65 {
+            ed.execute(Action::Right);
+        }
+        assert!(ed.buf().left_col > 0);
+        ed.buf_mut().cursor.col = 0;
+        ed.scroll_to_cursor();
+        assert_eq!(ed.buf().left_col, 0);
+    }
+
+    #[test]
+    fn narrow_screen_does_not_panic() {
+        // width <= 2*CUSHION+1 takes the "too narrow to cushion" fallback;
+        // make sure it doesn't underflow either.
+        let mut ed = test_editor(&"x".repeat(50));
+        ed.screen_cols = 3;
+        for _ in 0..20 {
+            ed.execute(Action::Right); // must not panic
+        }
+    }
 }
+

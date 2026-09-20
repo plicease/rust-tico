@@ -17,6 +17,25 @@ impl Pos {
     }
 }
 
+/// Display width (in columns, with tabs expanded) of `line` up to (but not
+/// including) its `up_to_col`'th character. Shared by rendering (tab
+/// expansion, spotlight positioning) and horizontal-scroll math, both of
+/// which need to convert a character offset into a screen column.
+pub fn display_width(line: &str, up_to_col: usize, tabsize: usize) -> usize {
+    let mut w = 0;
+    for (i, c) in line.chars().enumerate() {
+        if i >= up_to_col {
+            break;
+        }
+        if c == '\t' {
+            w += tabsize - (w % tabsize);
+        } else {
+            w += unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
+        }
+    }
+    w
+}
+
 /// One undoable edit: replacing the text in `[start, end)` (in the buffer
 /// *before* the edit) with `inserted`. Undo restores `removed` at `start`;
 /// redo re-applies `inserted`.
@@ -51,6 +70,11 @@ pub struct Buffer {
     /// merges when the file changes on disk while we have local edits.
     pub original_content: String,
     pub top_line: usize,
+    /// Horizontal scroll offset (in display columns) applied when rendering
+    /// the cursor's current line, when it's too long to fit the screen and
+    /// `softwrap` is off. Other lines always render from column 0 — nano
+    /// scrolls only the current line sideways, not the whole viewport.
+    pub left_col: usize,
     pub language: Option<&'static crate::syntax::LanguageDef>,
     /// Remembered column for consecutive up/down movement through shorter
     /// lines, reset by any horizontal movement or edit (as in nano).
@@ -78,6 +102,7 @@ impl Buffer {
             disk_state: None,
             original_content: String::new(),
             top_line: 0,
+            left_col: 0,
             language: None,
             goal_col: None,
             lock_filename: None,
