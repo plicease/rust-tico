@@ -110,6 +110,11 @@ fn handle_key(editor: &mut Editor, key: KeyEvent) {
     match std::mem::replace(&mut editor.mode, Mode::Editing) {
         Mode::Editing => {
             editor.mode = Mode::Editing;
+            // Matches nano's get_kbinput(): the countdown ticks once per
+            // keystroke read from the main edit window, *before* that
+            // keystroke is dispatched (so if the dispatch itself shows a
+            // fresh message, this tick doesn't immediately eat into it).
+            editor.tick_status_countdown();
             handle_editing_key(editor, key);
         }
         Mode::Help(lines) => {
@@ -539,18 +544,22 @@ fn render_status_line(editor: &Editor, out: &mut impl Write, row: u16, cols: usi
         }
         queue!(out, Print(s))
     } else if let Some(msg) = &editor.status {
+        // nano shows status-bar messages in reverse video (confirmed
+        // against the installed nano's own escape-code output).
         let bracketed = format!("[ {msg} ]");
         let pad = cols.saturating_sub(bracketed.chars().count()) / 2;
-        let mut s = String::new();
-        for _ in 0..pad {
-            s.push(' ');
+        if pad > 0 {
+            queue!(out, Print(" ".repeat(pad)))?;
         }
-        s.push_str(&bracketed);
-        while s.chars().count() < cols {
-            s.push(' ');
+        let remaining = cols.saturating_sub(pad);
+        let shown: String = bracketed.chars().take(remaining).collect();
+        let shown_len = shown.chars().count();
+        queue!(out, SetAttribute(Attribute::Reverse), Print(shown), SetAttribute(Attribute::Reset))?;
+        let used = pad + shown_len;
+        if used < cols {
+            queue!(out, Print(" ".repeat(cols - used)))?;
         }
-        let s: String = s.chars().take(cols).collect();
-        queue!(out, Print(s))
+        Ok(())
     } else {
         queue!(out, Print(" ".repeat(cols)))
     }

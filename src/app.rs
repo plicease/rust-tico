@@ -60,6 +60,11 @@ pub struct Editor {
     pub cut_was_consecutive: bool,
     pub search: SearchState,
     pub status: Option<String>,
+    /// Keystrokes remaining before the status message is wiped, mirroring
+    /// nano's `countdown` in src/winio.c: a status message is cleared after
+    /// 20 keystrokes (or 1, with `quickblank`) in the main editing window —
+    /// it is not a timer.
+    status_countdown: u32,
     pub mode: Mode,
     pub screen_rows: usize,
     pub screen_cols: usize,
@@ -76,6 +81,7 @@ impl Editor {
             cut_was_consecutive: false,
             search: SearchState::default(),
             status: None,
+            status_countdown: 0,
             mode: Mode::Editing,
             screen_rows: 24,
             screen_cols: 80,
@@ -92,6 +98,24 @@ impl Editor {
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
         self.status = Some(msg.into());
+        self.status_countdown = if self.options.quickblank { 1 } else { 20 };
+    }
+
+    /// Call once per keystroke handled while focused on the main edit
+    /// window (not while a prompt is active), matching nano's
+    /// `blank_it_when_expired()`. Wipes the status message once its
+    /// countdown reaches zero. Returns true if the message was just wiped
+    /// (so the caller knows a redraw is needed).
+    pub fn tick_status_countdown(&mut self) -> bool {
+        if self.status_countdown == 0 {
+            return false;
+        }
+        self.status_countdown -= 1;
+        if self.status_countdown == 0 {
+            self.status = None;
+            return true;
+        }
+        false
     }
 
     /// Number of rows available for buffer text (screen minus title bar,

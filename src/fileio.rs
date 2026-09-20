@@ -21,6 +21,31 @@ pub fn stat_disk_state(path: &Path) -> Option<DiskState> {
     })
 }
 
+/// A human-readable summary of a freshly loaded file's size, matching
+/// nano's post-load status message (`Read %zu line(s)` in src/files.c).
+/// nano counts actual lines of content, not ropey's `len_lines()` (which
+/// counts a trailing empty line after a final newline).
+pub fn describe_read(text: &str) -> String {
+    let n = nano_style_line_count(text);
+    if n == 1 {
+        "Read 1 line".to_string()
+    } else {
+        format!("Read {n} lines")
+    }
+}
+
+fn nano_style_line_count(text: &str) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let newlines = text.matches('\n').count();
+    if text.ends_with('\n') {
+        newlines
+    } else {
+        newlines + 1
+    }
+}
+
 pub fn load_file(path: &Path) -> std::io::Result<Buffer> {
     let text = std::fs::read_to_string(path)?;
     let mut buf = Buffer::from_text(&text, Some(path.to_path_buf()));
@@ -231,6 +256,15 @@ pub fn three_way_merge(base: &str, ours: &str, theirs: &str) -> MergeResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_line_count_matches_nano() {
+        assert_eq!(describe_read("a\nb\n"), "Read 2 lines");
+        assert_eq!(describe_read("a\nb"), "Read 2 lines");
+        assert_eq!(describe_read("a\nb\nc\n"), "Read 3 lines");
+        assert_eq!(describe_read("onlyline"), "Read 1 line");
+        assert_eq!(describe_read(""), "Read 0 lines");
+    }
 
     #[test]
     fn merges_non_overlapping_edits() {

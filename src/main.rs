@@ -34,12 +34,18 @@ fn main() -> anyhow::Result<()> {
     if file_args.is_empty() {
         editor.buffers.push(buffer::Buffer::empty());
     } else {
-        for fa in &file_args {
+        for (i, fa) in file_args.iter().enumerate() {
             let path = std::path::PathBuf::from(&fa.path);
-            let mut buf = if path.exists() {
-                fileio::load_file(&path).unwrap_or_else(|_| buffer::Buffer::from_text("", Some(path.clone())))
+            let (mut buf, message) = if path.exists() {
+                match fileio::load_file(&path) {
+                    Ok(buf) => {
+                        let msg = fileio::describe_read(&buf.to_string());
+                        (buf, msg)
+                    }
+                    Err(e) => (buffer::Buffer::from_text("", Some(path.clone())), format!("Error reading {}: {e}", path.display())),
+                }
             } else {
-                buffer::Buffer::from_text("", Some(path.clone()))
+                (buffer::Buffer::from_text("", Some(path.clone())), "New File".to_string())
             };
             if let Some(line) = fa.line {
                 let target = (line.max(1) as usize) - 1;
@@ -49,6 +55,12 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             editor.buffers.push(buf);
+            // The status message reflects whichever buffer ends up focused
+            // (the first one), matching nano showing the "Read N lines"
+            // blurb for the file that lands in the active edit window.
+            if i == 0 {
+                editor.set_status(message);
+            }
         }
     }
     editor.current = 0;
