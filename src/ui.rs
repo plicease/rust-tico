@@ -974,21 +974,58 @@ fn render_buffer(editor: &Editor, out: &mut impl Write, start_row: u16, rows: us
     let gutter = line_number_gutter_width(editor);
     let cols = editor.screen_cols;
     let tabsize = editor.options.tabsize as usize;
+
+    // Recomputed on every render rather than cached/incrementally reparsed:
+    // tree-sitter is fast, and redraws are already limited to actual dirty
+    // events elsewhere, so a full-buffer reparse per redraw is an acceptable
+    // v1 cost.
+    let spans: Vec<crate::syntax::HighlightSpan> = if editor.options.syntax_highlighting {
+        buf.language.map(|lang| crate::syntax::highlight(&buf.to_string(), lang)).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     for r in 0..rows {
         queue!(out, MoveTo(0, start_row + r as u16))?;
         let line_idx = buf.top_line + r;
         let mut rendered = String::new();
+        // Syntax-highlight classification, one entry per char of `rendered`.
+        let mut kinds: Vec<Option<crate::syntax::HighlightKind>> = Vec::new();
         // Character range within `rendered` (post-gutter, post-tab-expansion)
-        // to paint with spotlightcolor, if the active search/replace match
-        // is on this line.
+        // to paint with spotlightcolor, taking precedence over syntax colors,
+        // if the active search/replace match is on this line.
         let mut highlight: Option<(usize, usize)> = None;
         if line_idx < buf.line_count() {
             if gutter > 0 {
-                rendered.push_str(&format!("{:>width$} ", line_idx + 1, width = gutter - 1));
+                let prefix = format!("{:>width$} ", line_idx + 1, width = gutter - 1);
+                kinds.extend(prefix.chars().map(|_| None));
+                rendered.push_str(&prefix);
             }
             let raw = buf.line(line_idx);
             let gutter_chars = rendered.chars().count();
-            rendered.push_str(&expand_tabs(&raw, tabsize));
+
+            let mut char_kinds: Vec<Option<crate::syntax::HighlightKind>> = vec![None; raw.chars().count()];
+            if !spans.is_empty() {
+                let line_start = buf.line_start_byte(line_idx);
+                let line_end = line_start + raw.len();
+                for span in &spans {
+                    if span.end <= line_start || span.start >= line_end {
+                        continue;
+                    }
+                    let rel_start = span.start.max(line_start) - line_start;
+                    let rel_end = span.end.min(line_end) - line_start;
+                    let cs = raw[..rel_start].chars().count();
+                    let ce = raw[..rel_end].chars().count();
+                    for k in &mut char_kinds[cs..ce] {
+                        *k = Some(span.kind);
+                    }
+                }
+            }
+
+            let (expanded, expanded_kinds) = expand_tabs_with_kinds(&raw, &char_kinds, tabsize);
+            rendered.push_str(&expanded);
+            kinds.extend(expanded_kinds);
+
             if let Some((pos, len)) = editor.spotlight {
                 if pos.line == line_idx {
                     let start = gutter_chars + display_width(&raw, pos.col, tabsize);
@@ -1000,27 +1037,42 @@ fn render_buffer(editor: &Editor, out: &mut impl Write, start_row: u16, rows: us
             }
         } else if gutter > 0 {
             rendered.push('~');
+            kinds.push(None);
         }
 
         let chars: Vec<char> = rendered.chars().take(cols).collect();
         let len = chars.len();
-        match highlight.map(|(s, e)| (s.min(len), e.min(len))) {
-            Some((s, e)) if s < e => {
-                let (fg, bg) = spotlight_colors(&editor.options.spotlightcolor);
-                let before: String = chars[..s].iter().collect();
-                let mid: String = chars[s..e].iter().collect();
-                let after: String = chars[e..].iter().collect();
-                queue!(out, Print(before))?;
-                queue!(out, SetForegroundColor(fg), SetBackgroundColor(bg), Print(mid), SetAttribute(Attribute::Reset))?;
-                queue!(out, Print(after))?;
-                if len < cols {
-                    queue!(out, Print(" ".repeat(cols - len)))?;
+        let spot = highlight.map(|(s, e)| (s.min(len), e.min(len))).filter(|(s, e)| s < e);
+
+        let (spot_fg, spot_bg) = spotlight_colors(&editor.options.spotlightcolor);
+        let mut i = 0;
+        while i < len {
+            let in_spot = spot.is_some_and(|(s, e)| i >= s && i < e);
+            let kind = if in_spot { None } else { kinds.get(i).copied().flatten() };
+            let mut j = i + 1;
+            while j < len {
+                let j_in_spot = spot.is_some_and(|(s, e)| j >= s && j < e);
+                if j_in_spot != in_spot {
+                    break;
                 }
+                let j_kind = if j_in_spot { None } else { kinds.get(j).copied().flatten() };
+                if j_kind != kind {
+                    break;
+                }
+                j += 1;
             }
-            _ => {
-                let s: String = chars.into_iter().collect();
-                queue!(out, Print(format!("{s:<cols$}", cols = cols)))?;
+            let segment: String = chars[i..j].iter().collect();
+            if in_spot {
+                queue!(out, SetForegroundColor(spot_fg), SetBackgroundColor(spot_bg), Print(segment), SetAttribute(Attribute::Reset))?;
+            } else if let Some(kind) = kind {
+                queue!(out, SetForegroundColor(syntax_color(kind)), Print(segment), SetAttribute(Attribute::Reset))?;
+            } else {
+                queue!(out, Print(segment))?;
             }
+            i = j;
+        }
+        if len < cols {
+            queue!(out, Print(" ".repeat(cols - len)))?;
         }
     }
     Ok(())
@@ -1101,20 +1153,52 @@ fn map_named_color(nc: crate::options::NamedColor) -> Color {
     }
 }
 
-fn expand_tabs(line: &str, tabsize: usize) -> String {
+/// Like tab expansion alone, but carries each source character's syntax
+/// classification along to every column it expands to, so a tab adjacent to
+/// a highlighted token doesn't break the highlighting.
+fn expand_tabs_with_kinds(
+    line: &str,
+    kinds: &[Option<crate::syntax::HighlightKind>],
+    tabsize: usize,
+) -> (String, Vec<Option<crate::syntax::HighlightKind>>) {
     let mut out = String::new();
+    let mut out_kinds = Vec::new();
     let mut w = 0;
-    for c in line.chars() {
+    for (c, k) in line.chars().zip(kinds.iter().copied()) {
         if c == '\t' {
             let n = tabsize - (w % tabsize);
             for _ in 0..n {
                 out.push(' ');
+                out_kinds.push(k);
             }
             w += n;
         } else {
             out.push(c);
+            out_kinds.push(k);
             w += unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
         }
     }
-    out
+    (out, out_kinds)
+}
+
+/// Map a `HighlightKind` to a terminal color. Not derived from any nanorc
+/// syntax file (tico's own syntax highlighting is independent of nano's
+/// per-language color files) but loosely follows the same conventions found
+/// there: green comments, yellow strings, magenta-ish numbers/constants,
+/// blue keywords.
+fn syntax_color(kind: crate::syntax::HighlightKind) -> Color {
+    use crate::syntax::HighlightKind as HK;
+    match kind {
+        HK::Comment => Color::DarkGreen,
+        HK::String => Color::Yellow,
+        HK::Number => Color::Magenta,
+        HK::Keyword => Color::Blue,
+        HK::Function => Color::Cyan,
+        HK::Type => Color::DarkYellow,
+        HK::Constant => Color::DarkMagenta,
+        HK::Variable => Color::DarkCyan,
+        HK::Module => Color::DarkBlue,
+        HK::Attribute => Color::Green,
+        HK::Tag => Color::Red,
+    }
 }

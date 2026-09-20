@@ -51,7 +51,7 @@ pub struct Buffer {
     /// merges when the file changes on disk while we have local edits.
     pub original_content: String,
     pub top_line: usize,
-    pub language: Option<String>,
+    pub language: Option<&'static crate::syntax::LanguageDef>,
     /// Remembered column for consecutive up/down movement through shorter
     /// lines, reset by any horizontal movement or edit (as in nano).
     goal_col: Option<usize>,
@@ -103,6 +103,14 @@ impl Buffer {
         }
         let s = self.rope.line(idx).to_string();
         s.trim_end_matches(['\n', '\r']).to_string()
+    }
+
+    /// Byte offset of the start of line `idx` within the buffer's full
+    /// text (as returned by `to_string()`) — for mapping whole-buffer byte
+    /// ranges (e.g. tree-sitter highlight spans) to a specific line.
+    pub fn line_start_byte(&self, idx: usize) -> usize {
+        let idx = idx.min(self.rope.len_lines().saturating_sub(1));
+        self.rope.line_to_byte(idx)
     }
 
     fn char_idx(&self, pos: Pos) -> usize {

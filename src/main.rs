@@ -7,6 +7,7 @@ mod history;
 mod keymap;
 mod lockfile;
 mod options;
+mod syntax;
 mod ui;
 
 use clap::Parser;
@@ -132,6 +133,16 @@ fn acquire_lock(editor: &mut app::Editor, buf: &mut buffer::Buffer, interactive:
 /// file's containing directory isn't writable either. Returns (buffer,
 /// status message, message severity).
 fn open_one(path: &std::path::Path, locking: bool) -> (buffer::Buffer, String, app::StatusLevel) {
+    let (mut buf, msg, level) = open_one_inner(path, locking);
+    // Detected once at load time (extension/filename -> shebang -> modeline,
+    // all on by default); the on/off toggle (M-Y) only controls whether
+    // rendering actually uses it, so toggling back on doesn't need to
+    // re-detect.
+    buf.language = syntax::detect(buf.path.as_deref(), &buf.to_string());
+    (buf, msg, level)
+}
+
+fn open_one_inner(path: &std::path::Path, locking: bool) -> (buffer::Buffer, String, app::StatusLevel) {
     if path.is_dir() {
         return (
             buffer::Buffer::empty(),
