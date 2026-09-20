@@ -86,12 +86,17 @@ fn main() -> anyhow::Result<()> {
 /// `-z`/`--listsyntaxes`. Unlike nano, these aren't read from nanorc `syntax`
 /// definitions (tico intentionally ignores those; see the syntax module),
 /// so this lists the fixed, compiled-in language registry instead, wrapped
-/// the same way nano wraps its own listing.
+/// to the real terminal width rather than nano's hardcoded 45 columns.
 fn print_syntax_names() {
     println!("Available syntaxes:");
+    // nano wraps this listing at a hardcoded 45 columns regardless of the
+    // actual terminal size; wrap to the real width instead (falling back
+    // to 80 when it can't be queried, e.g. output is piped to a file).
+    let width = crossterm::terminal::size().map(|(cols, _)| cols as usize).unwrap_or(80).max(10);
     let mut line = String::new();
     for name in syntax::names() {
-        if line.chars().count() > 45 {
+        let extra = 1 + name.chars().count(); // leading space + the name itself
+        if !line.is_empty() && line.chars().count() + extra > width {
             println!("{line}");
             line.clear();
         }
