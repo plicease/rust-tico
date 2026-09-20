@@ -80,7 +80,92 @@ pub fn highlight(text: &str, lang: &LanguageDef) -> Vec<HighlightSpan> {
     // covered by a real capture.
     add_numeric_fallback(&tree, text, &mut spans);
 
+    // Heredoc language injection: when a heredoc's terminator names a known
+    // language (e.g. `<<SQL`, `<<'HTML'`), re-highlight its body with that
+    // language's own grammar instead of leaving it as one flat string.
+    inject_heredocs(&tree, text, &mut spans);
+
     spans
+}
+
+/// Perl-specific for now: `tree-sitter-perl` is the only vendored grammar
+/// whose node kinds this matches (`heredoc_start_identifier` /
+/// `heredoc_body_statement`); other languages' trees simply won't contain
+/// nodes with these kind names, so this is a no-op for them.
+fn inject_heredocs(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<HighlightSpan>) {
+    let mut starts = Vec::new();
+    collect_by_kind(tree.root_node(), "heredoc_start_identifier", &mut starts);
+    if starts.is_empty() {
+        return;
+    }
+    let mut bodies = Vec::new();
+    collect_by_kind(tree.root_node(), "heredoc_body_statement", &mut bodies);
+    starts.sort_by_key(|n| n.start_byte());
+    bodies.sort_by_key(|n| n.start_byte());
+
+    // Heredoc bodies appear in the source in the same order as their `<<TAG`
+    // starts (Perl processes them in that order), so pairing by position is
+    // reliable for the common case of one heredoc per statement. There's no
+    // structural link in the tree between a start identifier and its body.
+    for (start_id, body) in starts.iter().zip(bodies.iter()) {
+        let raw = &text[start_id.start_byte()..start_id.end_byte()];
+        let Some(lang) = languages::find_by_name(heredoc_language_name(raw)) else { continue };
+
+        // The body node includes its own closing terminator line (as a
+        // `heredoc_end_identifier` child); only the text before that should
+        // be handed to the injected grammar.
+        let mut body_end = body.end_byte();
+        let mut cursor = body.walk();
+        for child in body.children(&mut cursor) {
+            if child.kind() == "heredoc_end_identifier" {
+                body_end = child.start_byte();
+                break;
+            }
+        }
+        let body_start = body.start_byte();
+        if body_end <= body_start || body_end > text.len() {
+            continue;
+        }
+
+        let inner_spans = highlight(&text[body_start..body_end], lang);
+        if inner_spans.is_empty() {
+            // Leave the outer (Perl) query's own @string coloring in place
+            // rather than blanking the body out.
+            continue;
+        }
+        spans.retain(|s| !(s.start < body_end && s.end > body_start));
+        spans.extend(inner_spans.into_iter().map(|s| HighlightSpan {
+            start: s.start + body_start,
+            end: s.end + body_start,
+            kind: s.kind,
+        }));
+    }
+}
+
+/// Strip a heredoc terminator down to the bare language name: an optional
+/// leading `~` (indented heredoc, `<<~SQL`) or `\` (no-interpolation
+/// bareword, `<<\SQL`), then matching surrounding `'` or `"` quotes.
+fn heredoc_language_name(raw: &str) -> &str {
+    let s = raw.strip_prefix('~').unwrap_or(raw);
+    let s = s.strip_prefix('\\').unwrap_or(s);
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 {
+        let (first, last) = (bytes[0], bytes[bytes.len() - 1]);
+        if (first == b'\'' && last == b'\'') || (first == b'"' && last == b'"') {
+            return &s[1..s.len() - 1];
+        }
+    }
+    s
+}
+
+fn collect_by_kind<'a>(node: tree_sitter::Node<'a>, kind: &str, out: &mut Vec<tree_sitter::Node<'a>>) {
+    if node.kind() == kind {
+        out.push(node);
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_by_kind(child, kind, out);
+    }
 }
 
 fn add_numeric_fallback(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<HighlightSpan>) {
@@ -204,6 +289,44 @@ mod tests {
             "test.pl",
             "#!/usr/bin/env perl\nuse strict;\nmy $x = 42; # comment\nsub foo { return \"hi\"; }\n",
             true,
+        );
+    }
+
+    #[test]
+    fn heredoc_injects_named_language() {
+        let lang = languages::detect(Some(std::path::Path::new("a.pl")), "").unwrap();
+        let src = "print <<SQL;\n   SELECT * FROM foo WHERE bar = 1\nSQL\n";
+        let spans = highlight(src, lang);
+        // "SELECT" and "FROM" should be captured as SQL keywords, at their
+        // exact position within the outer Perl buffer -- not just colored
+        // as one flat Perl string covering the whole heredoc body.
+        let select_start = src.find("SELECT").unwrap();
+        let from_start = src.find("FROM").unwrap();
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.kind == HighlightKind::Keyword && s.start == select_start && s.end == select_start + 6),
+            "expected a Keyword span for SELECT at {select_start}, got {spans:?}"
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.kind == HighlightKind::Keyword && s.start == from_start && s.end == from_start + 4),
+            "expected a Keyword span for FROM at {from_start}, got {spans:?}"
+        );
+    }
+
+    #[test]
+    fn heredoc_unknown_terminator_stays_plain_string() {
+        let lang = languages::detect(Some(std::path::Path::new("a.pl")), "").unwrap();
+        let src = "print <<EOF;\nsome text\nEOF\n";
+        let spans = highlight(src, lang);
+        // "EOF" isn't a recognized language name, so the body should still
+        // be covered by the outer Perl query's plain @string capture.
+        let body_start = src.find("some text").unwrap();
+        assert!(
+            spans.iter().any(|s| s.kind == HighlightKind::String && s.start <= body_start && s.end >= body_start + 9),
+            "expected the heredoc body to remain a String span, got {spans:?}"
         );
     }
 

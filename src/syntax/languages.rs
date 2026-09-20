@@ -574,7 +574,10 @@ fn parse_emacs_modeline(line: &str) -> Option<String> {
     None
 }
 
-fn find_by_name(name: &str) -> Option<&'static LanguageDef> {
+/// Look up a language by its canonical `name` or one of its
+/// `modeline_aliases`, case-insensitively. Used both for modeline detection
+/// and for matching a heredoc terminator (e.g. `<<SQL`) to a language.
+pub(crate) fn find_by_name(name: &str) -> Option<&'static LanguageDef> {
     let name = name.to_ascii_lowercase();
     LANGUAGES.iter().find(|l| l.name == name || l.modeline_aliases.iter().any(|a| *a == name))
 }
