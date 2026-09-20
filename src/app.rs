@@ -17,8 +17,6 @@ pub enum PromptKind {
     WriteOut { exiting: bool },
     Exit { discard_and_quit: bool },
     ExternalChangeConflict,
-    MergeConflict,
-    MergePreviewClean { merged_text: String },
     /// Someone else appears to be editing this file (a vim/nano-style lock
     /// file exists for it). `lock_path` is where to write our own lock if
     /// the user chooses to open anyway; `target` is the display path
@@ -85,7 +83,25 @@ pub enum Mode {
     /// from one (e.g. `^G` inside a Search prompt) — `None` means it was
     /// opened from the main editing window, so closing goes back there.
     Help { lines: Vec<String>, top: usize, return_to: Option<Box<Prompt>> },
+    /// A full-screen, scrollable diff viewer — currently used only for
+    /// previewing a three-way merge (`^X` reload-conflict -> `[M]erge`)
+    /// before applying it, since the diff can easily run to many lines and
+    /// doesn't fit in a one-line prompt label (cramming it in there, with
+    /// embedded newlines, used to scramble the display). `top` is the
+    /// first scrolled-to body line (index into `lines[1..]`).
+    Diff { lines: Vec<String>, top: usize, outcome: DiffOutcome },
     Quit,
+}
+
+/// What happens when the diff viewer (`Mode::Diff`) is dismissed.
+#[derive(Debug, Clone)]
+pub enum DiffOutcome {
+    /// A clean three-way merge is ready; accepting replaces the buffer's
+    /// content with `merged_text`.
+    ApplyMerge { merged_text: String },
+    /// The merge had overlapping changes and couldn't be resolved
+    /// automatically; dismissing returns to the reload/keep/cancel choice.
+    Conflict,
 }
 
 /// Severity of a status-bar message, matching the subset of nano's message
@@ -822,26 +838,14 @@ impl Editor {
         let ours = self.buf().to_string();
         match crate::fileio::three_way_merge(&base, &ours, &theirs) {
             crate::fileio::MergeResult::Clean { text, diff } => {
-                self.mode = Mode::Prompt(Prompt {
-                    kind: PromptKind::MergePreviewClean { merged_text: text },
-                    menu: Menu::YesNo,
-                    label: format!("{diff}\n[A]pply merge  [C]ancel"),
-                    input: String::new(),
-                    cursor: 0,
-                    history_pos: None,
-                    saved_input: None,
-                });
+                let mut lines = vec!["Merge preview -- [A]pply  [C]ancel".to_string()];
+                lines.extend(diff.lines().map(str::to_string));
+                self.mode = Mode::Diff { lines, top: 0, outcome: DiffOutcome::ApplyMerge { merged_text: text } };
             }
             crate::fileio::MergeResult::Conflict { diff } => {
-                self.mode = Mode::Prompt(Prompt {
-                    kind: PromptKind::MergeConflict,
-                    menu: Menu::YesNo,
-                    label: format!("{diff}\nCould not merge automatically (press any key)"),
-                    input: String::new(),
-                    cursor: 0,
-                    history_pos: None,
-                    saved_input: None,
-                });
+                let mut lines = vec!["Could not merge automatically -- press any key".to_string()];
+                lines.extend(diff.lines().map(str::to_string));
+                self.mode = Mode::Diff { lines, top: 0, outcome: DiffOutcome::Conflict };
             }
         }
     }

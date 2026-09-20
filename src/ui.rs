@@ -3,7 +3,7 @@
 //! bar) mirrors GNU nano's, with "tico" shown wherever nano would show its
 //! own name.
 
-use crate::app::{Editor, Mode, Prompt, PromptKind};
+use crate::app::{DiffOutcome, Editor, Mode, Prompt, PromptKind};
 use crate::buffer::Pos;
 use crate::keymap::{Action, Binding, Key as TKey, Menu};
 use crossterm::cursor::{Hide, MoveTo, Show};
@@ -151,6 +151,9 @@ fn handle_key(editor: &mut Editor, key: KeyEvent) {
         Mode::Help { lines, top, return_to } => {
             handle_help_key(editor, lines, top, return_to, key);
         }
+        Mode::Diff { lines, top, outcome } => {
+            handle_diff_key(editor, lines, top, outcome, key);
+        }
         Mode::Prompt(prompt) => handle_prompt_key(editor, prompt, key),
         Mode::Quit => editor.mode = Mode::Quit,
     }
@@ -232,9 +235,6 @@ fn handle_prompt_key(editor: &mut Editor, mut prompt: Prompt, key: KeyEvent) {
     match &prompt.kind {
         PromptKind::Exit { .. } => return handle_exit_choice(editor, prompt, key),
         PromptKind::ExternalChangeConflict => return handle_conflict_choice(editor, key),
-        PromptKind::MergeConflict | PromptKind::MergePreviewClean { .. } => {
-            return handle_merge_preview_choice(editor, prompt, key)
-        }
         PromptKind::LockConflict { .. } => return handle_lock_conflict_choice(editor, prompt, key),
         PromptKind::ReplaceConfirm(_) => return handle_replace_confirm_choice(editor, prompt, key),
         _ => {}
@@ -490,25 +490,35 @@ fn handle_conflict_choice(editor: &mut Editor, key: KeyEvent) {
     }
 }
 
-fn handle_merge_preview_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {
-    match &prompt.kind {
-        PromptKind::MergeConflict => {
-            // No automatic resolution possible; return to the main conflict
-            // choice so the user can pick reload/keep instead.
-            if matches!(key.code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char(_)) {
-                editor.mode = Mode::Prompt(Prompt {
-                    kind: PromptKind::ExternalChangeConflict,
-                    menu: Menu::YesNo,
-                    label: "Could not merge automatically: [R]eload  [K]eep mine  [C]ancel".to_string(),
-                    input: String::new(),
-                    cursor: 0,
-                    history_pos: None,
-                    saved_input: None,
-                });
-            }
+/// Handle a keystroke while the merge-diff viewer (`Mode::Diff`) is open:
+/// scroll it, or act on it — Apply/Cancel for a clean-merge preview, any
+/// key to dismiss an unmergeable-conflict preview (returning to the
+/// reload/keep/cancel choice, same as before this became a full-screen
+/// view).
+fn handle_diff_key(editor: &mut Editor, lines: Vec<String>, top: usize, outcome: DiffOutcome, key: KeyEvent) {
+    let body_len = lines.len().saturating_sub(1);
+    let body_rows = help_body_rows(editor);
+    let max_top = body_len.saturating_sub(body_rows);
+    let mut top = top.min(max_top);
+
+    match &outcome {
+        DiffOutcome::Conflict => {
+            // No automatic resolution possible; any key returns to the
+            // main conflict choice so the user can pick reload/keep
+            // instead — matches the prior prompt-based behavior.
+            editor.mode = Mode::Prompt(Prompt {
+                kind: PromptKind::ExternalChangeConflict,
+                menu: Menu::YesNo,
+                label: "Could not merge automatically: [R]eload  [K]eep mine  [C]ancel".to_string(),
+                input: String::new(),
+                cursor: 0,
+                history_pos: None,
+                saved_input: None,
+            });
+            return;
         }
-        PromptKind::MergePreviewClean { merged_text } => match key.code {
-            KeyCode::Char('a') | KeyCode::Char('A') | KeyCode::Enter => {
+        DiffOutcome::ApplyMerge { merged_text } => match key.code {
+            KeyCode::Char('a') | KeyCode::Char('A') => {
                 let text = merged_text.clone();
                 editor.buf_mut().rope = ropey::Rope::from_str(&text);
                 editor.buf_mut().modified = true;
@@ -517,14 +527,22 @@ fn handle_merge_preview_choice(editor: &mut Editor, prompt: Prompt, key: KeyEven
                 }
                 editor.mode = Mode::Editing;
                 editor.set_status("Merged");
+                return;
             }
             KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
                 editor.mode = Mode::Editing;
+                return;
             }
+            KeyCode::Up => top = top.saturating_sub(1),
+            KeyCode::Down => top = (top + 1).min(max_top),
+            KeyCode::PageUp => top = top.saturating_sub(body_rows),
+            KeyCode::PageDown => top = (top + body_rows).min(max_top),
+            KeyCode::Home => top = 0,
+            KeyCode::End => top = max_top,
             _ => {}
         },
-        _ => {}
     }
+    editor.mode = Mode::Diff { lines, top, outcome };
 }
 
 fn handle_lock_conflict_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {
@@ -729,6 +747,10 @@ fn render(editor: &Editor) -> io::Result<()> {
         render_help_screen(editor, &mut out, lines, *top)?;
         return out.flush();
     }
+    if let Mode::Diff { lines, top, outcome } = &editor.mode {
+        render_diff_screen(editor, &mut out, lines, *top, outcome)?;
+        return out.flush();
+    }
 
     let cols = editor.screen_cols;
     let rows = editor.screen_rows;
@@ -772,8 +794,46 @@ fn render_help_screen(editor: &Editor, out: &mut impl Write, lines: &[String], t
     let cols = editor.screen_cols;
     let rows = editor.screen_rows;
 
+    render_centered_title_row(out, cols, lines.first().map(|s| s.as_str()).unwrap_or("Help"))?;
+    render_scrollable_body(out, cols, &lines[1.min(lines.len())..], top, help_body_rows(editor))?;
+    render_shortcut_bar(out, rows.saturating_sub(2) as u16, cols, HELP_SHORTCUTS)
+}
+
+/// The merge-diff viewer (`Mode::Diff`): same full-screen layout as the
+/// help viewer (title row, scrollable body, bottom bar), but the bottom
+/// bar offers Apply/Cancel for a clean-merge preview instead of just
+/// closing, since dismissing this screen is itself a decision.
+fn render_diff_screen(
+    editor: &Editor,
+    out: &mut impl Write,
+    lines: &[String],
+    top: usize,
+    outcome: &DiffOutcome,
+) -> io::Result<()> {
+    let cols = editor.screen_cols;
+    let rows = editor.screen_rows;
+
+    render_centered_title_row(out, cols, lines.first().map(|s| s.as_str()).unwrap_or("Diff"))?;
+    render_scrollable_body(out, cols, &lines[1.min(lines.len())..], top, help_body_rows(editor))?;
+
+    let shortcuts: &[(&str, &str)] = match outcome {
+        DiffOutcome::ApplyMerge { .. } => &[
+            ("A", "Apply merge"),
+            ("C", "Cancel"),
+            ("^P", "Prev Line"),
+            ("^N", "Next Line"),
+            ("^Y", "Prev Page"),
+            ("^V", "Next Page"),
+        ],
+        DiffOutcome::Conflict => &[("(any key)", "Continue")],
+    };
+    render_shortcut_bar(out, rows.saturating_sub(2) as u16, cols, shortcuts)
+}
+
+/// Center `title` on its own reverse-video row at the top of the screen —
+/// shared by the help and merge-diff full-screen viewers.
+fn render_centered_title_row(out: &mut impl Write, cols: usize, title: &str) -> io::Result<()> {
     queue!(out, MoveTo(0, 0))?;
-    let title = lines.first().map(|s| s.as_str()).unwrap_or("Help");
     let mut title_row = vec![' '; cols];
     let start = cols.saturating_sub(title.chars().count()) / 2;
     for (i, c) in title.chars().enumerate() {
@@ -782,10 +842,12 @@ fn render_help_screen(editor: &Editor, out: &mut impl Write, lines: &[String], t
         }
     }
     let title_line: String = title_row.into_iter().collect();
-    queue!(out, SetAttribute(Attribute::Reverse), Print(title_line), SetAttribute(Attribute::Reset))?;
+    queue!(out, SetAttribute(Attribute::Reverse), Print(title_line), SetAttribute(Attribute::Reset))
+}
 
-    let body = &lines[1.min(lines.len())..];
-    let body_rows = help_body_rows(editor);
+/// Draw `body_rows` rows of `body` starting at `top`, one screen row per
+/// line, below the title row — shared by the help and merge-diff viewers.
+fn render_scrollable_body(out: &mut impl Write, cols: usize, body: &[String], top: usize, body_rows: usize) -> io::Result<()> {
     for r in 0..body_rows {
         queue!(out, MoveTo(0, 1 + r as u16))?;
         let text = body.get(top + r).map(|s| s.as_str()).unwrap_or("");
@@ -793,8 +855,7 @@ fn render_help_screen(editor: &Editor, out: &mut impl Write, lines: &[String], t
         let s: String = chars.into_iter().collect();
         queue!(out, Print(format!("{s:<cols$}", cols = cols)))?;
     }
-
-    render_shortcut_bar(out, rows.saturating_sub(2) as u16, cols, HELP_SHORTCUTS)
+    Ok(())
 }
 
 fn finish_cursor(editor: &Editor, out: &mut impl Write, text_start_row: u16) -> io::Result<()> {
