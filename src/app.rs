@@ -38,6 +38,19 @@ pub enum Mode {
     Quit,
 }
 
+/// Severity of a status-bar message, matching the subset of nano's message
+/// importance levels (src/prototypes.h: HUSH/REMARK/NOTICE/MILD/AHEM/ALERT)
+/// that affect rendering here: most messages are `Normal` (nano's default
+/// STATUS_BAR color, reverse video); errors like "is a directory" or "is
+/// unwritable" are `Alert` (nano's ERROR_MESSAGE color, bold white-on-red,
+/// plus a bell).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StatusLevel {
+    #[default]
+    Normal,
+    Alert,
+}
+
 pub struct SearchState {
     pub last_pattern: Option<String>,
     pub case_sensitive: bool,
@@ -60,11 +73,16 @@ pub struct Editor {
     pub cut_was_consecutive: bool,
     pub search: SearchState,
     pub status: Option<String>,
+    pub status_level: StatusLevel,
     /// Keystrokes remaining before the status message is wiped, mirroring
     /// nano's `countdown` in src/winio.c: a status message is cleared after
     /// 20 keystrokes (or 1, with `quickblank`) in the main editing window —
     /// it is not a timer.
     status_countdown: u32,
+    /// Set when an Alert-level message was just posted; the UI layer rings
+    /// the terminal bell once and clears this, matching nano's beep() in
+    /// statusline() for ALERT-importance messages.
+    pub bell_pending: bool,
     pub mode: Mode,
     pub screen_rows: usize,
     pub screen_cols: usize,
@@ -81,7 +99,9 @@ impl Editor {
             cut_was_consecutive: false,
             search: SearchState::default(),
             status: None,
+            status_level: StatusLevel::Normal,
             status_countdown: 0,
+            bell_pending: false,
             mode: Mode::Editing,
             screen_rows: 24,
             screen_cols: 80,
@@ -98,7 +118,19 @@ impl Editor {
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
         self.status = Some(msg.into());
+        self.status_level = StatusLevel::Normal;
         self.status_countdown = if self.options.quickblank { 1 } else { 20 };
+    }
+
+    /// Like `set_status`, but for error-class messages (unwritable file,
+    /// "is a directory", ...): rendered bold white-on-red instead of plain
+    /// reverse video, and rings the terminal bell, matching nano's
+    /// ALERT-importance messages.
+    pub fn set_status_alert(&mut self, msg: impl Into<String>) {
+        self.status = Some(msg.into());
+        self.status_level = StatusLevel::Alert;
+        self.status_countdown = if self.options.quickblank { 1 } else { 20 };
+        self.bell_pending = true;
     }
 
     /// Call once per keystroke handled while focused on the main edit

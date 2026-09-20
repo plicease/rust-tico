@@ -8,7 +8,7 @@ use crate::buffer::Pos;
 use crate::keymap::{Action, Binding, Key as TKey, Menu};
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use crossterm::style::{Attribute, Print, SetAttribute};
+use crossterm::style::{Attribute, Color, Print, SetAttribute, SetBackgroundColor, SetForegroundColor};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, size, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -45,7 +45,7 @@ pub fn run(editor: &mut Editor) -> io::Result<()> {
     // ever needs re-blanking (which is what caused the visible flicker:
     // clearing the whole screen before every redraw, even when idle).
     execute!(io::stdout(), Clear(ClearType::All))?;
-    render(editor)?;
+    render_and_ring(editor)?;
 
     loop {
         if matches!(editor.mode, Mode::Quit) {
@@ -73,8 +73,21 @@ pub fn run(editor: &mut Editor) -> io::Result<()> {
         }
 
         if dirty {
-            render(editor)?;
+            render_and_ring(editor)?;
         }
+    }
+    Ok(())
+}
+
+/// Render, then ring the terminal bell exactly once if an Alert-level
+/// message was just posted (matching nano's beep() for ALERT-importance
+/// statusline() calls).
+fn render_and_ring(editor: &mut Editor) -> io::Result<()> {
+    render(editor)?;
+    if editor.bell_pending {
+        editor.bell_pending = false;
+        print!("\x07");
+        io::stdout().flush()?;
     }
     Ok(())
 }
@@ -544,8 +557,10 @@ fn render_status_line(editor: &Editor, out: &mut impl Write, row: u16, cols: usi
         }
         queue!(out, Print(s))
     } else if let Some(msg) = &editor.status {
-        // nano shows status-bar messages in reverse video (confirmed
-        // against the installed nano's own escape-code output).
+        // nano shows ordinary status-bar messages in reverse video, and
+        // Alert-level ones (unwritable file, "is a directory", ...) bold
+        // white-on-red instead (confirmed against the installed nano's own
+        // escape-code output for both cases).
         let bracketed = format!("[ {msg} ]");
         let pad = cols.saturating_sub(bracketed.chars().count()) / 2;
         if pad > 0 {
@@ -554,7 +569,25 @@ fn render_status_line(editor: &Editor, out: &mut impl Write, row: u16, cols: usi
         let remaining = cols.saturating_sub(pad);
         let shown: String = bracketed.chars().take(remaining).collect();
         let shown_len = shown.chars().count();
-        queue!(out, SetAttribute(Attribute::Reverse), Print(shown), SetAttribute(Attribute::Reset))?;
+        match editor.status_level {
+            crate::app::StatusLevel::Normal => {
+                queue!(out, SetAttribute(Attribute::Reverse), Print(shown), SetAttribute(Attribute::Reset))?;
+            }
+            crate::app::StatusLevel::Alert => {
+                // Matches nano's captured escape codes exactly: ESC[1m
+                // ESC[37m ESC[41m — bold, *standard* white (crossterm's
+                // `Grey`, not `White`, which is bright/ANSI-97), on
+                // standard (non-bright) red.
+                queue!(
+                    out,
+                    SetAttribute(Attribute::Bold),
+                    SetForegroundColor(Color::Grey),
+                    SetBackgroundColor(Color::DarkRed),
+                    Print(shown),
+                    SetAttribute(Attribute::Reset)
+                )?;
+            }
+        }
         let used = pad + shown_len;
         if used < cols {
             queue!(out, Print(" ".repeat(cols - used)))?;

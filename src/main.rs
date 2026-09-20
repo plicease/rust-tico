@@ -36,17 +36,7 @@ fn main() -> anyhow::Result<()> {
     } else {
         for (i, fa) in file_args.iter().enumerate() {
             let path = std::path::PathBuf::from(&fa.path);
-            let (mut buf, message) = if path.exists() {
-                match fileio::load_file(&path) {
-                    Ok(buf) => {
-                        let msg = fileio::describe_read(&buf.to_string());
-                        (buf, msg)
-                    }
-                    Err(e) => (buffer::Buffer::from_text("", Some(path.clone())), format!("Error reading {}: {e}", path.display())),
-                }
-            } else {
-                (buffer::Buffer::from_text("", Some(path.clone())), "New File".to_string())
-            };
+            let (mut buf, message, alert) = open_one(&path);
             if let Some(line) = fa.line {
                 let target = (line.max(1) as usize) - 1;
                 buf.cursor.line = target.min(buf.line_count().saturating_sub(1));
@@ -59,7 +49,11 @@ fn main() -> anyhow::Result<()> {
             // (the first one), matching nano showing the "Read N lines"
             // blurb for the file that lands in the active edit window.
             if i == 0 {
-                editor.set_status(message);
+                if alert {
+                    editor.set_status_alert(message);
+                } else {
+                    editor.set_status(message);
+                }
             }
         }
     }
@@ -67,4 +61,33 @@ fn main() -> anyhow::Result<()> {
 
     ui::run(&mut editor)?;
     Ok(())
+}
+
+/// Load one file argument as nano would: refuse to open directories (an
+/// empty "New Buffer" is used instead), and warn (but still load) files
+/// that exist but aren't writable. Returns (buffer, status message, whether
+/// that message is Alert-level).
+fn open_one(path: &std::path::Path) -> (buffer::Buffer, String, bool) {
+    if path.is_dir() {
+        return (buffer::Buffer::empty(), format!("'{}' is a directory", path.display()), true);
+    }
+    if !path.exists() {
+        return (buffer::Buffer::from_text("", Some(path.to_path_buf())), "New File".to_string(), false);
+    }
+    match fileio::load_file(path) {
+        Ok(buf) => {
+            let writable = std::fs::metadata(path).map(|m| !m.permissions().readonly()).unwrap_or(true);
+            if !writable {
+                (buf, format!("File '{}' is unwritable", path.display()), true)
+            } else {
+                let msg = fileio::describe_read(&buf.to_string());
+                (buf, msg, false)
+            }
+        }
+        Err(e) => (
+            buffer::Buffer::from_text("", Some(path.to_path_buf())),
+            format!("Error reading {}: {e}", path.display()),
+            true,
+        ),
+    }
 }
