@@ -6,115 +6,115 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(name = "tico", version, about = "Yet Another Text Editor (a nano-compatible TUI editor)")]
 pub struct Cli {
-    #[arg(short = 'A', long = "smarthome")]
+    #[arg(short = 'A', long = "smarthome", help = "Enable smart home key")]
     pub smarthome: bool,
-    #[arg(short = 'B', long = "backup")]
+    #[arg(short = 'B', long = "backup", help = "Save backups of existing files")]
     pub backup: bool,
-    #[arg(short = 'C', long = "backupdir", value_name = "dir")]
+    #[arg(short = 'C', long = "backupdir", value_name = "dir", help = "Directory for saving unique backup files")]
     pub backupdir: Option<String>,
-    #[arg(short = 'D', long = "boldtext")]
+    #[arg(short = 'D', long = "boldtext", help = "Use bold instead of reverse video text")]
     pub boldtext: bool,
-    #[arg(short = 'E', long = "tabstospaces")]
+    #[arg(short = 'E', long = "tabstospaces", help = "Convert typed tabs to spaces")]
     pub tabstospaces: bool,
-    #[arg(short = 'F', long = "multibuffer")]
+    #[arg(short = 'F', long = "multibuffer", help = "Read a file into a new buffer by default")]
     pub multibuffer: bool,
-    #[arg(short = 'G', long = "locking")]
+    #[arg(short = 'G', long = "locking", help = "Use (vim-style) lock files")]
     pub locking: bool,
-    #[arg(short = 'H', long = "historylog")]
+    #[arg(short = 'H', long = "historylog", help = "Save & reload old search/replace strings")]
     pub historylog: bool,
-    #[arg(short = 'I', long = "ignorercfiles")]
+    #[arg(short = 'I', long = "ignorercfiles", help = "Don't look at nanorc files")]
     pub ignorercfiles: bool,
-    #[arg(short = 'J', long = "guidestripe", value_name = "number")]
+    #[arg(short = 'J', long = "guidestripe", value_name = "number", help = "Show a guiding bar at this column")]
     pub guidestripe: Option<u32>,
-    #[arg(short = 'K', long = "rawsequences")]
+    #[arg(short = 'K', long = "rawsequences", help = "Fix numeric keypad key confusion problem")]
     pub rawsequences: bool,
-    #[arg(short = 'L', long = "nonewlines")]
+    #[arg(short = 'L', long = "nonewlines", help = "Don't add an automatic newline")]
     pub nonewlines: bool,
-    #[arg(short = 'M', long = "trimblanks")]
+    #[arg(short = 'M', long = "trimblanks", help = "Trim tail spaces when hard-wrapping")]
     pub trimblanks: bool,
-    #[arg(short = 'N', long = "noconvert")]
+    #[arg(short = 'N', long = "noconvert", help = "Don't convert files from DOS/Mac format")]
     pub noconvert: bool,
-    #[arg(short = 'O', long = "bookstyle")]
+    #[arg(short = 'O', long = "bookstyle", help = "Leading whitespace means new paragraph")]
     pub bookstyle: bool,
-    #[arg(short = 'P', long = "positionlog")]
+    #[arg(short = 'P', long = "positionlog", help = "Save & restore position of the cursor")]
     pub positionlog: bool,
-    #[arg(short = 'Q', long = "quotestr", value_name = "regex")]
+    #[arg(short = 'Q', long = "quotestr", value_name = "regex", help = "Regular expression to match quoting")]
     pub quotestr: Option<String>,
-    #[arg(short = 'R', long = "restricted")]
+    #[arg(short = 'R', long = "restricted", help = "Restrict access to the filesystem")]
     pub restricted: bool,
-    #[arg(short = 'S', long = "softwrap")]
+    #[arg(short = 'S', long = "softwrap", help = "Display overlong lines on multiple rows")]
     pub softwrap: bool,
-    #[arg(short = 'T', long = "tabsize", value_name = "number")]
+    #[arg(short = 'T', long = "tabsize", value_name = "number", help = "Make a tab this number of columns wide")]
     pub tabsize: Option<u32>,
-    #[arg(short = 'U', long = "quickblank")]
+    #[arg(short = 'U', long = "quickblank", help = "Wipe status bar upon next keystroke")]
     pub quickblank: bool,
-    #[arg(short = 'W', long = "wordbounds")]
+    #[arg(short = 'W', long = "wordbounds", help = "Detect word boundaries more accurately")]
     pub wordbounds: bool,
-    #[arg(short = 'X', long = "wordchars", value_name = "string")]
+    #[arg(short = 'X', long = "wordchars", value_name = "string", help = "Which other characters are word parts")]
     pub wordchars: Option<String>,
-    #[arg(short = 'Y', long = "syntax", value_name = "name")]
+    #[arg(short = 'Y', long = "syntax", value_name = "name", help = "Syntax definition to use for coloring")]
     pub syntax: Option<String>,
-    #[arg(short = 'Z', long = "zap")]
+    #[arg(short = 'Z', long = "zap", help = "Let Bsp and Del erase a marked region")]
     pub zap: bool,
-    #[arg(short = 'a', long = "atblanks")]
+    #[arg(short = 'a', long = "atblanks", help = "When soft-wrapping, do it at whitespace")]
     pub atblanks: bool,
-    #[arg(short = 'b', long = "breaklonglines")]
+    #[arg(short = 'b', long = "breaklonglines", help = "Automatically hard-wrap overlong lines")]
     pub breaklonglines: bool,
-    #[arg(short = 'c', long = "constantshow")]
+    #[arg(short = 'c', long = "constantshow", help = "Constantly show cursor position")]
     pub constantshow: bool,
-    #[arg(short = 'd', long = "rebinddelete")]
+    #[arg(short = 'd', long = "rebinddelete", help = "Fix Backspace/Delete confusion problem")]
     pub rebinddelete: bool,
-    #[arg(short = 'e', long = "emptyline")]
+    #[arg(short = 'e', long = "emptyline", help = "Keep the line below the title bar empty")]
     pub emptyline: bool,
-    #[arg(short = 'f', long = "rcfile", value_name = "file")]
+    #[arg(short = 'f', long = "rcfile", value_name = "file", help = "Use only this file for configuring tico")]
     pub rcfile: Option<String>,
-    #[arg(short = 'g', long = "showcursor")]
+    #[arg(short = 'g', long = "showcursor", help = "Show cursor in file browser & help text")]
     pub showcursor: bool,
-    #[arg(short = 'i', long = "autoindent")]
+    #[arg(short = 'i', long = "autoindent", help = "Automatically indent new lines")]
     pub autoindent: bool,
-    #[arg(short = 'j', long = "jumpyscrolling")]
+    #[arg(short = 'j', long = "jumpyscrolling", help = "Scroll per half-screen, not per line")]
     pub jumpyscrolling: bool,
-    #[arg(short = 'k', long = "cutfromcursor")]
+    #[arg(short = 'k', long = "cutfromcursor", help = "Cut from cursor to end of line")]
     pub cutfromcursor: bool,
-    #[arg(short = 'l', long = "linenumbers")]
+    #[arg(short = 'l', long = "linenumbers", help = "Show line numbers in front of the text")]
     pub linenumbers: bool,
-    #[arg(short = 'm', long = "mouse")]
+    #[arg(short = 'm', long = "mouse", help = "Enable the use of the mouse")]
     pub mouse: bool,
-    #[arg(short = 'n', long = "noread")]
+    #[arg(short = 'n', long = "noread", help = "Do not read the file (only write it)")]
     pub noread: bool,
-    #[arg(short = 'o', long = "operatingdir", value_name = "dir")]
+    #[arg(short = 'o', long = "operatingdir", value_name = "dir", help = "Set operating directory")]
     pub operatingdir: Option<String>,
-    #[arg(short = 'p', long = "preserve")]
+    #[arg(short = 'p', long = "preserve", help = "Preserve XON (^Q) and XOFF (^S) keys")]
     pub preserve: bool,
-    #[arg(short = 'q', long = "indicator")]
+    #[arg(short = 'q', long = "indicator", help = "Show a position+portion indicator")]
     pub indicator: bool,
-    #[arg(short = 'r', long = "fill", value_name = "number")]
+    #[arg(short = 'r', long = "fill", value_name = "number", help = "Set width for hard-wrap and justify")]
     pub fill: Option<i32>,
-    #[arg(short = 's', long = "speller", value_name = "program")]
+    #[arg(short = 's', long = "speller", value_name = "program", help = "Use this alternative spell checker")]
     pub speller: Option<String>,
-    #[arg(short = 't', long = "saveonexit")]
+    #[arg(short = 't', long = "saveonexit", help = "Save changes on exit, don't prompt")]
     pub saveonexit: bool,
-    #[arg(short = 'u', long = "unix")]
+    #[arg(short = 'u', long = "unix", help = "Save a file by default in Unix format")]
     pub unix: bool,
-    #[arg(short = 'v', long = "view")]
+    #[arg(short = 'v', long = "view", help = "View mode (read-only)")]
     pub view: bool,
-    #[arg(short = 'w', long = "nowrap")]
+    #[arg(short = 'w', long = "nowrap", help = "Don't hard-wrap long lines [default]")]
     pub nowrap: bool,
-    #[arg(short = 'x', long = "nohelp")]
+    #[arg(short = 'x', long = "nohelp", help = "Don't show the two help lines")]
     pub nohelp: bool,
-    #[arg(short = 'y', long = "afterends")]
+    #[arg(short = 'y', long = "afterends", help = "Make Ctrl+Right stop at word ends")]
     pub afterends: bool,
-    #[arg(short = 'z', long = "listsyntaxes")]
+    #[arg(short = 'z', long = "listsyntaxes", help = "List the names of available syntaxes")]
     pub listsyntaxes: bool,
-    #[arg(short = '@', long = "colonparsing")]
+    #[arg(short = '@', long = "colonparsing", help = "Accept 'filename:linenumber' notation")]
     pub colonparsing: bool,
-    #[arg(short = '%', long = "stateflags")]
+    #[arg(short = '%', long = "stateflags", help = "Show some states on the title bar")]
     pub stateflags: bool,
-    #[arg(short = '_', long = "minibar")]
+    #[arg(short = '_', long = "minibar", help = "Show a feedback bar at the bottom")]
     pub minibar: bool,
-    #[arg(short = '0', long = "zero")]
+    #[arg(short = '0', long = "zero", help = "Hide all bars, use whole terminal")]
     pub zero: bool,
-    #[arg(short = '/', long = "modernbindings")]
+    #[arg(short = '/', long = "modernbindings", help = "Use better-known key bindings")]
     pub modernbindings: bool,
 
     /// Files to edit, optionally preceded by +LINE[,COLUMN]. A name of `-`
