@@ -406,6 +406,11 @@ fn render(editor: &Editor) -> io::Result<()> {
     // cause of visible flicker). The screen is cleared once at startup and
     // again on resize, in `run()`.
     let mut out = io::stdout();
+    // Hide the cursor for the duration of the redraw: otherwise the
+    // terminal's real hardware cursor stays visible and visibly jumps to
+    // every intermediate MoveTo position used while painting each row,
+    // instead of moving straight to its final spot.
+    queue!(out, Hide)?;
 
     let cols = editor.screen_cols;
     let rows = editor.screen_rows;
