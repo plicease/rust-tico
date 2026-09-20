@@ -55,6 +55,14 @@ pub struct Buffer {
     /// Remembered column for consecutive up/down movement through shorter
     /// lines, reset by any horizontal movement or edit (as in nano).
     goal_col: Option<usize>,
+    /// Path of this buffer's vim-style lock file (`set locking`), if one is
+    /// currently held.
+    pub lock_filename: Option<PathBuf>,
+    /// Whether the lock file has already been rewritten with the "modified"
+    /// flag set, so it's only rewritten once per edit session (matches
+    /// nano's `set_modified()`, which does this only on the false->true
+    /// transition).
+    pub lock_modified_written: bool,
 }
 
 impl Buffer {
@@ -72,6 +80,8 @@ impl Buffer {
             top_line: 0,
             language: None,
             goal_col: None,
+            lock_filename: None,
+            lock_modified_written: false,
         }
     }
 

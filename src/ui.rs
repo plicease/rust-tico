@@ -145,6 +145,7 @@ fn handle_editing_key(editor: &mut Editor, key: KeyEvent) {
     if let Some(tkey) = normalize_key(key) {
         if let Some(binding) = editor.keymap.lookup(Menu::Main, tkey).cloned() {
             apply_binding(editor, binding);
+            editor.maybe_update_lock_modified_flag();
             return;
         }
     }
@@ -153,6 +154,7 @@ fn handle_editing_key(editor: &mut Editor, key: KeyEvent) {
             editor.insert_char(c);
         }
     }
+    editor.maybe_update_lock_modified_flag();
 }
 
 fn apply_binding(editor: &mut Editor, binding: Binding) {
@@ -177,6 +179,7 @@ fn handle_prompt_key(editor: &mut Editor, mut prompt: Prompt, key: KeyEvent) {
         PromptKind::MergeConflict | PromptKind::MergePreviewClean { .. } => {
             return handle_merge_preview_choice(editor, prompt, key)
         }
+        PromptKind::LockConflict { .. } => return handle_lock_conflict_choice(editor, prompt, key),
         _ => {}
     }
 
@@ -228,13 +231,8 @@ fn handle_exit_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {
             editor.begin_writeout_for_exit();
         }
         KeyCode::Char('n') | KeyCode::Char('N') => {
-            editor.buffers.remove(editor.current);
-            if editor.buffers.is_empty() {
-                editor.mode = Mode::Quit;
-            } else {
-                if editor.current >= editor.buffers.len() {
-                    editor.current = editor.buffers.len() - 1;
-                }
+            editor.close_current_buffer();
+            if !matches!(editor.mode, Mode::Quit) {
                 editor.mode = Mode::Editing;
             }
         }
@@ -305,6 +303,32 @@ fn handle_merge_preview_choice(editor: &mut Editor, prompt: Prompt, key: KeyEven
     }
 }
 
+fn handle_lock_conflict_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {
+    let PromptKind::LockConflict { lock_path, target } = &prompt.kind else { return };
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            let _ = crate::lockfile::write_lock(lock_path, target, false);
+            editor.buf_mut().lock_filename = Some(lock_path.clone());
+            editor.mode = Mode::Editing;
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
+            // Matches nano: declining leaves this buffer unopened. If it
+            // was the only one, fall back to a blank buffer rather than
+            // quitting (nano's read_files_from_cmdline() does the same
+            // when every given file was declined or invalid).
+            editor.buffers.remove(editor.current);
+            if editor.buffers.is_empty() {
+                editor.buffers.push(crate::buffer::Buffer::empty());
+                editor.current = 0;
+            } else if editor.current >= editor.buffers.len() {
+                editor.current = editor.buffers.len() - 1;
+            }
+            editor.mode = Mode::Editing;
+        }
+        _ => editor.mode = Mode::Prompt(prompt),
+    }
+}
+
 fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
     let text = prompt.input.clone();
     match prompt.kind {
@@ -343,12 +367,7 @@ fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
                 Ok(()) => {
                     editor.set_status(format!("Wrote {}", path.display()));
                     if exiting {
-                        editor.buffers.remove(editor.current);
-                        if editor.buffers.is_empty() {
-                            editor.mode = Mode::Quit;
-                        } else if editor.current >= editor.buffers.len() {
-                            editor.current = editor.buffers.len() - 1;
-                        }
+                        editor.close_current_buffer();
                     }
                 }
                 Err(e) => editor.set_status(format!("Error writing file: {e}")),

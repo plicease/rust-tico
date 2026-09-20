@@ -19,6 +19,11 @@ pub enum PromptKind {
     ExternalChangeConflict,
     MergeConflict,
     MergePreviewClean { merged_text: String },
+    /// Someone else appears to be editing this file (a vim/nano-style lock
+    /// file exists for it). `lock_path` is where to write our own lock if
+    /// the user chooses to open anyway; `target` is the display path
+    /// recorded inside it.
+    LockConflict { lock_path: std::path::PathBuf, target: String },
     Help,
 }
 
@@ -305,6 +310,38 @@ impl Editor {
         self.scroll_to_cursor();
     }
 
+    /// Rewrite this buffer's lock file (if any) with the "modified" flag
+    /// set, the first time it becomes modified in this session — matching
+    /// nano's `set_modified()`, which does the same only on the
+    /// false->true transition rather than on every keystroke. Called once
+    /// per keystroke handled in the main edit window, since edits happen
+    /// via several different paths (`execute()`'s actions, plain character
+    /// self-insertion, ...).
+    pub fn maybe_update_lock_modified_flag(&mut self) {
+        let target = self.buf().path.as_ref().map(|p| p.display().to_string());
+        let buf = self.buf_mut();
+        if buf.modified && !buf.lock_modified_written {
+            if let (Some(lock), Some(target)) = (&buf.lock_filename, target) {
+                let _ = crate::lockfile::write_lock(lock, &target, true);
+                buf.lock_modified_written = true;
+            }
+        }
+    }
+
+    /// Close the current buffer (deleting its lock file, if any) and, if it
+    /// was the last one, quit — matching nano's normal `close_and_go()`.
+    pub fn close_current_buffer(&mut self) {
+        if let Some(lock) = self.buf_mut().lock_filename.take() {
+            crate::lockfile::delete_lock(&lock);
+        }
+        self.buffers.remove(self.current);
+        if self.buffers.is_empty() {
+            self.mode = Mode::Quit;
+        } else if self.current >= self.buffers.len() {
+            self.current = self.buffers.len() - 1;
+        }
+    }
+
     pub fn insert_char(&mut self, c: char) {
         if c == '\n' {
             self.do_enter();
@@ -562,13 +599,8 @@ impl Editor {
                 input: String::new(),
                 cursor: 0,
             });
-        } else if self.buffers.len() > 1 {
-            self.buffers.remove(self.current);
-            if self.current >= self.buffers.len() {
-                self.current = self.buffers.len() - 1;
-            }
         } else {
-            self.mode = Mode::Quit;
+            self.close_current_buffer();
         }
     }
 
