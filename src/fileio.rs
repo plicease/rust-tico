@@ -5,6 +5,26 @@ use crate::buffer::{Buffer, DiskState};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
+/// True if the current process can actually write to `path` (a file or a
+/// directory), matching nano's own `access(path, W_OK)` checks in
+/// src/files.c. This is deliberately not the same thing as "some write bit
+/// is set in the mode" (`std::fs::Permissions::readonly()`): a file like
+/// `/etc/passwd`, owned by root with mode 644, has *a* write bit set (the
+/// owner's) but a non-root user still can't write to it, and
+/// `Permissions::readonly()` would wrongly say it's writable.
+#[cfg(unix)]
+pub fn path_writable(path: &Path) -> bool {
+    rustix::fs::access(path, rustix::fs::Access::WRITE_OK).is_ok()
+}
+
+#[cfg(not(unix))]
+pub fn path_writable(path: &Path) -> bool {
+    // No portable equivalent of access(W_OK) wired up yet for non-Unix
+    // targets; fall back to the mode-bit check, which at least catches the
+    // common "no write bit at all" case.
+    std::fs::metadata(path).map(|m| !m.permissions().readonly()).unwrap_or(true)
+}
+
 fn hash_content(s: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut h);

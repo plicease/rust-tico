@@ -659,6 +659,7 @@ dependencies = [
  "dirs",
  "regex",
  "ropey",
+ "rustix",
  "similar",
  "thiserror",
  "tree-sitter 0.26.13",

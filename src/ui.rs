@@ -573,11 +573,14 @@ fn render_status_line(editor: &Editor, out: &mut impl Write, row: u16, cols: usi
             crate::app::StatusLevel::Normal => {
                 queue!(out, SetAttribute(Attribute::Reverse), Print(shown), SetAttribute(Attribute::Reset))?;
             }
-            crate::app::StatusLevel::Alert => {
+            crate::app::StatusLevel::Mild | crate::app::StatusLevel::Alert => {
                 // Matches nano's captured escape codes exactly: ESC[1m
                 // ESC[37m ESC[41m — bold, *standard* white (crossterm's
                 // `Grey`, not `White`, which is bright/ANSI-97), on
-                // standard (non-bright) red.
+                // standard (non-bright) red. nano uses this same
+                // ERROR_MESSAGE color for both MILD and ALERT messages;
+                // only ALERT also rings the bell (handled via
+                // `bell_pending`, which `set_status_mild` never sets).
                 queue!(
                     out,
                     SetAttribute(Attribute::Bold),

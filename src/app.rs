@@ -39,15 +39,18 @@ pub enum Mode {
 }
 
 /// Severity of a status-bar message, matching the subset of nano's message
-/// importance levels (src/prototypes.h: HUSH/REMARK/NOTICE/MILD/AHEM/ALERT)
-/// that affect rendering here: most messages are `Normal` (nano's default
-/// STATUS_BAR color, reverse video); errors like "is a directory" or "is
-/// unwritable" are `Alert` (nano's ERROR_MESSAGE color, bold white-on-red,
-/// plus a bell).
+/// importance levels (src/definitions.h: VACUUM/HUSH/REMARK/INFO/NOTICE/
+/// AHEM/MILD/ALERT) that affect rendering here: most messages are `Normal`
+/// (nano's default STATUS_BAR color, reverse video); errors like "is a
+/// directory" or "is unwritable" are `Alert` (nano's ERROR_MESSAGE color,
+/// bold white-on-red, plus a bell); `Mild` warnings like "Directory is not
+/// writable" use the same ERROR_MESSAGE color (MILD > NOTICE in nano's
+/// enum) but without the bell (only importance == ALERT beeps).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StatusLevel {
     #[default]
     Normal,
+    Mild,
     Alert,
 }
 
@@ -131,6 +134,14 @@ impl Editor {
         self.status_level = StatusLevel::Alert;
         self.status_countdown = if self.options.quickblank { 1 } else { 20 };
         self.bell_pending = true;
+    }
+
+    /// Like `set_status_alert`, but for MILD-importance warnings (e.g.
+    /// "Directory is not writable"): same coloring, no bell.
+    pub fn set_status_mild(&mut self, msg: impl Into<String>) {
+        self.status = Some(msg.into());
+        self.status_level = StatusLevel::Mild;
+        self.status_countdown = if self.options.quickblank { 1 } else { 20 };
     }
 
     /// Call once per keystroke handled while focused on the main edit
