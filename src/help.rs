@@ -29,6 +29,37 @@ pub fn build(menu: Menu, keymap: &KeyMap, width: usize) -> Vec<String> {
     lines
 }
 
+/// Help for the "file changed on disk, you have unsaved edits" choice
+/// prompt. This one's bespoke, not built from `intro_for`/`shortcut_lines`
+/// like the rest: it's tico-original (no nano equivalent), and its R/K/M/C
+/// responses are raw keystrokes the prompt matches directly rather than
+/// rebindable keymap actions, so there'd be nothing for the usual
+/// keymap-driven shortcut listing to draw from.
+pub fn build_conflict_help(width: usize) -> Vec<String> {
+    let width = width.max(20).saturating_sub(1);
+    let mut lines = vec!["File Changed On Disk Help Text".to_string(), String::new()];
+    for para in [
+        "tico detected that the file's contents on disk no longer match what \
+         was last loaded or saved, and this buffer also has edits of its own \
+         that haven't been saved. Reloading would discard your edits; saving \
+         would discard the on-disk change; so tico asks which you want.",
+        "[R]eload discards your local edits and loads the file's current \
+         on-disk contents.",
+        "[K]eep mine ignores the on-disk change and keeps editing as if it \
+         hadn't happened. tico won't ask again about this particular change \
+         (a further change to the file will still prompt).",
+        "[M]erge previews a three-way merge of both sets of changes in a \
+         scrollable diff screen, which you can then apply or back out of \
+         (back out returns here).",
+        "[C]ancel dismisses this prompt without touching the buffer. Like \
+         Keep, tico won't ask again about this same on-disk change.",
+    ] {
+        lines.extend(wrap(para, width));
+        lines.push(String::new());
+    }
+    lines
+}
+
 /// (title, body paragraphs) for each menu — the last paragraph always ends
 /// by introducing the shortcut listing that `build` appends after it.
 fn intro_for(menu: Menu) -> (&'static str, &'static [&'static str]) {

@@ -240,7 +240,7 @@ fn handle_prompt_key(editor: &mut Editor, mut prompt: Prompt, key: KeyEvent) {
     // handled directly, without going through the text-editing path.
     match &prompt.kind {
         PromptKind::Exit { .. } => return handle_exit_choice(editor, prompt, key),
-        PromptKind::ExternalChangeConflict => return handle_conflict_choice(editor, key),
+        PromptKind::ExternalChangeConflict => return handle_conflict_choice(editor, prompt, key),
         PromptKind::LockConflict { .. } => return handle_lock_conflict_choice(editor, prompt, key),
         PromptKind::ReplaceConfirm(_) => return handle_replace_confirm_choice(editor, prompt, key),
         _ => {}
@@ -472,7 +472,12 @@ fn handle_exit_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {
     }
 }
 
-fn handle_conflict_choice(editor: &mut Editor, key: KeyEvent) {
+fn handle_conflict_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {
+    if matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+        let lines = crate::help::build_conflict_help(editor.screen_cols);
+        editor.mode = Mode::Help { lines, top: 0, return_to: Some(Box::new(prompt)) };
+        return;
+    }
     match key.code {
         KeyCode::Char('r') | KeyCode::Char('R') => {
             let _ = crate::fileio::reload(editor.buf_mut());
@@ -499,7 +504,7 @@ fn handle_conflict_choice(editor: &mut Editor, key: KeyEvent) {
             }
             editor.mode = Mode::Editing;
         }
-        _ => {}
+        _ => editor.mode = Mode::Prompt(prompt),
     }
 }
 
@@ -787,8 +792,8 @@ fn render(editor: &Editor) -> io::Result<()> {
     render_status_line(editor, &mut out, status_row, cols)?;
 
     if help_rows > 0 {
-        let menu = if let Mode::Prompt(p) = &editor.mode { Some(p.menu) } else { None };
-        render_shortcut_bar(&mut out, status_row + 1, cols, shortcuts_for_menu(menu))?;
+        let prompt = if let Mode::Prompt(p) = &editor.mode { Some(p) } else { None };
+        render_shortcut_bar(&mut out, status_row + 1, cols, shortcuts_for_prompt(prompt))?;
     }
 
     finish_cursor(editor, &mut out, text_start_row)?;
@@ -1117,18 +1122,33 @@ const HELP_SHORTCUTS: &[(&str, &str)] = &[
     ("M-/", "Last Line"),
 ];
 
-/// Which shortcut list to show at the bottom for the given menu — nano
+/// The "file changed on disk, you have unsaved edits" choice prompt: its
+/// own bar rather than falling back to the main editing shortcuts (which
+/// don't apply here — R/K/M/C aren't main-window bindings at all), plus
+/// `^G` since this prompt, like every other, has its own help screen.
+const EXTERNAL_CONFLICT_SHORTCUTS: &[(&str, &str)] = &[
+    ("R", "Reload"),
+    ("K", "Keep mine"),
+    ("M", "Merge"),
+    ("C", "Cancel"),
+    ("^G", "Get Help"),
+];
+
+/// Which shortcut list to show at the bottom for the current prompt — nano
 /// rebuilds its two help lines per-menu (see e.g. ask_user()'s
-/// post_one_key calls); menus not yet curated here fall back to Main's
-/// list rather than showing nothing.
-fn shortcuts_for_menu(menu: Option<Menu>) -> &'static [(&'static str, &'static str)] {
-    match menu {
-        Some(Menu::Search) => SEARCH_SHORTCUTS,
-        Some(Menu::Replace) => REPLACE1_SHORTCUTS,
-        Some(Menu::ReplaceWith) => REPLACEWITH_SHORTCUTS,
-        Some(Menu::GotoLine) => GOTOLINE_SHORTCUTS,
-        Some(Menu::Help) => HELP_SHORTCUTS,
-        _ => SHORTCUT_PRIORITY,
+/// post_one_key calls); menus/prompts not yet curated here fall back to
+/// Main's list rather than showing nothing.
+fn shortcuts_for_prompt(prompt: Option<&Prompt>) -> &'static [(&'static str, &'static str)] {
+    match prompt.map(|p| &p.kind) {
+        Some(PromptKind::ExternalChangeConflict) => EXTERNAL_CONFLICT_SHORTCUTS,
+        _ => match prompt.map(|p| p.menu) {
+            Some(Menu::Search) => SEARCH_SHORTCUTS,
+            Some(Menu::Replace) => REPLACE1_SHORTCUTS,
+            Some(Menu::ReplaceWith) => REPLACEWITH_SHORTCUTS,
+            Some(Menu::GotoLine) => GOTOLINE_SHORTCUTS,
+            Some(Menu::Help) => HELP_SHORTCUTS,
+            _ => SHORTCUT_PRIORITY,
+        },
     }
 }
 
