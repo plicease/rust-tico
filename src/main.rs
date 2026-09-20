@@ -3,6 +3,7 @@ mod buffer;
 mod cli;
 mod config;
 mod fileio;
+mod help;
 mod history;
 mod keymap;
 mod lockfile;

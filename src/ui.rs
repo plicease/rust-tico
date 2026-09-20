@@ -148,15 +148,49 @@ fn handle_key(editor: &mut Editor, key: KeyEvent) {
             editor.clear_spotlight();
             handle_editing_key(editor, key);
         }
-        Mode::Help(lines) => {
-            editor.mode = Mode::Help(lines);
-            // Any key closes the help viewer, matching ^X/Cancel/Exit; full
-            // scrolling within the viewer is not yet implemented.
-            editor.mode = Mode::Editing;
+        Mode::Help { lines, top, return_to } => {
+            handle_help_key(editor, lines, top, return_to, key);
         }
         Mode::Prompt(prompt) => handle_prompt_key(editor, prompt, key),
         Mode::Quit => editor.mode = Mode::Quit,
     }
+}
+
+/// Handle a keystroke while the `^G` help viewer is open: scroll its body,
+/// or close it (via `^X`/`^C`/Esc) and return to whatever was active
+/// before — the main editing window, or the prompt help was opened from.
+fn handle_help_key(editor: &mut Editor, lines: Vec<String>, top: usize, return_to: Option<Box<Prompt>>, key: KeyEvent) {
+    let body_len = lines.len().saturating_sub(1);
+    let body_rows = help_body_rows(editor);
+    let max_top = body_len.saturating_sub(body_rows);
+    let mut top = top.min(max_top);
+    let mut close = false;
+
+    if matches!(key.code, KeyCode::Esc) {
+        close = true;
+    } else if let Some(tkey) = normalize_key(key) {
+        if let Some(Binding::Action(action)) = editor.keymap.lookup_menu_only(Menu::Help, tkey).cloned() {
+            match action {
+                Action::Cancel => close = true,
+                Action::Up => top = top.saturating_sub(1),
+                Action::Down => top = (top + 1).min(max_top),
+                Action::PageUp => top = top.saturating_sub(body_rows),
+                Action::PageDown => top = (top + body_rows).min(max_top),
+                Action::FirstLine => top = 0,
+                Action::LastLine => top = max_top,
+                _ => {}
+            }
+        }
+    }
+
+    editor.mode = if close {
+        match return_to {
+            Some(prompt) => Mode::Prompt(*prompt),
+            None => Mode::Editing,
+        }
+    } else {
+        Mode::Help { lines, top, return_to }
+    };
 }
 
 fn handle_editing_key(editor: &mut Editor, key: KeyEvent) {
@@ -268,12 +302,18 @@ fn handle_prompt_key(editor: &mut Editor, mut prompt: Prompt, key: KeyEvent) {
 /// `Mode::Prompt(prompt)`).
 ///
 /// Only the bindings that make sense to act on immediately are handled
-/// here; others (FlipReplace/FlipGoto prompt-kind switching, Older/Newer
-/// history recall — history isn't implemented yet) are recognized by the
-/// keymap but not yet wired to a prompt-time effect, and are ignored here
-/// rather than silently doing the wrong thing.
+/// here; anything else recognized by the keymap but not listed below is
+/// ignored rather than silently doing the wrong thing.
 fn apply_prompt_action(editor: &mut Editor, prompt: &mut Prompt, action: Action) -> bool {
     match action {
+        // `^G` opens the help screen for whichever prompt is currently up
+        // (Search and Replace get their own text — see help.rs); closing
+        // it (via handle_help_key) returns here to the same prompt.
+        Action::Help => {
+            let lines = crate::help::build(prompt.menu, &editor.keymap, editor.screen_cols);
+            editor.mode = Mode::Help { lines, top: 0, return_to: Some(Box::new(prompt.clone())) };
+            true
+        }
         Action::FirstLine => {
             editor.buf_mut().cursor = Pos::new(0, 0);
             editor.scroll_to_cursor();
@@ -685,6 +725,11 @@ fn render(editor: &Editor) -> io::Result<()> {
     // instead of moving straight to its final spot.
     queue!(out, Hide)?;
 
+    if let Mode::Help { lines, top, .. } = &editor.mode {
+        render_help_screen(editor, &mut out, lines, *top)?;
+        return out.flush();
+    }
+
     let cols = editor.screen_cols;
     let rows = editor.screen_rows;
     if editor.options.zero {
@@ -710,6 +755,46 @@ fn render(editor: &Editor) -> io::Result<()> {
 
     finish_cursor(editor, &mut out, text_start_row)?;
     out.flush()
+}
+
+/// Number of rows available for the help viewer's scrollable body: the
+/// whole screen minus the title row and the (always-shown, regardless of
+/// `nohelp`) two-line shortcut bar.
+fn help_body_rows(editor: &Editor) -> usize {
+    editor.screen_rows.saturating_sub(3).max(1)
+}
+
+/// The `^G` help viewer takes over the whole screen: a centered,
+/// reverse-video title (`lines[0]`) where the title bar would normally be,
+/// the scrollable body starting at `top` (an index into `lines[1..]`), and
+/// its own shortcut bar in place of the usual status line + shortcuts.
+fn render_help_screen(editor: &Editor, out: &mut impl Write, lines: &[String], top: usize) -> io::Result<()> {
+    let cols = editor.screen_cols;
+    let rows = editor.screen_rows;
+
+    queue!(out, MoveTo(0, 0))?;
+    let title = lines.first().map(|s| s.as_str()).unwrap_or("Help");
+    let mut title_row = vec![' '; cols];
+    let start = cols.saturating_sub(title.chars().count()) / 2;
+    for (i, c) in title.chars().enumerate() {
+        if start + i < cols {
+            title_row[start + i] = c;
+        }
+    }
+    let title_line: String = title_row.into_iter().collect();
+    queue!(out, SetAttribute(Attribute::Reverse), Print(title_line), SetAttribute(Attribute::Reset))?;
+
+    let body = &lines[1.min(lines.len())..];
+    let body_rows = help_body_rows(editor);
+    for r in 0..body_rows {
+        queue!(out, MoveTo(0, 1 + r as u16))?;
+        let text = body.get(top + r).map(|s| s.as_str()).unwrap_or("");
+        let chars: Vec<char> = text.chars().take(cols).collect();
+        let s: String = chars.into_iter().collect();
+        queue!(out, Print(format!("{s:<cols$}", cols = cols)))?;
+    }
+
+    render_shortcut_bar(out, rows.saturating_sub(2) as u16, cols, HELP_SHORTCUTS)
 }
 
 fn finish_cursor(editor: &Editor, out: &mut impl Write, text_start_row: u16) -> io::Result<()> {
@@ -908,6 +993,18 @@ const GOTOLINE_SHORTCUTS: &[(&str, &str)] = &[
     ("^T", "Go To Text"),
 ];
 
+/// The `^G` help viewer's own bottom bar (confirmed against the installed
+/// nano's help screen).
+const HELP_SHORTCUTS: &[(&str, &str)] = &[
+    ("^P", "Prev Line"),
+    ("^Y", "Prev Page"),
+    ("M-\\", "First Line"),
+    ("^X", "Close"),
+    ("^N", "Next Line"),
+    ("^V", "Next Page"),
+    ("M-/", "Last Line"),
+];
+
 /// Which shortcut list to show at the bottom for the given menu — nano
 /// rebuilds its two help lines per-menu (see e.g. ask_user()'s
 /// post_one_key calls); menus not yet curated here fall back to Main's
@@ -918,6 +1015,7 @@ fn shortcuts_for_menu(menu: Option<Menu>) -> &'static [(&'static str, &'static s
         Some(Menu::Replace) => REPLACE1_SHORTCUTS,
         Some(Menu::ReplaceWith) => REPLACEWITH_SHORTCUTS,
         Some(Menu::GotoLine) => GOTOLINE_SHORTCUTS,
+        Some(Menu::Help) => HELP_SHORTCUTS,
         _ => SHORTCUT_PRIORITY,
     }
 }

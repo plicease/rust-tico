@@ -79,7 +79,12 @@ impl Prompt {
 pub enum Mode {
     Editing,
     Prompt(Prompt),
-    Help(Vec<String>),
+    /// The `^G` help viewer. `top` is the first scrolled-to body line
+    /// (index into `lines`, which are wrapped and ready to draw as-is).
+    /// `return_to` is the prompt to restore on close, when help was opened
+    /// from one (e.g. `^G` inside a Search prompt) — `None` means it was
+    /// opened from the main editing window, so closing goes back there.
+    Help { lines: Vec<String>, top: usize, return_to: Option<Box<Prompt>> },
     Quit,
 }
 
@@ -359,7 +364,8 @@ impl Editor {
         }
         match action {
             Help => {
-                self.mode = Mode::Help(help_text());
+                let lines = crate::help::build(Menu::Main, &self.keymap, self.screen_cols);
+                self.mode = Mode::Help { lines, top: 0, return_to: None };
             }
             Cancel => {
                 self.mode = Mode::Editing;
@@ -1244,14 +1250,6 @@ fn find_in_lines(
 }
 
 
-fn help_text() -> Vec<String> {
-    vec![
-        "tico help".to_string(),
-        "".to_string(),
-        "tico is a nano-compatible text editor.".to_string(),
-        "Press ^X to close this help.".to_string(),
-    ]
-}
 
 #[cfg(test)]
 mod tests {

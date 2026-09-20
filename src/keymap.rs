@@ -237,6 +237,125 @@ impl Action {
             _ => return None,
         })
     }
+
+    /// A short human description of what this action does, for the `^G`
+    /// help screen's shortcut listing. Phrasing follows nano's own
+    /// `*_gist` strings (src/global.c) where one exists, for the actions
+    /// nano itself documents; the rest (tico-internal toggles nano lacks a
+    /// public name for, plus a few tico-specific ones) get an equivalent
+    /// phrase in the same style.
+    pub fn description(&self) -> &'static str {
+        use Action::*;
+        match self {
+            Help => "Display this help text",
+            Cancel => "Cancel the current function",
+            Exit => "Close the current buffer / Exit from tico",
+            WriteOut => "Write the current buffer (or the marked region) to disk",
+            SaveFile => "Save file without prompting",
+            Insert => "Insert another file into current buffer (or into new buffer)",
+            WhereIs => "Search forward for a string or a regular expression",
+            WhereWas => "Search backward for a string or a regular expression",
+            FindPrevious => "Search next occurrence backward",
+            FindNext => "Search next occurrence forward",
+            Replace => "Replace a string or a regular expression",
+            Cut => "Cut current line (or marked region) and store it in cutbuffer",
+            Copy => "Copy current line (or marked region) and store it in cutbuffer",
+            Paste => "Paste the contents of cutbuffer at current cursor position",
+            Zap => "Throw away the current line (or marked region)",
+            ChopWordLeft => "Delete backward from cursor to word start",
+            ChopWordRight => "Delete forward from cursor to next word start",
+            CutRestOfFile => "Cut from the cursor position to the end of the file",
+            Mark => "Mark text starting from the cursor position",
+            Location => "Display the position of the cursor",
+            WordCount => "Count the number of lines, words, and characters",
+            Execute => "Execute a function or an external command",
+            Speller => "Invoke the spell checker, if available",
+            Formatter => "Invoke a program to format/arrange/manipulate the buffer",
+            Linter => "Invoke the linter, if available",
+            Justify => "Justify the current paragraph",
+            FullJustify => "Justify the entire file",
+            Indent => "Indent the current line (or marked lines)",
+            Unindent => "Unindent the current line (or marked lines)",
+            Comment => "Comment/uncomment the current line (or marked lines)",
+            Complete => "Try and complete the current word",
+            Left => "Go back one character",
+            Right => "Go forward one character",
+            Up => "Go to previous line",
+            Down => "Go to next line",
+            ScrollUp => "Scroll up one line without moving the cursor textually",
+            ScrollDown => "Scroll down one line without moving the cursor textually",
+            Center => "Center the line where the cursor is",
+            Cycle => "Push the cursor line to the center, then top, then bottom",
+            PrevWord => "Go back one word",
+            NextWord => "Go forward one word",
+            Home => "Go to beginning of current line",
+            End => "Go to end of current line",
+            BeginPara => "Go to beginning of paragraph; then of previous paragraph",
+            EndPara => "Go just beyond end of paragraph; then of next paragraph",
+            PrevBlock => "Go to previous block of text",
+            NextBlock => "Go to next block of text",
+            TopRow => "Go to first row in the viewport",
+            BottomRow => "Go to last row in the viewport",
+            PageUp => "Go one screenful up",
+            PageDown => "Go one screenful down",
+            FirstLine => "Go to the first line of the file",
+            LastLine => "Go to the last line of the file",
+            GotoLine => "Go to line and column number",
+            FindBracket => "Go to the matching bracket",
+            Anchor => "Place or remove an anchor at the current line",
+            PrevAnchor => "Jump backward to the nearest anchor",
+            NextAnchor => "Jump forward to the nearest anchor",
+            PrevBuf => "Switch to the previous file buffer",
+            NextBuf => "Switch to the next file buffer",
+            Verbatim => "Insert the next keystroke verbatim",
+            Tab => "Insert a tab at the cursor position (or indent marked lines)",
+            Enter => "Insert a newline at the cursor position",
+            Delete => "Delete the character under the cursor",
+            Backspace => "Delete the character to the left of the cursor",
+            RecordMacro => "Start/stop recording a macro",
+            RunMacro => "Run the last recorded macro",
+            Undo => "Undo the last operation",
+            Redo => "Redo the last undone operation",
+            Refresh => "Refresh (redraw) the current screen",
+            Suspend => "Suspend the editor (return to the shell)",
+            CaseSens => "Toggle the case sensitivity of the search",
+            Regexp => "Toggle the use of regular expressions",
+            Backwards => "Reverse the direction of the search",
+            Older => "Recall the previous search/replace/command string",
+            Newer => "Recall the next search/replace/command string",
+            FlipReplace => "Switch between searching and replacing",
+            FlipGoto => "Switch between searching and going to a line",
+            FlipExecute => "Switch between inserting a file and running a command",
+            FlipPipe => "Pipe the current buffer (or marked region) to the command",
+            FlipNewBuffer => "Toggle the use of a new buffer",
+            FlipConvert => "Do not convert from DOS/Mac format",
+            DosFormat => "Toggle the use of DOS format",
+            MacFormat => "Toggle the use of Mac format",
+            Append => "Toggle appending",
+            Prepend => "Toggle prepending",
+            Backup => "Toggle backing up of the original file",
+            DiscardBuffer => "Close buffer without saving it",
+            Browser => "Go to file browser",
+            GotoDir => "Go to directory",
+            FirstFile => "Go to the first file in the list",
+            LastFile => "Go to the last file in the list",
+            NoHelp => "Toggle the display of the shortcut lists",
+            Zero => "Toggle the use of the title bar and status bar",
+            ConstantShow => "Toggle constant cursor position display",
+            SoftWrap => "Toggle the displaying of overlong lines on multiple screen lines",
+            LineNumbers => "Toggle the display of line numbers",
+            WhitespaceDisplay => "Toggle the visibility of whitespace",
+            NoSyntax => "Toggle syntax highlighting",
+            SmartHome => "Toggle the smartness of the Home key",
+            AutoIndent => "Toggle auto-indent",
+            CutFromCursor => "Toggle cutting from cursor to end of line, instead of whole line",
+            BreakLongLines => "Toggle whether the overlong part of a line is hard-wrapped",
+            TabsToSpaces => "Toggle whether typed tabs are converted to spaces",
+            Mouse => "Toggle mouse support",
+            ScrollLeft => "Scroll the viewport a tabsize to the left",
+            ScrollRight => "Scroll the viewport a tabsize to the right",
+        }
+    }
 }
 
 /// The menu (keystroke context) a binding applies to, matching nano's menu
@@ -367,6 +486,65 @@ pub fn is_rebindable(key: &Key) -> bool {
 }
 
 impl Key {
+    /// Render a key the way nano's help viewer and shortcut bars do
+    /// (`^X`, `M-x`, `Sh-M-X`, `F2`, ...) — the inverse of `parse`, roughly;
+    /// used only for display, so it doesn't need to round-trip exactly.
+    pub fn describe(&self) -> String {
+        match self {
+            Key::Ctrl(' ') => "^Space".to_string(),
+            Key::Ctrl(c) => format!("^{c}"),
+            Key::Meta(' ') => "M-Space".to_string(),
+            Key::Meta(c) => format!("M-{c}"),
+            Key::ShiftMeta(c) => format!("Sh-M-{c}"),
+            Key::F(n) => format!("F{n}"),
+            Key::Ins => "Ins".to_string(),
+            Key::Del => "Del".to_string(),
+            Key::ShiftTab => "Sh-Tab".to_string(),
+            Key::Left => "Left".to_string(),
+            Key::Right => "Right".to_string(),
+            Key::Up => "Up".to_string(),
+            Key::Down => "Down".to_string(),
+            Key::Home => "Home".to_string(),
+            Key::End => "End".to_string(),
+            Key::PageUp => "PgUp".to_string(),
+            Key::PageDown => "PgDn".to_string(),
+            Key::CtrlLeft => "^Left".to_string(),
+            Key::CtrlRight => "^Right".to_string(),
+            Key::CtrlUp => "^Up".to_string(),
+            Key::CtrlDown => "^Down".to_string(),
+            Key::CtrlHome => "^Home".to_string(),
+            Key::CtrlEnd => "^End".to_string(),
+            Key::CtrlDel => "^Del".to_string(),
+            Key::ShiftCtrlDel => "Sh-^Del".to_string(),
+            Key::MetaLeft => "M-Left".to_string(),
+            Key::MetaRight => "M-Right".to_string(),
+            Key::MetaUp => "M-Up".to_string(),
+            Key::MetaDown => "M-Down".to_string(),
+            Key::MetaHome => "M-Home".to_string(),
+            Key::MetaEnd => "M-End".to_string(),
+            Key::MetaPgUp => "M-PgUp".to_string(),
+            Key::MetaPgDn => "M-PgDn".to_string(),
+            Key::MetaIns => "M-Ins".to_string(),
+            Key::MetaDel => "M-Del".to_string(),
+        }
+    }
+
+    /// Sort key for showing the "primary" binding of an action before its
+    /// alternates, roughly matching nano's own convention (Ctrl first, then
+    /// function keys, then Meta).
+    pub(crate) fn display_rank(&self) -> (u8, i32) {
+        match self {
+            Key::Ctrl(c) => (0, *c as i32),
+            Key::CtrlLeft | Key::CtrlRight | Key::CtrlUp | Key::CtrlDown | Key::CtrlHome | Key::CtrlEnd | Key::CtrlDel => {
+                (0, 0)
+            }
+            Key::F(n) => (1, *n as i32),
+            Key::Meta(c) => (2, *c as i32),
+            Key::ShiftMeta(c) => (3, *c as i32),
+            _ => (4, 0),
+        }
+    }
+
     /// Parse a key specification as written in a nanorc `bind`/`unbind` line:
     /// `^X`, `M-X`, `Sh-M-X`, `FN` (F1..F24), `Ins`, or `Del`.
     pub fn parse(spec: &str) -> Option<Key> {
@@ -506,6 +684,13 @@ impl KeyMap {
     /// prompt and unexpectedly aborting a save).
     pub fn lookup_menu_only(&self, menu: Menu, key: Key) -> Option<&Binding> {
         self.table.get(&(menu, key))
+    }
+
+    /// All (menu, key) -> binding entries, e.g. for building a help screen's
+    /// shortcut listing straight from the live bindings (so a `bind`/
+    /// `unbind` in nanorc/ticorc is reflected automatically).
+    pub fn entries(&self) -> impl Iterator<Item = (&(Menu, Key), &Binding)> {
+        self.table.iter()
     }
 
     /// Build the default keybinding table, matching GNU nano 8.7.1's
@@ -735,6 +920,17 @@ impl KeyMap {
 
         self.bind(Menu::Help, K::Home, Binding::Action(A::FirstLine));
         self.bind(Menu::Help, K::End, Binding::Action(A::LastLine));
+        self.bind(Menu::Help, K::Up, Binding::Action(A::Up));
+        self.bind(Menu::Help, K::Down, Binding::Action(A::Down));
+        self.bind(Menu::Help, K::Ctrl('P'), Binding::Action(A::Up));
+        self.bind(Menu::Help, K::Ctrl('N'), Binding::Action(A::Down));
+        self.bind(Menu::Help, K::PageUp, Binding::Action(A::PageUp));
+        self.bind(Menu::Help, K::PageDown, Binding::Action(A::PageDown));
+        self.bind(Menu::Help, K::Ctrl('Y'), Binding::Action(A::PageUp));
+        self.bind(Menu::Help, K::Ctrl('V'), Binding::Action(A::PageDown));
+        self.bind(Menu::Help, K::Meta('\\'), Binding::Action(A::FirstLine));
+        self.bind(Menu::Help, K::Meta('/'), Binding::Action(A::LastLine));
+        self.bind(Menu::Help, K::Ctrl('X'), Binding::Action(A::Cancel));
 
         self.bind(Menu::Linter, K::Ctrl('X'), Binding::Action(A::Cancel));
         self.bind(Menu::Linter, K::Ctrl('C'), Binding::Action(A::Cancel));
