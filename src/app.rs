@@ -32,6 +32,14 @@ pub enum PromptKind {
         target: String,
     },
     Help,
+    /// `^R` Read File: `new_buffer` mirrors nano's `NEW_BUFFER` flag, toggled
+    /// live by `M-F` within this one prompt (seeded from `set multibuffer`,
+    /// reset back to that baseline the next time the prompt opens) — when
+    /// set, the file opens as a separate buffer instead of being inserted
+    /// into the current one at the cursor.
+    InsertFile {
+        new_buffer: bool,
+    },
 }
 
 /// State threaded through an in-progress interactive replace, one match at
@@ -426,7 +434,7 @@ impl Editor {
             Exit => self.begin_exit(),
             WriteOut => self.begin_writeout(false),
             SaveFile => self.quick_save(),
-            Insert => self.set_status("insert-file: not yet implemented"),
+            Insert => self.begin_insert(),
             WhereIs => self.begin_search(),
             WhereWas => {
                 self.search.backwards = true;
@@ -786,6 +794,22 @@ impl Editor {
             kind: PromptKind::Replace1,
             menu: Menu::Replace,
             label: search_prompt_label("Search", " (to replace)", &self.search),
+            input: String::new(),
+            cursor: 0,
+            history_pos: None,
+            saved_input: None,
+        });
+    }
+
+    /// `^R` Read File. `new_buffer` starts from `set multibuffer` each time
+    /// this prompt opens (matching nano: the `M-F` toggle only lives for
+    /// the duration of one prompt, not permanently).
+    fn begin_insert(&mut self) {
+        let new_buffer = self.options.multibuffer;
+        self.mode = Mode::Prompt(Prompt {
+            kind: PromptKind::InsertFile { new_buffer },
+            menu: Menu::Insert,
+            label: insert_prompt_label(new_buffer),
             input: String::new(),
             cursor: 0,
             history_pos: None,
@@ -1187,6 +1211,16 @@ pub fn search_prompt_label(base: &str, suffix: &str, search: &SearchState) -> St
         label.push_str(&format!(" [{default}]"));
     }
     label
+}
+
+/// The `^R` Read File prompt's label, matching the installed nano's exact
+/// wording for both states (it toggles with `M-F`, no other wording change).
+pub fn insert_prompt_label(new_buffer: bool) -> String {
+    if new_buffer {
+        "File to read into new buffer [from ./]".to_string()
+    } else {
+        "File to insert [from ./]".to_string()
+    }
 }
 
 /// Expand nano-style `\1`-`\9` backreferences in `template` using `caps`

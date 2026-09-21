@@ -453,6 +453,39 @@ fn apply_prompt_action(editor: &mut Editor, prompt: &mut Prompt, action: Action)
             cycle_history(editor, prompt, false);
             false
         }
+        // `M-F` at the Read File prompt: only the label wording changes
+        // (confirmed against the installed nano — the shortcut-bar entry
+        // itself always just reads "New Buffer", not a toggle-state pair
+        // like FlipReplace's "Replace"/"No Replace").
+        Action::FlipNewBuffer => {
+            let PromptKind::InsertFile { new_buffer } = &mut prompt.kind else {
+                return false;
+            };
+            *new_buffer = !*new_buffer;
+            prompt.label = crate::app::insert_prompt_label(*new_buffer);
+            false
+        }
+        // Recognized (bound, shown in the shortcut bar and ^G help) but not
+        // actually implemented yet: report that plainly rather than either
+        // hiding the option or silently doing nothing when pressed. Status
+        // messages don't show while a prompt is up (the status line is the
+        // prompt itself), so this closes the prompt to make the message
+        // visible, same as a real result would.
+        Action::FlipConvert => {
+            editor.mode = Mode::Editing;
+            editor.set_status("No Conversion: not yet implemented");
+            true
+        }
+        Action::FlipExecute => {
+            editor.mode = Mode::Editing;
+            editor.set_status("Execute Command: not yet implemented");
+            true
+        }
+        Action::Browser => {
+            editor.mode = Mode::Editing;
+            editor.set_status("File Browser: not yet implemented");
+            true
+        }
         _ => false,
     }
 }
@@ -775,6 +808,58 @@ fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
                 };
                 let col = col_s.trim().parse::<i64>().unwrap_or(1).max(1) as usize - 1;
                 editor.buf_mut().cursor = Pos::new(target_line as usize, col);
+            }
+        }
+        PromptKind::InsertFile { new_buffer } => {
+            editor.mode = Mode::Editing;
+            if text.is_empty() {
+                // Matches nano: an empty filename with New Buffer on opens
+                // a blank buffer instead of canceling; off, it cancels.
+                if new_buffer {
+                    editor.buffers.push(crate::buffer::Buffer::empty());
+                    editor.current = editor.buffers.len() - 1;
+                } else {
+                    editor.set_status("Cancelled");
+                }
+                return;
+            }
+            let path = std::path::PathBuf::from(&text);
+            if path.is_dir() {
+                editor.set_status_alert(format!("'{}' is a directory", path.display()));
+                return;
+            }
+            if new_buffer {
+                if !path.exists() {
+                    // A nonexistent filename also yields a blank buffer,
+                    // per nano's own hint text for this prompt.
+                    editor
+                        .buffers
+                        .push(crate::buffer::Buffer::from_text("", Some(path)));
+                    editor.current = editor.buffers.len() - 1;
+                    editor.set_status("New File");
+                } else {
+                    match crate::fileio::load_file(&path) {
+                        Ok(buf) => {
+                            let msg = crate::fileio::describe_read(&buf.to_string());
+                            editor.buffers.push(buf);
+                            editor.current = editor.buffers.len() - 1;
+                            editor.set_status(msg);
+                        }
+                        Err(e) => editor
+                            .set_status_alert(format!("Error reading {}: {e}", path.display())),
+                    }
+                }
+            } else {
+                match std::fs::read_to_string(&path) {
+                    Ok(content) => {
+                        let msg = crate::fileio::describe_read(&content);
+                        editor.buf_mut().insert_str(&content);
+                        editor.set_status(msg);
+                    }
+                    Err(e) => {
+                        editor.set_status_alert(format!("Error reading {}: {e}", path.display()))
+                    }
+                }
             }
         }
         PromptKind::WriteOut { exiting } => {
@@ -1329,6 +1414,20 @@ const GOTOLINE_SHORTCUTS: &[(Action, &str)] = &[
     (Action::FlipGoto, "Go To Text"),
 ];
 
+/// The `^R` Read File prompt's shortcut list, matching nano's full menu.
+/// Execute (`^X`), no-conversion (`M-N`), and the file browser (`^T`)
+/// aren't actually implemented yet — see apply_prompt_action's
+/// FlipConvert/FlipExecute/Browser arms — but are still listed rather than
+/// silently omitted, since pressing them does now give real feedback.
+const INSERT_SHORTCUTS: &[(Action, &str)] = &[
+    (Action::Help, "Help"),
+    (Action::Cancel, "Cancel"),
+    (Action::FlipNewBuffer, "New Buffer"),
+    (Action::FlipConvert, "No Conversion"),
+    (Action::Browser, "Browse"),
+    (Action::FlipExecute, "Execute Command"),
+];
+
 /// The `^G` help viewer's own bottom bar (confirmed against the installed
 /// nano's help screen).
 const HELP_SHORTCUTS: &[(Action, &str)] = &[
@@ -1411,6 +1510,7 @@ fn shortcut_bar_entries(keymap: &KeyMap, prompt: Option<&Prompt>) -> Vec<(String
         Menu::ReplaceWith => REPLACEWITH_SHORTCUTS,
         Menu::GotoLine => GOTOLINE_SHORTCUTS,
         Menu::Help => HELP_SHORTCUTS,
+        Menu::Insert => INSERT_SHORTCUTS,
         _ => return resolve_shortcuts(keymap, Menu::Main, SHORTCUT_PRIORITY),
     };
     resolve_shortcuts(keymap, p.menu, table)
@@ -1861,6 +1961,116 @@ fn diff_line_kinds(body: &[String]) -> Option<Vec<Vec<Option<crate::syntax::High
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_editor(text: &str) -> Editor {
+        let mut ed = Editor::new(crate::options::Options::default(), KeyMap::defaults(false));
+        ed.buffers[0] = crate::buffer::Buffer::from_text(text, None);
+        ed
+    }
+
+    fn insert_prompt(new_buffer: bool, input: &str) -> Prompt {
+        Prompt {
+            kind: PromptKind::InsertFile { new_buffer },
+            menu: Menu::Insert,
+            label: crate::app::insert_prompt_label(new_buffer),
+            input: input.to_string(),
+            cursor: input.chars().count(),
+            history_pos: None,
+            saved_input: None,
+        }
+    }
+
+    #[test]
+    fn insert_file_reads_content_into_current_buffer_at_cursor() {
+        let path = std::env::temp_dir().join("tico_test_insert_at_cursor.txt");
+        std::fs::write(&path, "INSERTED\n").unwrap();
+        let mut ed = test_editor("hello\nworld\n");
+        ed.buf_mut().cursor = crate::buffer::Pos::new(1, 0); // start of "world"
+        submit_prompt(&mut ed, insert_prompt(false, path.to_str().unwrap()));
+        assert_eq!(ed.buf().to_string(), "hello\nINSERTED\nworld\n");
+        assert_eq!(ed.buffers.len(), 1, "should not have opened a new buffer");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn insert_file_new_buffer_opens_a_separate_buffer() {
+        let path = std::env::temp_dir().join("tico_test_insert_new_buffer.txt");
+        std::fs::write(&path, "SEPARATE CONTENT\n").unwrap();
+        let mut ed = test_editor("original\n");
+        submit_prompt(&mut ed, insert_prompt(true, path.to_str().unwrap()));
+        assert_eq!(ed.buffers.len(), 2);
+        assert_eq!(ed.current, 1);
+        assert_eq!(ed.buf().to_string(), "SEPARATE CONTENT\n");
+        assert_eq!(
+            ed.buffers[0].to_string(),
+            "original\n",
+            "original buffer untouched"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn insert_file_empty_input_new_buffer_opens_blank_buffer() {
+        let mut ed = test_editor("original\n");
+        submit_prompt(&mut ed, insert_prompt(true, ""));
+        assert_eq!(ed.buffers.len(), 2);
+        assert_eq!(ed.current, 1);
+        assert_eq!(ed.buf().to_string(), "");
+    }
+
+    #[test]
+    fn insert_file_empty_input_without_new_buffer_cancels() {
+        let mut ed = test_editor("original\n");
+        submit_prompt(&mut ed, insert_prompt(false, ""));
+        assert_eq!(ed.buffers.len(), 1);
+        assert_eq!(ed.buf().to_string(), "original\n");
+        assert_eq!(ed.status.as_deref(), Some("Cancelled"));
+    }
+
+    #[test]
+    fn insert_file_nonexistent_path_new_buffer_gives_blank_named_buffer() {
+        let path = std::env::temp_dir().join("tico_test_insert_does_not_exist.txt");
+        std::fs::remove_file(&path).ok(); // just in case a prior run left it
+        let mut ed = test_editor("original\n");
+        submit_prompt(&mut ed, insert_prompt(true, path.to_str().unwrap()));
+        assert_eq!(ed.buffers.len(), 2);
+        assert_eq!(ed.buf().to_string(), "");
+        assert_eq!(ed.buf().path.as_deref(), Some(path.as_path()));
+    }
+
+    #[test]
+    fn flip_new_buffer_toggles_label_and_state() {
+        let mut ed = test_editor("x");
+        let mut prompt = insert_prompt(false, "");
+        assert!(!apply_prompt_action(
+            &mut ed,
+            &mut prompt,
+            Action::FlipNewBuffer
+        ));
+        assert_eq!(prompt.kind, PromptKind::InsertFile { new_buffer: true });
+        assert!(prompt.label.contains("new buffer"));
+    }
+
+    #[test]
+    fn unimplemented_insert_actions_report_plainly_and_close_the_prompt() {
+        for (action, expected) in [
+            (Action::FlipConvert, "No Conversion: not yet implemented"),
+            (Action::FlipExecute, "Execute Command: not yet implemented"),
+            (Action::Browser, "File Browser: not yet implemented"),
+        ] {
+            let mut ed = test_editor("x");
+            let mut prompt = insert_prompt(false, "");
+            assert!(
+                apply_prompt_action(&mut ed, &mut prompt, action),
+                "{action:?}"
+            );
+            assert!(
+                matches!(ed.mode, Mode::Editing),
+                "{action:?} should close the prompt"
+            );
+            assert_eq!(ed.status.as_deref(), Some(expected), "{action:?}");
+        }
+    }
 
     #[test]
     fn shortcut_bar_reflects_modern_bindings() {
