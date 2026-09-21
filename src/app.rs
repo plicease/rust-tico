@@ -31,7 +31,46 @@ pub enum PromptKind {
         lock_path: std::path::PathBuf,
         target: String,
     },
-    Help,
+    /// `^R` Read File / `^T` Execute Command: `new_buffer` mirrors nano's
+    /// `NEW_BUFFER` flag, toggled live by `M-F` within this one prompt
+    /// (seeded from `set multibuffer`, reset back to that baseline the next
+    /// time the prompt opens) — when set, the file/command output opens as
+    /// a separate buffer instead of being inserted into the current one at
+    /// the cursor. `execute` mirrors nano's own toggle between "insert a
+    /// file" and "run a command", flipped in place by `^X` (both prompts
+    /// share one underlying UI in nano, `insert_a_file_or()`).
+    InsertFile {
+        new_buffer: bool,
+        execute: bool,
+    },
+    /// The Execute-Command prompt's `^T` (no `set speller`/`--speller`
+    /// configured): one step of nano's own word-by-word spell-fix loop.
+    /// `word` is the currently spotlighted misspelling, pre-filled into the
+    /// "Edit a replacement" prompt; `remaining` holds the still-unchecked
+    /// words after it, already sorted and deduplicated like nano's own
+    /// `hunspell -l | sort -f | uniq` pipeline.
+    SpellFix {
+        word: String,
+        remaining: Vec<String>,
+    },
+    /// The linter's interactive result viewer (nano's `MLINTER` menu):
+    /// `^Y`/PageUp and `^V`/PageDown step through `messages`, moving the
+    /// cursor to each one's reported location; `index` is the currently
+    /// shown message.
+    Linter {
+        messages: Vec<LintMessage>,
+        index: usize,
+    },
+}
+
+/// One parsed line of linter output: `filename:line[:col]: msg` (or
+/// `filename:line,col: msg`), matching nano's own linter-output parser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LintMessage {
+    pub filename: String,
+    pub line: usize,
+    pub col: usize,
+    pub msg: String,
 }
 
 /// State threaded through an in-progress interactive replace, one match at
@@ -50,6 +89,12 @@ pub struct ReplaceLoopState {
     pub session_start: Pos,
     pub wrapped: bool,
     pub count: usize,
+    /// When a region was marked at the start of this replace, its end
+    /// position — matches never wrap and are only reported before this
+    /// point (nano's `INREGION` mode). Adjusted as replacements on the
+    /// same line change its length, mirroring nano's own `mark_x` upkeep
+    /// in `do_replace_loop`.
+    pub region_end: Option<Pos>,
 }
 
 pub enum ReplaceChoice {
@@ -73,27 +118,6 @@ pub struct Prompt {
     /// What `input` was before history browsing started, restored when
     /// Newer is pressed past the most recent entry.
     pub saved_input: Option<String>,
-}
-
-impl Prompt {
-    pub fn new(
-        kind: PromptKind,
-        menu: Menu,
-        label: impl Into<String>,
-        input: impl Into<String>,
-    ) -> Prompt {
-        let input = input.into();
-        let cursor = input.chars().count();
-        Prompt {
-            kind,
-            menu,
-            label: label.into(),
-            input,
-            cursor,
-            history_pos: None,
-            saved_input: None,
-        }
-    }
 }
 
 pub enum Mode {
@@ -196,6 +220,11 @@ pub struct Editor {
     pub mode: Mode,
     pub screen_rows: usize,
     pub screen_cols: usize,
+    /// The `^R` Read File prompt's `Tab`-completion listing, when more than
+    /// one filename matches the typed fragment — shown as a grid in place
+    /// of the buffer, matching nano's `input_tab`. Cleared by any other
+    /// keystroke.
+    pub file_completions: Option<Vec<String>>,
 }
 
 impl Editor {
@@ -231,6 +260,7 @@ impl Editor {
             mode: Mode::Editing,
             screen_rows: 24,
             screen_cols: 80,
+            file_completions: None,
         }
     }
 
@@ -406,6 +436,10 @@ impl Editor {
     /// re-render (essentially always, but kept for future use).
     pub fn execute(&mut self, action: Action) {
         use Action::*;
+        if self.blocked_in_view_mode(action) {
+            self.set_status_mild("Key is invalid in view mode");
+            return;
+        }
         // Any action other than Cut clears nano's "consecutive cuts append
         // to the same cutbuffer" chain.
         if !matches!(action, Cut | CutRestOfFile) {
@@ -426,7 +460,7 @@ impl Editor {
             Exit => self.begin_exit(),
             WriteOut => self.begin_writeout(false),
             SaveFile => self.quick_save(),
-            Insert => self.set_status("insert-file: not yet implemented"),
+            Insert => self.begin_insert(),
             WhereIs => self.begin_search(),
             WhereWas => {
                 self.search.backwards = true;
@@ -482,7 +516,8 @@ impl Editor {
             ChopWordLeft => self.chop_word_left(),
             ChopWordRight => self.chop_word_right(),
             Complete => self.set_status("complete: not yet implemented"),
-            Justify | FullJustify => self.set_status("justify: not yet implemented"),
+            Justify => self.run_justify(false),
+            FullJustify => self.run_justify(true),
             Indent => self.set_status("indent: not yet implemented"),
             Unindent => self.set_status("unindent: not yet implemented"),
             Comment => self.set_status("comment: not yet implemented"),
@@ -502,9 +537,13 @@ impl Editor {
             RecordMacro | RunMacro => self.set_status("macros: not yet implemented"),
             Refresh => {}
             Suspend => self.set_status("suspend: not supported in this build"),
-            Speller | Formatter | Linter | Execute => {
-                self.set_status("external command integration: not yet implemented");
-            }
+            Execute => self.begin_execute(),
+            // Speller/Formatter/Linter need to run an external process (and,
+            // for the alt-speller/formatter, hand the terminal over to it),
+            // which this UI-agnostic dispatcher can't do — ui.rs's
+            // apply_binding/apply_prompt_action intercept them before they
+            // would ever reach here.
+            Speller | Formatter | Linter => {}
             NoHelp => self.options.nohelp = !self.options.nohelp,
             Zero => self.options.zero = !self.options.zero,
             ConstantShow => self.options.constantshow = !self.options.constantshow,
@@ -600,7 +639,11 @@ impl Editor {
         }
     }
 
-    fn selection_range(&self) -> Option<(Pos, Pos)> {
+    /// The marked region, normalized to (earlier, later) regardless of
+    /// which end the mark or the cursor is on -- `None` when no mark is
+    /// set. `pub(crate)` so the renderer can highlight it, not just the
+    /// tools (Cut/Copy/Speller/...) that already act on it.
+    pub(crate) fn selection_range(&self) -> Option<(Pos, Pos)> {
         let buf = self.buf();
         buf.mark.map(|m| {
             if (m.line, m.col) <= (buf.cursor.line, buf.cursor.col) {
@@ -611,13 +654,229 @@ impl Editor {
         })
     }
 
+    /// Whether `--view`/`set view` should block `action` — matches nano's
+    /// `ISSET(VIEW_MODE) && changes_something(function)` check. `pub(crate)`
+    /// so ui.rs's Speller/Formatter interception (which never reaches
+    /// `execute()`, since those need real terminal I/O) can honor it too.
+    pub(crate) fn blocked_in_view_mode(&self, action: Action) -> bool {
+        self.options.view && action_changes_something(action)
+    }
+
+    /// What the spell checker and formatter operate on: the marked
+    /// selection if one is active, otherwise the whole buffer — matching
+    /// nano's own `write_region_to_file`/`write_file` choice in `do_spell`.
+    pub(crate) fn tool_input_text(&self) -> String {
+        match self.selection_range() {
+            Some((start, end)) => self.buf().text_range(start, end),
+            None => self.buf().to_string(),
+        }
+    }
+
+    /// Replace whatever `tool_input_text` returned with `new_text`,
+    /// matching nano's `replace_buffer` (used by `treat()` for the
+    /// alt-speller and the formatter).
+    pub(crate) fn replace_tool_input(&mut self, new_text: &str) {
+        let range = self.selection_range();
+        let start = match range {
+            Some((start, end)) => {
+                self.buf_mut().delete_range(start, end);
+                start
+            }
+            None => {
+                let last_line = self.buf().line_count().saturating_sub(1);
+                let last_col = self.buf().line(last_line).chars().count();
+                self.buf_mut()
+                    .delete_range(Pos::new(0, 0), Pos::new(last_line, last_col));
+                Pos::new(0, 0)
+            }
+        };
+        self.buf_mut().cursor = start;
+        self.buf_mut().insert_str(new_text);
+        self.buf_mut().modified = true;
+        self.scroll_to_cursor();
+    }
+
+    /// `^J` Justify (one paragraph) / `M-J` Full Justify (the whole
+    /// buffer) — matches nano's `justify_text`. A marked region, when
+    /// present, always wins over either of those (nano's own "treat all
+    /// marked text as one paragraph" behavior), regardless of which key
+    /// was pressed.
+    fn run_justify(&mut self, whole_buffer: bool) {
+        if let Some((start, end)) = self.selection_range() {
+            self.run_justify_selection(start, end);
+            return;
+        }
+        let quote_re = regex::Regex::new(&self.options.quotestr).ok();
+        let quote_re = quote_re.as_ref();
+        let wrap_at = crate::justify::wrap_at(self.options.fill, self.screen_cols);
+        let punct = self.options.punct.clone();
+        let brackets = self.options.brackets.clone();
+        let trim_blanks = self.options.trimblanks;
+
+        let lines: Vec<Vec<char>> = (0..self.buf().line_count())
+            .map(|i| self.buf().line(i).chars().collect())
+            .collect();
+
+        if whole_buffer {
+            let mut result = lines;
+            let mut search_start = 0;
+            let mut touched = false;
+            while let Some((start, count)) =
+                crate::justify::find_paragraph(&result, search_start, quote_re)
+            {
+                let new_lines = crate::justify::justify_paragraph(
+                    &result,
+                    start,
+                    count,
+                    quote_re,
+                    &punct,
+                    &brackets,
+                    wrap_at,
+                    trim_blanks,
+                );
+                let new_count = new_lines.len();
+                result.splice(start..start + count, new_lines);
+                search_start = start + new_count;
+                touched = true;
+            }
+            if !touched {
+                self.set_status("Nothing to justify");
+                return;
+            }
+            let was_line = self.buf().cursor.line;
+            let new_text = join_lines(&result);
+            self.replace_tool_input(&new_text);
+            let target = was_line.min(self.buf().line_count().saturating_sub(1));
+            self.buf_mut().cursor = Pos::new(target, 0);
+            self.scroll_to_cursor();
+            self.set_status("Justified file");
+        } else {
+            let cursor_line = self.buf().cursor.line;
+            let search_start = if crate::justify::in_mid_paragraph(&lines, cursor_line, quote_re) {
+                crate::justify::para_begin(&lines, cursor_line, quote_re)
+            } else {
+                cursor_line
+            };
+            let Some((start, count)) =
+                crate::justify::find_paragraph(&lines, search_start, quote_re)
+            else {
+                self.set_status("Nothing to justify");
+                return;
+            };
+            let new_lines = crate::justify::justify_paragraph(
+                &lines,
+                start,
+                count,
+                quote_re,
+                &punct,
+                &brackets,
+                wrap_at,
+                trim_blanks,
+            );
+            let new_count = new_lines.len();
+            let new_text = join_lines(&new_lines);
+
+            let end_line = start + count - 1;
+            let end_col = self.buf().line(end_line).chars().count();
+            self.buf_mut()
+                .delete_range(Pos::new(start, 0), Pos::new(end_line, end_col));
+            self.buf_mut().cursor = Pos::new(start, 0);
+            self.buf_mut().insert_str(&new_text);
+            self.buf_mut().modified = true;
+
+            // Matches nano: the cursor ends up on whatever line follows
+            // the justified paragraph (often a blank separator line), not
+            // on the paragraph's own last line -- `justify_text` extends
+            // the cut region one line further before re-pasting it, which
+            // is where this comes from.
+            let next_line = start + new_count;
+            if next_line < self.buf().line_count() {
+                self.buf_mut().cursor = Pos::new(next_line, 0);
+            } else {
+                let last_line = self.buf().line_count().saturating_sub(1);
+                let last_col = self.buf().line(last_line).chars().count();
+                self.buf_mut().cursor = Pos::new(last_line, last_col);
+            }
+            self.scroll_to_cursor();
+            self.set_status("Justified paragraph");
+        }
+    }
+
+    /// `^J`/`M-J` with a marked region: nano's "treat all marked text as
+    /// one paragraph" (Pico behavior) — justifies the marked lines as a
+    /// single unit regardless of paragraph boundaries within them. This
+    /// snaps to whole lines rather than replicating nano's exact mid-line
+    /// lead-trimming and its backward search past the selection's start
+    /// for the "true" paragraph beginning; for a selection that already
+    /// starts/ends at a paragraph's own boundaries (the common case) the
+    /// result is identical.
+    fn run_justify_selection(&mut self, start: Pos, end: Pos) {
+        if start == end {
+            self.set_status_mild("Selection is empty");
+            return;
+        }
+        let quote_re = regex::Regex::new(&self.options.quotestr).ok();
+        let quote_re = quote_re.as_ref();
+        let wrap_at = crate::justify::wrap_at(self.options.fill, self.screen_cols);
+        let punct = self.options.punct.clone();
+        let brackets = self.options.brackets.clone();
+        let trim_blanks = self.options.trimblanks;
+
+        // A selection ending right at column 0 doesn't reach into that
+        // line, so treat the line above as the last one covered.
+        let end_line = if end.col == 0 && end.line > start.line {
+            end.line - 1
+        } else {
+            end.line
+        };
+        let count = end_line - start.line + 1;
+
+        let lines: Vec<Vec<char>> = (0..self.buf().line_count())
+            .map(|i| self.buf().line(i).chars().collect())
+            .collect();
+        let new_lines = crate::justify::justify_paragraph(
+            &lines,
+            start.line,
+            count,
+            quote_re,
+            &punct,
+            &brackets,
+            wrap_at,
+            trim_blanks,
+        );
+        let new_count = new_lines.len();
+        let new_text = join_lines(&new_lines);
+
+        let end_col = self.buf().line(end_line).chars().count();
+        self.buf_mut()
+            .delete_range(Pos::new(start.line, 0), Pos::new(end_line, end_col));
+        self.buf_mut().cursor = Pos::new(start.line, 0);
+        self.buf_mut().insert_str(&new_text);
+        self.buf_mut().modified = true;
+        self.buf_mut().mark = None;
+        self.buf_mut().softmark = false;
+
+        let final_line = start.line + new_count - 1;
+        let final_col = self.buf().line(final_line).chars().count();
+        self.buf_mut().cursor = Pos::new(final_line, final_col);
+        self.scroll_to_cursor();
+        self.set_status("Justified selection");
+    }
+
+    /// `^^`/`M-A` Set Mark: matches nano's `do_mark` -- toggles a *hard*
+    /// mark (as opposed to the "soft" one Shift+movement sets), which
+    /// persists until toggled off again rather than being cleared by the
+    /// next plain movement.
     fn toggle_mark(&mut self) {
         let cur = self.buf().cursor;
-        let buf = self.buf_mut();
-        if buf.mark.is_some() {
-            buf.mark = None;
+        if self.buf().mark.is_some() {
+            self.buf_mut().mark = None;
+            self.buf_mut().softmark = false;
+            self.set_status("Mark Unset");
         } else {
-            buf.mark = Some(cur);
+            self.buf_mut().mark = Some(cur);
+            self.buf_mut().softmark = false;
+            self.set_status("Mark Set");
         }
     }
 
@@ -782,10 +1041,53 @@ impl Editor {
     }
 
     fn begin_replace(&mut self) {
+        let suffix = if self.buf().mark.is_some() {
+            " (to replace) in selection"
+        } else {
+            " (to replace)"
+        };
         self.mode = Mode::Prompt(Prompt {
             kind: PromptKind::Replace1,
             menu: Menu::Replace,
-            label: search_prompt_label("Search", " (to replace)", &self.search),
+            label: search_prompt_label("Search", suffix, &self.search),
+            input: String::new(),
+            cursor: 0,
+            history_pos: None,
+            saved_input: None,
+        });
+    }
+
+    /// `^R` Read File. `new_buffer` starts from `set multibuffer` each time
+    /// this prompt opens (matching nano: the `M-F` toggle only lives for
+    /// the duration of one prompt, not permanently).
+    fn begin_insert(&mut self) {
+        let new_buffer = self.options.multibuffer;
+        self.mode = Mode::Prompt(Prompt {
+            kind: PromptKind::InsertFile {
+                new_buffer,
+                execute: false,
+            },
+            menu: Menu::Insert,
+            label: insert_prompt_label(new_buffer, false),
+            input: String::new(),
+            cursor: 0,
+            history_pos: None,
+            saved_input: None,
+        });
+    }
+
+    /// `^T` Execute Command: the same prompt as `^R`, just starting in
+    /// "run a command" mode (nano's `do_execute` -> `insert_a_file_or(TRUE)`,
+    /// versus `do_insertfile` -> `insert_a_file_or(FALSE)`).
+    fn begin_execute(&mut self) {
+        let new_buffer = self.options.multibuffer;
+        self.mode = Mode::Prompt(Prompt {
+            kind: PromptKind::InsertFile {
+                new_buffer,
+                execute: true,
+            },
+            menu: Menu::Execute,
+            label: insert_prompt_label(new_buffer, true),
             input: String::new(),
             cursor: 0,
             history_pos: None,
@@ -806,16 +1108,30 @@ impl Editor {
     }
 
     fn begin_writeout(&mut self, exiting: bool) {
-        let default = self
-            .buf()
-            .path
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
+        // A marked region offers to write just the selection instead of
+        // the whole buffer, and (to reduce the chance of clobbering the
+        // real file with just a fragment) starts with a blank filename
+        // rather than defaulting to the current one — matches nano, and
+        // only applies outside of the exit-time save prompt.
+        let selecting = !exiting && self.buf().mark.is_some();
+        let default = if selecting {
+            String::new()
+        } else {
+            self.buf()
+                .path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        };
+        let label = if selecting {
+            "Write Selection to File".to_string()
+        } else {
+            "File Name to Write".to_string()
+        };
         self.mode = Mode::Prompt(Prompt {
             kind: PromptKind::WriteOut { exiting },
             menu: Menu::WriteOut,
-            label: "File Name to Write".to_string(),
+            label,
             cursor: default.chars().count(),
             input: default,
             history_pos: None,
@@ -918,12 +1234,23 @@ impl Editor {
             return;
         }
         self.search.last_pattern = Some(search.clone());
-        let session_start = self.buf().cursor;
+        // A marked region restricts the replace to just that text (nano's
+        // "treat all marked text as one region" for replace) and is a
+        // one-shot restriction: the mark itself is cleared here, matching
+        // nano's do_replace_loop.
+        let region = self.selection_range();
+        if region.is_some() {
+            self.buf_mut().mark = None;
+            self.buf_mut().softmark = false;
+        }
+        let session_start = region.map(|(start, _)| start).unwrap_or(self.buf().cursor);
+        let region_end = region.map(|(_, end)| end);
         let found = find_next_match_for_replace(
             self.buf(),
             session_start,
             session_start,
             false,
+            region_end,
             &search,
             self.search.case_sensitive,
             self.search.use_regex,
@@ -942,6 +1269,7 @@ impl Editor {
                         session_start,
                         wrapped,
                         count: 0,
+                        region_end,
                     }),
                     menu: Menu::YesNo,
                     label: "Replace this instance?".to_string(),
@@ -990,6 +1318,15 @@ impl Editor {
                 let expanded_len = expanded.chars().count();
                 self.buf_mut().insert_str(&expanded);
                 state.count += 1;
+                // Keep the region boundary in step with a length change on
+                // its own line, matching nano's own `mark_x` adjustment.
+                if let Some(region_end) = &mut state.region_end
+                    && region_end.line == state.match_pos.line
+                    && region_end.col >= end.col
+                {
+                    let delta = expanded_len as isize - state.match_len as isize;
+                    region_end.col = (region_end.col as isize + delta).max(0) as usize;
+                }
                 Pos::new(state.match_pos.line, state.match_pos.col + expanded_len)
             } else {
                 // Skip past this match (at least one character, so a
@@ -1004,6 +1341,7 @@ impl Editor {
                 next_from,
                 state.session_start,
                 state.wrapped,
+                state.region_end,
                 &state.search,
                 self.search.case_sensitive,
                 self.search.use_regex,
@@ -1189,6 +1527,61 @@ pub fn search_prompt_label(base: &str, suffix: &str, search: &SearchState) -> St
     label
 }
 
+/// The `^R` Read File prompt's label, matching the installed nano's exact
+/// wording for both states (it toggles with `M-F`, no other wording change).
+pub fn insert_prompt_label(new_buffer: bool, execute: bool) -> String {
+    match (execute, new_buffer) {
+        (true, true) => "Command to execute in new buffer".to_string(),
+        (true, false) => "Command to execute".to_string(),
+        (false, true) => "File to read into new buffer [from ./]".to_string(),
+        (false, false) => "File to insert [from ./]".to_string(),
+    }
+}
+
+/// Whether `action` would modify the buffer — matches nano's own
+/// `changes_something()`, the exact gate its main dispatch loop uses to
+/// decide what `--view` blocks (with "Key is invalid in view mode")
+/// versus what it still allows (movement, search, Copy, Set Mark, the
+/// Insert-File prompt, ...).
+fn action_changes_something(action: Action) -> bool {
+    use Action::*;
+    matches!(
+        action,
+        WriteOut
+            | SaveFile
+            | Enter
+            | Tab
+            | Delete
+            | Backspace
+            | Cut
+            | Paste
+            | ChopWordLeft
+            | ChopWordRight
+            | Zap
+            | CutRestOfFile
+            | Execute
+            | Indent
+            | Unindent
+            | Justify
+            | FullJustify
+            | Comment
+            | Speller
+            | Formatter
+            | Complete
+            | Replace
+    )
+}
+
+/// Join `lines` (each a char vector) into buffer text with `\n` between
+/// them, ready to hand to `insert_str`.
+fn join_lines(lines: &[Vec<char>]) -> String {
+    lines
+        .iter()
+        .map(|l| l.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Expand nano-style `\1`-`\9` backreferences in `template` using `caps`
 /// (a valid group number that didn't participate in the match expands to
 /// nothing; a `\` followed by anything else — including a digit that isn't
@@ -1221,14 +1614,19 @@ fn expand_backreferences(template: &str, caps: &regex::Captures) -> String {
 /// Find the next match of `pattern` at or after `from`, wrapping around the
 /// buffer once (but not past `session_start`, if already wrapped) —
 /// matches nano's search wraparound ("came_full_circle") so a replace loop
-/// can't repeat forever. Returns (match position, match length in chars,
-/// whether the search has now wrapped).
+/// can't repeat forever. When `region_end` is set (a marked region was
+/// active when the replace began), the search never wraps and stops
+/// reporting matches once it reaches that position — matches nano's
+/// `INREGION` mode ("only matches in the selected text will be replaced").
+/// Returns (match position, match length in chars, whether the search has
+/// now wrapped).
 #[allow(clippy::too_many_arguments)]
 fn find_next_match_for_replace(
     buf: &Buffer,
     from: Pos,
     session_start: Pos,
     already_wrapped: bool,
+    region_end: Option<Pos>,
     pattern: &str,
     case_sensitive: bool,
     use_regex: bool,
@@ -1279,11 +1677,17 @@ fn find_next_match_for_replace(
         let raw = buf.line(line_idx);
         for (c, len) in matches_at(&raw) {
             if line_idx != from.line || c >= from.col {
-                return Ok(Some((Pos::new(line_idx, c), len, already_wrapped)));
+                let pos = Pos::new(line_idx, c);
+                if let Some(end) = region_end
+                    && (pos.line, pos.col) >= (end.line, end.col)
+                {
+                    return Ok(None);
+                }
+                return Ok(Some((pos, len, already_wrapped)));
             }
         }
     }
-    if already_wrapped {
+    if already_wrapped || region_end.is_some() {
         return Ok(None);
     }
     for line_idx in 0..=session_start.line.min(n.saturating_sub(1)) {
@@ -1405,6 +1809,129 @@ mod tests {
     }
 
     #[test]
+    fn justify_leaves_cursor_on_the_line_after_the_paragraph_not_its_last_line() {
+        // Confirmed against the installed nano: justify_text extends the
+        // cut region one line further than the paragraph itself before
+        // pasting the result back, so the cursor ends up on whatever
+        // follows (typically a blank separator line), not on the
+        // paragraph's own last line.
+        let mut ed = test_editor("one two three four five six seven eight\n\nSecond paragraph.\n");
+        ed.options.fill = -65; // wrap_at = 80 - 65 = 15: forces a rewrap into multiple lines
+        ed.execute(Action::Justify);
+        assert_eq!(ed.buf().cursor.col, 0);
+        assert_eq!(ed.buf().line(ed.buf().cursor.line), "");
+        assert!(
+            ed.buf().cursor.line > 1,
+            "the one-line paragraph should have been rewrapped into several lines first"
+        );
+    }
+
+    #[test]
+    fn toggle_mark_sets_and_unsets_with_status_messages() {
+        let mut ed = test_editor("hello world");
+        ed.buf_mut().cursor = Pos::new(0, 3);
+        ed.execute(Action::Mark);
+        assert_eq!(ed.buf().mark, Some(Pos::new(0, 3)));
+        assert!(!ed.buf().softmark, "^^ sets a hard mark, not a soft one");
+        assert_eq!(ed.status.as_deref(), Some("Mark Set"));
+
+        ed.execute(Action::Mark);
+        assert_eq!(ed.buf().mark, None);
+        assert_eq!(ed.status.as_deref(), Some("Mark Unset"));
+    }
+
+    #[test]
+    fn replace_loop_restricted_to_marked_region_only() {
+        // "foo" appears on all three lines; marking just the middle one
+        // must mean only that occurrence gets replaced.
+        let mut ed = test_editor("foo one\nfoo two\nfoo three\n");
+        ed.buf_mut().cursor = Pos::new(1, 0);
+        ed.buf_mut().mark = Some(Pos::new(2, 0)); // selects line 1 (0-indexed) whole
+        ed.begin_replace_loop("foo".to_string(), "bar".to_string());
+        let Mode::Prompt(prompt) = &ed.mode else {
+            panic!("expected the replace-confirm prompt to be open");
+        };
+        let Prompt {
+            kind: PromptKind::ReplaceConfirm(state),
+            ..
+        } = prompt.clone()
+        else {
+            panic!("expected PromptKind::ReplaceConfirm");
+        };
+        assert_eq!(state.match_pos, Pos::new(1, 0));
+        assert!(
+            ed.buf().mark.is_none(),
+            "the mark is a one-shot restriction, cleared once replacing begins"
+        );
+        ed.replace_choice(state, ReplaceChoice::All);
+        assert_eq!(ed.buf().to_string(), "foo one\nbar two\nfoo three\n");
+    }
+
+    #[test]
+    fn justify_selection_treats_marked_lines_as_one_paragraph() {
+        let mut ed = test_editor("one two three\nfour five six\n\nnot selected\n");
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(2, 0); // selects the first two lines whole
+        ed.execute(Action::Justify);
+        assert_eq!(
+            ed.buf().to_string(),
+            "one two three four five six\n\nnot selected\n"
+        );
+        assert!(ed.buf().mark.is_none());
+        assert_eq!(ed.status.as_deref(), Some("Justified selection"));
+    }
+
+    #[test]
+    fn justify_selection_reports_when_empty() {
+        let mut ed = test_editor("hello");
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(0, 0); // mark == cursor: nothing selected
+        ed.execute(Action::Justify);
+        assert_eq!(ed.status.as_deref(), Some("Selection is empty"));
+        assert_eq!(ed.buf().to_string(), "hello");
+    }
+
+    #[test]
+    fn view_mode_blocks_edits_but_allows_movement_and_search() {
+        let mut ed = test_editor("hello world");
+        ed.options.view = true;
+
+        ed.execute(Action::Cut);
+        assert_eq!(ed.buf().to_string(), "hello world");
+        assert_eq!(ed.status.as_deref(), Some("Key is invalid in view mode"));
+
+        ed.execute(Action::Backspace);
+        assert_eq!(ed.buf().to_string(), "hello world");
+
+        ed.execute(Action::Delete);
+        assert_eq!(ed.buf().to_string(), "hello world");
+
+        // Movement, Copy, and Set Mark are all read-only and must still work.
+        ed.execute(Action::Right);
+        assert_eq!(ed.buf().cursor, Pos::new(0, 1));
+        ed.execute(Action::Copy);
+        assert_eq!(ed.cutbuffer, "hello world\n");
+        ed.execute(Action::Mark);
+        assert_eq!(ed.status.as_deref(), Some("Mark Set"));
+    }
+
+    #[test]
+    fn view_mode_allows_read_file_but_blocks_execute_command() {
+        let mut ed = test_editor("hello");
+        ed.options.view = true;
+        ed.execute(Action::Insert);
+        assert!(
+            matches!(ed.mode, Mode::Prompt(_)),
+            "^R Read File isn't in nano's changes_something list, so it stays available"
+        );
+        ed.mode = Mode::Editing;
+
+        ed.execute(Action::Execute);
+        assert!(matches!(ed.mode, Mode::Editing));
+        assert_eq!(ed.status.as_deref(), Some("Key is invalid in view mode"));
+    }
+
+    #[test]
     fn backreference_expansion_basic() {
         let re = regex::Regex::new(r"(\w+)@(\w+)").unwrap();
         let caps = re.captures("alice@example").unwrap();
@@ -1475,9 +2002,11 @@ mod tests {
 
     #[test]
     fn config_options_seed_initial_search_state() {
-        let mut opts = Options::default();
-        opts.casesensitive = true;
-        opts.regexp = true;
+        let opts = Options {
+            casesensitive: true,
+            regexp: true,
+            ..Default::default()
+        };
         let ed = Editor::new(opts, KeyMap::new());
         assert!(ed.search.case_sensitive);
         assert!(ed.search.use_regex);

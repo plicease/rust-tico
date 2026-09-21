@@ -15,6 +15,10 @@ pub struct LanguageDef {
     pub modeline_aliases: &'static [&'static str],
     pub language: fn() -> tree_sitter::Language,
     pub highlights_query: &'static str,
+    /// A per-syntax external linter command (nano nanorc 'linter' directive default), split on whitespace with the buffer's path appended as the final argument.
+    pub linter: Option<&'static str>,
+    /// A per-syntax external formatter command (nanorc 'formatter' directive default): run on a temp copy of the buffer, which replaces the buffer's content if the tool modified it.
+    pub formatter: Option<&'static str>,
 }
 
 macro_rules! lang_fn {
@@ -91,6 +95,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &["cperl"],
         language: lang_perl,
         highlights_query: include_str!("queries/perl.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "c",
@@ -100,6 +106,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_c,
         highlights_query: include_str!("queries/c.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "cpp",
@@ -109,6 +117,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &["c++"],
         language: lang_cpp,
         highlights_query: include_str!("queries/cpp.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "html",
@@ -118,6 +128,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_html,
         highlights_query: include_str!("queries/html.scm"),
+        linter: None,
+        formatter: Some("tidy -m -q"),
     },
     LanguageDef {
         name: "css",
@@ -127,6 +139,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_css,
         highlights_query: include_str!("queries/css.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "sql",
@@ -136,6 +150,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_sql,
         highlights_query: include_str!("queries/sequel.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "python",
@@ -145,6 +161,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &["py"],
         language: lang_python,
         highlights_query: include_str!("queries/python.scm"),
+        linter: Some("pyflakes"),
+        formatter: None,
     },
     LanguageDef {
         name: "rust",
@@ -154,6 +172,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_rust,
         highlights_query: include_str!("queries/rust.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "bash",
@@ -163,6 +183,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &["sh", "zsh"],
         language: lang_bash,
         highlights_query: include_str!("queries/bash.scm"),
+        linter: Some("dash -n"),
+        formatter: None,
     },
     LanguageDef {
         name: "json",
@@ -172,6 +194,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_json,
         highlights_query: include_str!("queries/json.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "yaml",
@@ -181,6 +205,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_yaml,
         highlights_query: include_str!("queries/yaml.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "toml",
@@ -190,6 +216,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_toml,
         highlights_query: include_str!("queries/toml.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "make",
@@ -199,6 +227,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &["makefile"],
         language: lang_make,
         highlights_query: include_str!("queries/make.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "fortran",
@@ -208,6 +238,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &["f90"],
         language: lang_fortran,
         highlights_query: include_str!("queries/fortran.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "go",
@@ -217,6 +249,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_go,
         highlights_query: include_str!("queries/go.scm"),
+        linter: None,
+        formatter: Some("gofmt -w"),
     },
     LanguageDef {
         name: "javascript",
@@ -226,6 +260,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &["js"],
         language: lang_javascript,
         highlights_query: include_str!("queries/javascript.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "typescript",
@@ -235,6 +271,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &["ts"],
         language: lang_typescript,
         highlights_query: include_str!("queries/typescript.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "java",
@@ -244,6 +282,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_java,
         highlights_query: include_str!("queries/java.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "ruby",
@@ -253,6 +293,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &["rb"],
         language: lang_ruby,
         highlights_query: include_str!("queries/ruby.scm"),
+        linter: Some("ruby -w -c"),
+        formatter: None,
     },
     LanguageDef {
         name: "php",
@@ -262,6 +304,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_php,
         highlights_query: include_str!("queries/php.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "csharp",
@@ -271,6 +315,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &["cs", "c#"],
         language: lang_csharp,
         highlights_query: include_str!("queries/c-sharp.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "swift",
@@ -280,6 +326,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_swift,
         highlights_query: include_str!("queries/swift.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "haskell",
@@ -289,6 +337,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_haskell,
         highlights_query: include_str!("queries/haskell.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "scala",
@@ -298,6 +348,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_scala,
         highlights_query: include_str!("queries/scala.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "objc",
@@ -307,6 +359,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &["objc", "objective-c"],
         language: lang_objc,
         highlights_query: include_str!("queries/objc.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "r",
@@ -316,6 +370,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_r,
         highlights_query: include_str!("queries/r.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "julia",
@@ -325,6 +381,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_julia,
         highlights_query: include_str!("queries/julia.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "xml",
@@ -334,6 +392,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_xml,
         highlights_query: include_str!("queries/xml.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "diff",
@@ -343,6 +403,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_diff,
         highlights_query: include_str!("queries/diff.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "ini",
@@ -352,6 +414,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &["cfg", "dosini"],
         language: lang_ini,
         highlights_query: include_str!("queries/ini.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "elixir",
@@ -361,6 +425,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_elixir,
         highlights_query: include_str!("queries/elixir.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "elm",
@@ -370,6 +436,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_elm,
         highlights_query: include_str!("queries/elm.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "zig",
@@ -379,6 +447,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_zig,
         highlights_query: include_str!("queries/zig.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "dart",
@@ -388,6 +458,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_dart,
         highlights_query: include_str!("queries/dart.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "scss",
@@ -397,6 +469,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_scss,
         highlights_query: include_str!("queries/scss.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "proto",
@@ -406,6 +480,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &["protobuf"],
         language: lang_proto,
         highlights_query: include_str!("queries/proto.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "cmake",
@@ -415,6 +491,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_cmake,
         highlights_query: include_str!("queries/cmake.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "nix",
@@ -424,6 +502,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_nix,
         highlights_query: include_str!("queries/nix.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "vim",
@@ -433,6 +513,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &["viml"],
         language: lang_vim,
         highlights_query: include_str!("queries/vim.scm"),
+        linter: None,
+        formatter: None,
     },
     LanguageDef {
         name: "lua",
@@ -442,6 +524,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &[],
         language: lang_lua,
         highlights_query: include_str!("queries/lua.scm"),
+        linter: Some("luacheck --no-color"),
+        formatter: None,
     },
     LanguageDef {
         name: "markdown",
@@ -451,6 +535,8 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &["md"],
         language: lang_markdown,
         highlights_query: include_str!("queries/markdown.scm"),
+        linter: None,
+        formatter: None,
     },
 ];
 

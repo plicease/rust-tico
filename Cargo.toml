@@ -63,6 +63,9 @@ tree-sitter-zig = "1.1.2"
 unicode-segmentation = "1.13.3"
 unicode-width = "0.2.2"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 
 [package.metadata.deb]
 maintainer = "Nobody <devnull@wdlabs.com>"

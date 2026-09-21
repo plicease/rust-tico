@@ -62,6 +62,11 @@ pub struct Buffer {
     pub path: Option<PathBuf>,
     pub cursor: Pos,
     pub mark: Option<Pos>,
+    /// Whether `mark` was auto-set by Shift+movement (nano's "soft mark")
+    /// rather than explicitly toggled on with `^^`/`M-A` (a "hard" mark).
+    /// A soft mark is auto-cleared by the next plain (non-Shift) movement
+    /// or edit; a hard one persists until toggled off again.
+    pub softmark: bool,
     pub modified: bool,
     pub undo_stack: Vec<Edit>,
     pub redo_stack: Vec<Edit>,
@@ -87,6 +92,12 @@ pub struct Buffer {
     /// nano's `set_modified()`, which does this only on the false->true
     /// transition).
     pub lock_modified_written: bool,
+    /// Set by `[I]gnore All` at the "file changed on disk" prompt: skips
+    /// external-change detection for this buffer entirely (not just the
+    /// change that was showing), until the buffer is closed. Sticky across
+    /// saves — the user asked to stop being asked about this file, not
+    /// just about the one change already on screen.
+    pub ignore_external_changes: bool,
 }
 
 impl Buffer {
@@ -96,6 +107,7 @@ impl Buffer {
             path: None,
             cursor: Pos::new(0, 0),
             mark: None,
+            softmark: false,
             modified: false,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -107,6 +119,7 @@ impl Buffer {
             goal_col: None,
             lock_filename: None,
             lock_modified_written: false,
+            ignore_external_changes: false,
         }
     }
 

@@ -942,11 +942,22 @@ impl KeyMap {
             K::Meta('F'),
             Binding::Action(A::FlipNewBuffer),
         );
+        // No-conversion, flip-to-execute, and the file browser aren't
+        // implemented yet, but are still bound (matching nano's full menu)
+        // so the shortcut bar and ^G help text show them; pressing any of
+        // them just reports "not yet implemented" instead of doing nothing
+        // silently — see apply_prompt_action's FlipConvert/FlipExecute/
+        // Browser arms.
         self.bind(Menu::Insert, K::Meta('N'), Binding::Action(A::FlipConvert));
         self.bind(Menu::Insert, K::Ctrl('X'), Binding::Action(A::FlipExecute));
+        self.bind(Menu::Insert, K::Ctrl('T'), Binding::Action(A::Browser));
 
         self.bind(Menu::Execute, K::Ctrl('M'), Binding::Action(A::Execute));
         self.bind(Menu::Execute, K::Ctrl('G'), Binding::Action(A::Help));
+        // nano binds both ^S and ^T to the speller here (^S only when not
+        // `set preserve`, which tico doesn't implement, so unconditionally)
+        // — ^S sorts first and is what the shortcut bar shows.
+        self.bind(Menu::Execute, K::Ctrl('S'), Binding::Action(A::Speller));
         self.bind(Menu::Execute, K::Ctrl('T'), Binding::Action(A::Speller));
         self.bind(Menu::Execute, K::Ctrl('Y'), Binding::Action(A::Linter));
         self.bind(Menu::Execute, K::Ctrl('O'), Binding::Action(A::Formatter));

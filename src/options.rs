@@ -131,7 +131,6 @@ pub struct Options {
     pub nowrap: bool,
     pub ignorercfiles: bool,
     pub modernbindings: bool,
-    pub stateflags_cli: bool,
     pub syntax_name: Option<String>,
     pub rcfile: Option<String>,
 }
@@ -224,7 +223,6 @@ impl Default for Options {
             nowrap: true,
             ignorercfiles: false,
             modernbindings: false,
-            stateflags_cli: false,
             syntax_name: None,
             rcfile: None,
         }
