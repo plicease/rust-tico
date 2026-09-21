@@ -11,6 +11,7 @@ mod lockfile;
 mod options;
 mod syntax;
 mod ui;
+mod watch;
 
 use clap::Parser;
 

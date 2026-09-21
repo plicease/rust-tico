@@ -36,6 +36,32 @@ impl Drop for RawModeGuard {
     }
 }
 
+/// Keeps a `watch::FileWatcher` pointed at whichever file the current
+/// buffer has open, recreating it whenever that changes (buffer switch,
+/// load, save-as, ...). When native watching isn't available for the
+/// current path (unsupported platform, no path yet, ...), `watcher` is
+/// `None` and the caller should keep doing its own periodic check.
+struct DiskWatch {
+    watcher: Option<crate::watch::FileWatcher>,
+    path: Option<std::path::PathBuf>,
+}
+
+impl DiskWatch {
+    fn new() -> DiskWatch {
+        DiskWatch {
+            watcher: None,
+            path: None,
+        }
+    }
+
+    fn sync(&mut self, current: Option<&std::path::Path>) {
+        if self.path.as_deref() != current {
+            self.path = current.map(|p| p.to_path_buf());
+            self.watcher = current.and_then(crate::watch::FileWatcher::new);
+        }
+    }
+}
+
 pub fn run(editor: &mut Editor) -> io::Result<()> {
     let _guard = RawModeGuard::new()?;
     if let Ok((cols, rows)) = size() {
@@ -49,6 +75,8 @@ pub fn run(editor: &mut Editor) -> io::Result<()> {
     // clearing the whole screen before every redraw, even when idle).
     execute!(io::stdout(), Clear(ClearType::All))?;
     render_and_ring(editor)?;
+
+    let mut disk_watch = DiskWatch::new();
 
     loop {
         if matches!(editor.mode, Mode::Quit) {
@@ -72,7 +100,24 @@ pub fn run(editor: &mut Editor) -> io::Result<()> {
                 _ => {}
             }
         } else if matches!(editor.mode, Mode::Editing) {
-            dirty = maybe_check_external_change(editor);
+            let watched_path = if editor.buf().ignore_external_changes {
+                None
+            } else {
+                editor.buf().path.as_deref()
+            };
+            disk_watch.sync(watched_path);
+            // With a live native watcher, only bother running the (still
+            // cheap, but not free) stat-based check when it actually
+            // flagged something; without one (unsupported platform, or
+            // setup failed for this path), fall back to the previous
+            // behavior of checking on every idle poll.
+            let should_check = match &disk_watch.watcher {
+                Some(w) => w.take_changed(),
+                None => true,
+            };
+            if should_check {
+                dirty = maybe_check_external_change(editor);
+            }
             dirty |= editor.tick_spotlight_deadline();
         }
 
