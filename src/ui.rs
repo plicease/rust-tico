@@ -832,18 +832,32 @@ fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
                 return;
             }
             if new_buffer {
+                let syntax_override = editor.options.syntax_name.clone();
                 if !path.exists() {
                     // A nonexistent filename also yields a blank buffer,
                     // per nano's own hint text for this prompt.
-                    editor
-                        .buffers
-                        .push(crate::buffer::Buffer::from_text("", Some(path)));
+                    let mut buf = crate::buffer::Buffer::from_text("", Some(path));
+                    // Detected the same way as a file given on the command
+                    // line (extension -> shebang -> modeline, or -Y/--syntax)
+                    // — a buffer opened via ^R shouldn't get plain text just
+                    // because it didn't come from argv.
+                    buf.language = crate::syntax::detect_with_override(
+                        buf.path.as_deref(),
+                        &buf.to_string(),
+                        syntax_override.as_deref(),
+                    );
+                    editor.buffers.push(buf);
                     editor.current = editor.buffers.len() - 1;
                     editor.set_status("New File");
                 } else {
                     match crate::fileio::load_file(&path) {
-                        Ok(buf) => {
+                        Ok(mut buf) => {
                             let msg = crate::fileio::describe_read(&buf.to_string());
+                            buf.language = crate::syntax::detect_with_override(
+                                buf.path.as_deref(),
+                                &buf.to_string(),
+                                syntax_override.as_deref(),
+                            );
                             editor.buffers.push(buf);
                             editor.current = editor.buffers.len() - 1;
                             editor.set_status(msg);
@@ -2010,6 +2024,25 @@ mod tests {
             "original buffer untouched"
         );
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn insert_file_new_buffer_gets_syntax_highlighting_like_argv() {
+        let path = std::env::temp_dir().join("tico_test_insert_new_buffer.rs");
+        std::fs::write(&path, "fn main() {}\n").unwrap();
+        let mut ed = test_editor("original\n");
+        submit_prompt(&mut ed, insert_prompt(true, path.to_str().unwrap()));
+        assert_eq!(ed.buf().language.map(|l| l.name), Some("rust"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn insert_file_nonexistent_path_new_buffer_gets_syntax_highlighting_too() {
+        let path = std::env::temp_dir().join("tico_test_insert_does_not_exist.py");
+        std::fs::remove_file(&path).ok();
+        let mut ed = test_editor("original\n");
+        submit_prompt(&mut ed, insert_prompt(true, path.to_str().unwrap()));
+        assert_eq!(ed.buf().language.map(|l| l.name), Some("python"));
     }
 
     #[test]
