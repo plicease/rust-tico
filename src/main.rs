@@ -5,6 +5,7 @@ mod config;
 mod fileio;
 mod help;
 mod history;
+mod justify;
 mod keymap;
 mod lockfile;
 mod options;

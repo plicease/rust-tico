@@ -506,7 +506,8 @@ impl Editor {
             ChopWordLeft => self.chop_word_left(),
             ChopWordRight => self.chop_word_right(),
             Complete => self.set_status("complete: not yet implemented"),
-            Justify | FullJustify => self.set_status("justify: not yet implemented"),
+            Justify => self.run_justify(false),
+            FullJustify => self.run_justify(true),
             Indent => self.set_status("indent: not yet implemented"),
             Unindent => self.set_status("unindent: not yet implemented"),
             Comment => self.set_status("comment: not yet implemented"),
@@ -671,6 +672,101 @@ impl Editor {
         self.buf_mut().insert_str(new_text);
         self.buf_mut().modified = true;
         self.scroll_to_cursor();
+    }
+
+    /// `^J` Justify (one paragraph) / `M-J` Full Justify (the whole
+    /// buffer) — matches nano's `justify_text`. A marked region isn't
+    /// implemented (nano's own "treat all marked text as one paragraph"
+    /// behavior).
+    fn run_justify(&mut self, whole_buffer: bool) {
+        if self.buf().mark.is_some() {
+            self.set_status("Justify of a marked region: not yet implemented");
+            return;
+        }
+        let quote_re = regex::Regex::new(&self.options.quotestr).ok();
+        let quote_re = quote_re.as_ref();
+        let wrap_at = crate::justify::wrap_at(self.options.fill, self.screen_cols);
+        let punct = self.options.punct.clone();
+        let brackets = self.options.brackets.clone();
+        let trim_blanks = self.options.trimblanks;
+
+        let lines: Vec<Vec<char>> = (0..self.buf().line_count())
+            .map(|i| self.buf().line(i).chars().collect())
+            .collect();
+
+        if whole_buffer {
+            let mut result = lines;
+            let mut search_start = 0;
+            let mut touched = false;
+            while let Some((start, count)) =
+                crate::justify::find_paragraph(&result, search_start, quote_re)
+            {
+                let new_lines = crate::justify::justify_paragraph(
+                    &result,
+                    start,
+                    count,
+                    quote_re,
+                    &punct,
+                    &brackets,
+                    wrap_at,
+                    trim_blanks,
+                );
+                let new_count = new_lines.len();
+                result.splice(start..start + count, new_lines);
+                search_start = start + new_count;
+                touched = true;
+            }
+            if !touched {
+                self.set_status("Nothing to justify");
+                return;
+            }
+            let was_line = self.buf().cursor.line;
+            let new_text = join_lines(&result);
+            self.replace_tool_input(&new_text);
+            let target = was_line.min(self.buf().line_count().saturating_sub(1));
+            self.buf_mut().cursor = Pos::new(target, 0);
+            self.scroll_to_cursor();
+            self.set_status("Justified file");
+        } else {
+            let cursor_line = self.buf().cursor.line;
+            let search_start = if crate::justify::in_mid_paragraph(&lines, cursor_line, quote_re) {
+                crate::justify::para_begin(&lines, cursor_line, quote_re)
+            } else {
+                cursor_line
+            };
+            let Some((start, count)) =
+                crate::justify::find_paragraph(&lines, search_start, quote_re)
+            else {
+                self.set_status("Nothing to justify");
+                return;
+            };
+            let new_lines = crate::justify::justify_paragraph(
+                &lines,
+                start,
+                count,
+                quote_re,
+                &punct,
+                &brackets,
+                wrap_at,
+                trim_blanks,
+            );
+            let new_count = new_lines.len();
+            let new_text = join_lines(&new_lines);
+
+            let end_line = start + count - 1;
+            let end_col = self.buf().line(end_line).chars().count();
+            self.buf_mut()
+                .delete_range(Pos::new(start, 0), Pos::new(end_line, end_col));
+            self.buf_mut().cursor = Pos::new(start, 0);
+            self.buf_mut().insert_str(&new_text);
+            self.buf_mut().modified = true;
+
+            let final_line = start + new_count - 1;
+            let final_col = self.buf().line(final_line).chars().count();
+            self.buf_mut().cursor = Pos::new(final_line, final_col);
+            self.scroll_to_cursor();
+            self.set_status("Justified paragraph");
+        }
     }
 
     fn toggle_mark(&mut self) {
@@ -1298,6 +1394,16 @@ pub fn insert_prompt_label(new_buffer: bool, execute: bool) -> String {
         (false, true) => "File to read into new buffer [from ./]".to_string(),
         (false, false) => "File to insert [from ./]".to_string(),
     }
+}
+
+/// Join `lines` (each a char vector) into buffer text with `\n` between
+/// them, ready to hand to `insert_str`.
+fn join_lines(lines: &[Vec<char>]) -> String {
+    lines
+        .iter()
+        .map(|l| l.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Expand nano-style `\1`-`\9` backreferences in `template` using `caps`

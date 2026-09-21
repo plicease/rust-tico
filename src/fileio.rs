@@ -94,11 +94,17 @@ fn user_home_dir(_name: &str) -> Option<std::path::PathBuf> {
 #[cfg(unix)]
 pub fn list_usernames() -> Vec<String> {
     use std::ffi::CStr;
+    use std::sync::Mutex;
+
+    // getpwent/setpwent/endpwent share one static, process-wide iteration
+    // cursor and aren't thread-safe. tico's own event loop only ever calls
+    // this from the single main UI thread, but the test suite runs tests
+    // concurrently, so guard the sequence explicitly rather than relying
+    // on that.
+    static GETPWENT_LOCK: Mutex<()> = Mutex::new(());
+    let _guard = GETPWENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let mut names = Vec::new();
-    // getpwent/setpwent/endpwent share one static iteration cursor and
-    // aren't thread-safe, but tico only ever calls this from the single
-    // main UI thread, same as nano itself.
     unsafe {
         libc::setpwent();
         loop {
