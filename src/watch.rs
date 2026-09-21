@@ -19,6 +19,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub struct FileWatcher {
     changed: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
+    /// Write end of a self-pipe the background thread also polls
+    /// alongside its real watch fd(s), so `Drop` can wake it immediately
+    /// instead of waiting out its poll/kevent timeout — that wait (up to
+    /// 1s) used to make switching buffers, and exiting, visibly pause.
+    #[cfg(unix)]
+    wake_write_fd: std::os::raw::c_int,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -40,9 +46,28 @@ impl FileWatcher {
 impl Drop for FileWatcher {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        #[cfg(unix)]
+        unsafe {
+            let byte = [1u8];
+            libc::write(self.wake_write_fd, byte.as_ptr() as *const libc::c_void, 1);
+            libc::close(self.wake_write_fd);
+        }
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+    }
+}
+
+/// A connected pair of fds where writing to `.1` makes `.0` readable —
+/// used purely to wake a blocked `poll`/`kevent` call promptly. `None`
+/// only on a `pipe(2)` failure (an exhausted fd table, essentially).
+#[cfg(unix)]
+fn wake_pipe() -> Option<(std::os::raw::c_int, std::os::raw::c_int)> {
+    let mut fds = [0 as std::os::raw::c_int; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
+        None
+    } else {
+        Some((fds[0], fds[1]))
     }
 }
 
@@ -57,7 +82,7 @@ fn watch_dir(path: &Path) -> std::path::PathBuf {
 
 #[cfg(target_os = "linux")]
 mod platform {
-    use super::{FileWatcher, watch_dir};
+    use super::{FileWatcher, wake_pipe, watch_dir};
     use std::ffi::{CString, OsStr};
     use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
@@ -87,6 +112,10 @@ mod platform {
             unsafe { libc::close(fd) };
             return None;
         }
+        let Some((wake_read, wake_write)) = wake_pipe() else {
+            unsafe { libc::close(fd) };
+            return None;
+        };
 
         let changed = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
@@ -103,16 +132,28 @@ mod platform {
                 if stop2.load(Ordering::SeqCst) {
                     break;
                 }
-                let mut pfd = libc::pollfd {
-                    fd,
-                    events: libc::POLLIN,
-                    revents: 0,
-                };
-                // A 1s timeout just so this thread notices `stop` promptly
-                // after a buffer switch or on exit; it costs nothing while
-                // idle (poll() blocks in the kernel).
-                let rc = unsafe { libc::poll(&mut pfd, 1, 1000) };
+                let mut pfds = [
+                    libc::pollfd {
+                        fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd: wake_read,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                ];
+                // A 1s timeout as a fallback safety net; the wake pipe is
+                // what actually makes this thread notice `stop` promptly.
+                let rc = unsafe { libc::poll(pfds.as_mut_ptr(), 2, 1000) };
                 if rc <= 0 {
+                    continue;
+                }
+                if pfds[1].revents & libc::POLLIN != 0 {
+                    break; // woken explicitly for shutdown
+                }
+                if pfds[0].revents & libc::POLLIN == 0 {
                     continue;
                 }
                 let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
@@ -136,12 +177,16 @@ mod platform {
                     offset = name_start + name_len;
                 }
             }
-            unsafe { libc::close(fd) };
+            unsafe {
+                libc::close(fd);
+                libc::close(wake_read);
+            }
         });
 
         Some(FileWatcher {
             changed,
             stop,
+            wake_write_fd: wake_write,
             handle: Some(handle),
         })
     }
@@ -155,7 +200,7 @@ mod platform {
     target_os = "dragonfly"
 ))]
 mod platform {
-    use super::{FileWatcher, watch_dir};
+    use super::{FileWatcher, wake_pipe, watch_dir};
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::io::RawFd;
@@ -186,20 +231,40 @@ mod platform {
             }
             return None;
         }
+        let Some((wake_read, wake_write)) = wake_pipe() else {
+            unsafe {
+                libc::close(kq);
+                libc::close(dir_fd);
+                if let Some(f) = file_fd {
+                    libc::close(f);
+                }
+            }
+            return None;
+        };
 
         let vnode_flags = libc::NOTE_WRITE
             | libc::NOTE_DELETE
             | libc::NOTE_RENAME
             | libc::NOTE_EXTEND
             | libc::NOTE_ATTRIB;
-        let mut changelist = vec![libc::kevent {
-            ident: dir_fd as libc::uintptr_t,
-            filter: libc::EVFILT_VNODE,
-            flags: libc::EV_ADD | libc::EV_CLEAR,
-            fflags: vnode_flags,
-            data: 0,
-            udata: std::ptr::null_mut(),
-        }];
+        let mut changelist = vec![
+            libc::kevent {
+                ident: dir_fd as libc::uintptr_t,
+                filter: libc::EVFILT_VNODE,
+                flags: libc::EV_ADD | libc::EV_CLEAR,
+                fflags: vnode_flags,
+                data: 0,
+                udata: std::ptr::null_mut(),
+            },
+            libc::kevent {
+                ident: wake_read as libc::uintptr_t,
+                filter: libc::EVFILT_READ,
+                flags: libc::EV_ADD,
+                fflags: 0,
+                data: 0,
+                udata: std::ptr::null_mut(),
+            },
+        ];
         if let Some(f) = file_fd {
             changelist.push(libc::kevent {
                 ident: f as libc::uintptr_t,
@@ -224,6 +289,8 @@ mod platform {
             unsafe {
                 libc::close(kq);
                 libc::close(dir_fd);
+                libc::close(wake_read);
+                libc::close(wake_write);
                 if let Some(f) = file_fd {
                     libc::close(f);
                 }
@@ -242,8 +309,8 @@ mod platform {
                     break;
                 }
                 let mut events: [libc::kevent; 4] = unsafe { std::mem::zeroed() };
-                // A 1s timeout so this thread notices `stop` promptly;
-                // kevent() blocks in the kernel the rest of the time.
+                // A 1s timeout as a fallback safety net; the wake pipe is
+                // what actually makes this thread notice `stop` promptly.
                 let timeout = libc::timespec {
                     tv_sec: 1,
                     tv_nsec: 0,
@@ -258,13 +325,21 @@ mod platform {
                         &timeout,
                     )
                 };
-                if n > 0 {
-                    changed2.store(true, Ordering::SeqCst);
+                if n <= 0 {
+                    continue;
                 }
+                let woken = events[..n as usize].iter().any(|e| {
+                    e.filter == libc::EVFILT_READ && e.ident == wake_read as libc::uintptr_t
+                });
+                if woken {
+                    break; // woken explicitly for shutdown
+                }
+                changed2.store(true, Ordering::SeqCst);
             }
             unsafe {
                 libc::close(kq);
                 libc::close(dir_fd);
+                libc::close(wake_read);
                 if let Some(f) = file_fd {
                     libc::close(f);
                 }
@@ -274,6 +349,7 @@ mod platform {
         Some(FileWatcher {
             changed,
             stop,
+            wake_write_fd: wake_write,
             handle: Some(handle),
         })
     }
@@ -368,6 +444,32 @@ mod tests {
         let watcher = FileWatcher::new(&path).expect("watcher should start on this platform");
         std::thread::sleep(Duration::from_millis(200));
         assert!(!watcher.take_changed());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn drop_does_not_wait_out_the_poll_timeout() {
+        // Regression test: Drop used to just set the stop flag and join
+        // the background thread, which only checks that flag after its
+        // poll()/kevent() call returns -- up to the full 1s timeout later
+        // if nothing else happened. That made switching buffers, and
+        // exiting, visibly pause. The wake pipe should make Drop return
+        // in well under that.
+        let dir = test_dir("drop_timing");
+        let path = dir.join("watched.txt");
+        std::fs::write(&path, "one").unwrap();
+
+        let watcher = FileWatcher::new(&path).expect("watcher should start on this platform");
+        std::thread::sleep(Duration::from_millis(50)); // let the watch register first
+
+        let started = Instant::now();
+        drop(watcher);
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "dropping the watcher took {elapsed:?}, expected well under the 1s poll timeout"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }
