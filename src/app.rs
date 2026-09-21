@@ -436,6 +436,10 @@ impl Editor {
     /// re-render (essentially always, but kept for future use).
     pub fn execute(&mut self, action: Action) {
         use Action::*;
+        if self.blocked_in_view_mode(action) {
+            self.set_status_mild("Key is invalid in view mode");
+            return;
+        }
         // Any action other than Cut clears nano's "consecutive cuts append
         // to the same cutbuffer" chain.
         if !matches!(action, Cut | CutRestOfFile) {
@@ -648,6 +652,14 @@ impl Editor {
                 (buf.cursor, m)
             }
         })
+    }
+
+    /// Whether `--view`/`set view` should block `action` — matches nano's
+    /// `ISSET(VIEW_MODE) && changes_something(function)` check. `pub(crate)`
+    /// so ui.rs's Speller/Formatter interception (which never reaches
+    /// `execute()`, since those need real terminal I/O) can honor it too.
+    pub(crate) fn blocked_in_view_mode(&self, action: Action) -> bool {
+        self.options.view && action_changes_something(action)
     }
 
     /// What the spell checker and formatter operate on: the marked
@@ -1526,6 +1538,40 @@ pub fn insert_prompt_label(new_buffer: bool, execute: bool) -> String {
     }
 }
 
+/// Whether `action` would modify the buffer — matches nano's own
+/// `changes_something()`, the exact gate its main dispatch loop uses to
+/// decide what `--view` blocks (with "Key is invalid in view mode")
+/// versus what it still allows (movement, search, Copy, Set Mark, the
+/// Insert-File prompt, ...).
+fn action_changes_something(action: Action) -> bool {
+    use Action::*;
+    matches!(
+        action,
+        WriteOut
+            | SaveFile
+            | Enter
+            | Tab
+            | Delete
+            | Backspace
+            | Cut
+            | Paste
+            | ChopWordLeft
+            | ChopWordRight
+            | Zap
+            | CutRestOfFile
+            | Execute
+            | Indent
+            | Unindent
+            | Justify
+            | FullJustify
+            | Comment
+            | Speller
+            | Formatter
+            | Complete
+            | Replace
+    )
+}
+
 /// Join `lines` (each a char vector) into buffer text with `\n` between
 /// them, ready to hand to `insert_str`.
 fn join_lines(lines: &[Vec<char>]) -> String {
@@ -1843,6 +1889,46 @@ mod tests {
         ed.execute(Action::Justify);
         assert_eq!(ed.status.as_deref(), Some("Selection is empty"));
         assert_eq!(ed.buf().to_string(), "hello");
+    }
+
+    #[test]
+    fn view_mode_blocks_edits_but_allows_movement_and_search() {
+        let mut ed = test_editor("hello world");
+        ed.options.view = true;
+
+        ed.execute(Action::Cut);
+        assert_eq!(ed.buf().to_string(), "hello world");
+        assert_eq!(ed.status.as_deref(), Some("Key is invalid in view mode"));
+
+        ed.execute(Action::Backspace);
+        assert_eq!(ed.buf().to_string(), "hello world");
+
+        ed.execute(Action::Delete);
+        assert_eq!(ed.buf().to_string(), "hello world");
+
+        // Movement, Copy, and Set Mark are all read-only and must still work.
+        ed.execute(Action::Right);
+        assert_eq!(ed.buf().cursor, Pos::new(0, 1));
+        ed.execute(Action::Copy);
+        assert_eq!(ed.cutbuffer, "hello world\n");
+        ed.execute(Action::Mark);
+        assert_eq!(ed.status.as_deref(), Some("Mark Set"));
+    }
+
+    #[test]
+    fn view_mode_allows_read_file_but_blocks_execute_command() {
+        let mut ed = test_editor("hello");
+        ed.options.view = true;
+        ed.execute(Action::Insert);
+        assert!(
+            matches!(ed.mode, Mode::Prompt(_)),
+            "^R Read File isn't in nano's changes_something list, so it stays available"
+        );
+        ed.mode = Mode::Editing;
+
+        ed.execute(Action::Execute);
+        assert!(matches!(ed.mode, Mode::Editing));
+        assert_eq!(ed.status.as_deref(), Some("Key is invalid in view mode"));
     }
 
     #[test]

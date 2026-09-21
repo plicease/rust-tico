@@ -325,11 +325,15 @@ fn handle_editing_key(editor: &mut Editor, key: KeyEvent) {
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
     {
-        editor.insert_char(c);
-        // Plain self-insertion bypasses execute(), which is what normally
-        // keeps the cursor in view (vertically and, for a long line,
-        // horizontally) after an action.
-        editor.scroll_to_cursor();
+        if editor.options.view {
+            editor.set_status_mild("Key is invalid in view mode");
+        } else {
+            editor.insert_char(c);
+            // Plain self-insertion bypasses execute(), which is what
+            // normally keeps the cursor in view (vertically and, for a
+            // long line, horizontally) after an action.
+            editor.scroll_to_cursor();
+        }
     }
     editor.maybe_update_lock_modified_flag();
 
@@ -354,6 +358,12 @@ fn apply_binding(editor: &mut Editor, binding: Binding) {
         // UI-agnostic `Editor::execute` can't do, so intercept them here
         // rather than dispatching through it (e.g. the default keymap's
         // `F12` for Speller, matching nano's own direct Main-menu binding).
+        Binding::Action(Action::Speller) if editor.blocked_in_view_mode(Action::Speller) => {
+            editor.set_status_mild("Key is invalid in view mode");
+        }
+        Binding::Action(Action::Formatter) if editor.blocked_in_view_mode(Action::Formatter) => {
+            editor.set_status_mild("Key is invalid in view mode");
+        }
         Binding::Action(Action::Speller) => run_speller(editor),
         Binding::Action(Action::Formatter) => run_formatter(editor),
         Binding::Action(Action::Linter) => run_linter(editor),
@@ -639,12 +649,20 @@ fn apply_prompt_action(editor: &mut Editor, prompt: &mut Prompt, action: Action)
         // these fires.
         Action::Speller => {
             editor.mode = Mode::Editing;
-            run_speller(editor);
+            if editor.blocked_in_view_mode(Action::Speller) {
+                editor.set_status_mild("Key is invalid in view mode");
+            } else {
+                run_speller(editor);
+            }
             true
         }
         Action::Formatter => {
             editor.mode = Mode::Editing;
-            run_formatter(editor);
+            if editor.blocked_in_view_mode(Action::Formatter) {
+                editor.set_status_mild("Key is invalid in view mode");
+            } else {
+                run_formatter(editor);
+            }
             true
         }
         Action::Linter => {
@@ -2144,12 +2162,23 @@ fn render_title_bar(editor: &Editor, out: &mut impl Write, cols: usize) -> io::R
     // buffer index / total buffer count) in the upper-right corner. Nano
     // shows this same indicator but replaces its version text with it; we
     // keep the "tico version" text on the left and add the indicator on
-    // the right instead so neither is lost.
-    let indicator = if editor.buffers.len() > 1 {
-        format!("[{}/{}]", editor.current + 1, editor.buffers.len())
-    } else {
-        String::new()
-    };
+    // the right instead so neither is lost. `--view`'s "View" (nano's own
+    // right-aligned "state" word) shares that same corner; the two are
+    // independent, so both can show together.
+    let mut indicator = String::new();
+    if editor.options.view {
+        indicator.push_str("View");
+    }
+    if editor.buffers.len() > 1 {
+        if !indicator.is_empty() {
+            indicator.push(' ');
+        }
+        indicator.push_str(&format!(
+            "[{}/{}]",
+            editor.current + 1,
+            editor.buffers.len()
+        ));
+    }
     let right_w = if indicator.is_empty() {
         0
     } else {
@@ -3129,6 +3158,18 @@ mod tests {
         );
         assert!(ed.buf().mark.is_none());
         assert_eq!(ed.buf().to_string(), "hxello world");
+    }
+
+    #[test]
+    fn view_mode_blocks_plain_character_insertion() {
+        let mut ed = test_editor("hello");
+        ed.options.view = true;
+        handle_editing_key(
+            &mut ed,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+        assert_eq!(ed.buf().to_string(), "hello");
+        assert_eq!(ed.status.as_deref(), Some("Key is invalid in view mode"));
     }
 
     #[test]
