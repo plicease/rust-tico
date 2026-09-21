@@ -207,16 +207,55 @@ fn add_numeric_fallback(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<Hi
     let mut cursor = tree.walk();
     let mut nodes = Vec::new();
     collect_leaves(&mut cursor, &mut nodes);
+
+    // "Is this leaf already covered by a real capture?" used to be a
+    // `spans.iter().any(...)` linear scan run for *every* leaf -- with
+    // both leaf count and span count growing with file size, that's
+    // O(leaves * spans), i.e. quadratic, and made opening or editing a
+    // large file dramatically slower than it needed to be.
+    //
+    // Every span here comes from a node of this same parse tree (this
+    // runs before heredoc injection adds any that don't), so any two
+    // spans either nest or are disjoint -- they can never partially
+    // overlap. That laminar property is what makes a sorted-start sweep
+    // with a stack of "currently enclosing" spans a correct, linear-time
+    // (after an O(n log n) sort) replacement: a leaf is already covered
+    // exactly when the stack is non-empty once expired (ended-before-here)
+    // entries have been popped off it.
+    let mut order: Vec<usize> = (0..spans.len()).collect();
+    order.sort_by_key(|&i| spans[i].start);
+    let mut next = 0usize;
+    let mut active: Vec<usize> = Vec::new();
+
     for node in nodes {
         let (start, end) = (node.start_byte(), node.end_byte());
         if end <= start || end > bytes.len() {
             continue;
         }
-        if spans.iter().any(|s| s.start <= start && end <= s.end) {
+        while next < order.len() && spans[order[next]].start <= start {
+            let idx = order[next];
+            next += 1;
+            // Drop anything on the stack that already ended before this
+            // span begins -- a disjoint sibling, not really an enclosing
+            // span, so it must not linger and cause false "covered" hits
+            // for later leaves.
+            while let Some(&top) = active.last()
+                && spans[top].end <= spans[idx].start
+            {
+                active.pop();
+            }
+            active.push(idx);
+        }
+        while let Some(&top) = active.last()
+            && spans[top].end <= start
+        {
+            active.pop();
+        }
+        if !active.is_empty() {
             continue;
         }
-        if let Ok(text) = std::str::from_utf8(&bytes[start..end])
-            && looks_numeric(text)
+        if let Ok(leaf_text) = std::str::from_utf8(&bytes[start..end])
+            && looks_numeric(leaf_text)
         {
             spans.push(HighlightSpan {
                 start,
@@ -337,6 +376,30 @@ mod tests {
             "#!/usr/bin/env perl\nuse strict;\nmy $x = 42; # comment\nsub foo { return \"hi\"; }\n",
             true,
         );
+    }
+
+    #[test]
+    fn numeric_fallback_finds_disjoint_and_nested_numbers() {
+        // Perl doesn't give numeric literals their own captured node, so
+        // these all rely on `add_numeric_fallback`'s sweep. Several plain
+        // disjoint numbers plus one inside a nested capture (an array
+        // index expression) exercises the exact shape of bug its
+        // stack-based rewrite had to avoid: a sibling span that already
+        // ended must not linger on the stack and cause a later, unrelated
+        // leaf to be wrongly treated as "already covered".
+        let lang = languages::detect(Some(std::path::Path::new("a.pl")), "").unwrap();
+        let src = "my @a = (1, 22, 333); my $x = $a[444];\n";
+        let spans = highlight(src, lang);
+        for needle in ["1", "22", "333", "444"] {
+            let start = src.find(needle).unwrap();
+            let end = start + needle.len();
+            assert!(
+                spans
+                    .iter()
+                    .any(|s| s.kind == HighlightKind::Number && s.start == start && s.end == end),
+                "expected a Number span for {needle:?} at {start}..{end}, got: {spans:?}"
+            );
+        }
     }
 
     #[test]
