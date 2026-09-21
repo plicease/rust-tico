@@ -42,9 +42,14 @@ fn main() -> anyhow::Result<()> {
         editor.buffers.push(buf);
     } else {
         for (i, fa) in file_args.iter().enumerate() {
-            let path = std::path::PathBuf::from(&fa.path);
-            let (mut buf, message, level) =
-                open_one(&path, editor.options.locking, syntax_override.as_deref());
+            // A bare `-` reads standard input into an unnamed buffer,
+            // matching nano: `echo foo | nano -`.
+            let (mut buf, message, level) = if fa.path == "-" {
+                open_stdin(syntax_override.as_deref())
+            } else {
+                let path = std::path::PathBuf::from(&fa.path);
+                open_one(&path, editor.options.locking, syntax_override.as_deref())
+            };
             if let Some(line) = fa.line {
                 let target = (line.max(1) as usize) - 1;
                 buf.cursor.line = target.min(buf.line_count().saturating_sub(1));
@@ -162,6 +167,36 @@ fn acquire_lock(
             None
         }
     }
+}
+
+/// Read standard input into an unnamed buffer (`nano -`, `echo foo | tico
+/// -`). Matches nano's `scoop_stdin()`: no path is attached (so writing it
+/// out needs a filename, same as any other new buffer), and the buffer is
+/// marked modified whenever it got any content — read-but-unsaved input
+/// isn't "clean" the way a file freshly loaded from disk is.
+fn open_stdin(syntax_override: Option<&str>) -> (buffer::Buffer, String, app::StatusLevel) {
+    use std::io::{IsTerminal, Read};
+    if std::io::stdin().is_terminal() {
+        eprintln!("Reading data from keyboard; type ^D or ^D^D to finish.");
+    }
+    let mut content = String::new();
+    let (mut buf, msg, level) = match std::io::stdin().read_to_string(&mut content) {
+        Ok(_) => {
+            let msg = fileio::describe_read(&content);
+            let mut buf = buffer::Buffer::from_text(&content, None);
+            if !content.is_empty() {
+                buf.modified = true;
+            }
+            (buf, msg, app::StatusLevel::Normal)
+        }
+        Err(e) => (
+            buffer::Buffer::empty(),
+            format!("Failed to open stdin: {e}"),
+            app::StatusLevel::Alert,
+        ),
+    };
+    buf.language = syntax::detect_with_override(None, &buf.to_string(), syntax_override);
+    (buf, msg, level)
 }
 
 /// Load one file argument as nano would: refuse to open directories (an
