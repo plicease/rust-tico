@@ -1,0 +1,6 @@
+# Commits listed here are ignored by `git blame` (see: git config
+# blame.ignoreRevsFile .git-blame-ignore-revs), so mass-reformat/rename
+# commits don't obscure the real last-touched-by history for a line.
+
+# Reformat with cargo fmt
+b04edf123c2db2138f7a34fbebad682fb8304144
