@@ -27,6 +27,67 @@ pub fn path_writable(path: &Path) -> bool {
         .unwrap_or(true)
 }
 
+/// Expand a leading `~` in `path` to a home directory, the same as nano's
+/// `expand_leading_tilde()`: `~` or `~/...` expands to the current user's
+/// home directory; `~user` or `~user/...` expands to *that* user's home
+/// directory (looked up via the system's user database). A path that
+/// doesn't start with `~`, or a `~user` for an unknown user, is returned
+/// unchanged — nano does the same for an unknown user (leaving `~baduser/x`
+/// as a literal, normally-nonexistent relative path) rather than erroring.
+pub fn expand_leading_tilde(path: &str) -> String {
+    let Some(rest) = path.strip_prefix('~') else {
+        return path.to_string();
+    };
+    if rest.is_empty() || rest.starts_with('/') {
+        return match dirs::home_dir() {
+            Some(home) => format!("{}{rest}", home.display()),
+            None => path.to_string(),
+        };
+    }
+    let (name, tail) = match rest.split_once('/') {
+        Some((n, t)) => (n, format!("/{t}")),
+        None => (rest, String::new()),
+    };
+    match user_home_dir(name) {
+        Some(home) => format!("{}{tail}", home.display()),
+        None => path.to_string(),
+    }
+}
+
+/// Look up another user's home directory by name (for `~user` expansion),
+/// via the system's user database (`getpwnam_r(3)`).
+#[cfg(unix)]
+fn user_home_dir(name: &str) -> Option<std::path::PathBuf> {
+    use std::ffi::{CStr, CString};
+
+    let cname = CString::new(name).ok()?;
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    // getpwnam(3) uses a static buffer and isn't thread-safe; getpwnam_r
+    // wants a caller-supplied buffer instead. 16KiB comfortably covers any
+    // real /etc/passwd (or NSS-backed) entry.
+    let mut buf = vec![0_i8; 16 * 1024];
+    let rc = unsafe {
+        libc::getpwnam_r(
+            cname.as_ptr(),
+            &mut pwd,
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 || result.is_null() {
+        return None;
+    }
+    let dir = unsafe { CStr::from_ptr(pwd.pw_dir) };
+    Some(std::path::PathBuf::from(dir.to_str().ok()?))
+}
+
+#[cfg(not(unix))]
+fn user_home_dir(_name: &str) -> Option<std::path::PathBuf> {
+    None
+}
+
 fn hash_content(s: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut h);
@@ -313,6 +374,47 @@ mod tests {
         assert_eq!(describe_read("a\nb\nc\n"), "Read 3 lines");
         assert_eq!(describe_read("onlyline"), "Read 1 line");
         assert_eq!(describe_read(""), "Read 0 lines");
+    }
+
+    #[test]
+    fn tilde_expansion_matches_nano() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(expand_leading_tilde("~"), home.display().to_string());
+        assert_eq!(
+            expand_leading_tilde("~/foo/bar"),
+            format!("{}/foo/bar", home.display())
+        );
+        // No leading tilde: unchanged.
+        assert_eq!(expand_leading_tilde("relative/path"), "relative/path");
+        assert_eq!(expand_leading_tilde("/absolute/path"), "/absolute/path");
+        // A user that (almost certainly) doesn't exist is left as-is,
+        // matching nano rather than erroring.
+        assert_eq!(
+            expand_leading_tilde("~tico_test_no_such_user_xyz/foo"),
+            "~tico_test_no_such_user_xyz/foo"
+        );
+        assert_eq!(
+            expand_leading_tilde("~tico_test_no_such_user_xyz"),
+            "~tico_test_no_such_user_xyz"
+        );
+    }
+
+    #[test]
+    fn tilde_expansion_for_current_user_by_name() {
+        // getpwnam_r should resolve our own username to the same home
+        // directory dirs::home_dir() reports.
+        let Ok(user) = std::env::var("USER") else {
+            return; // not set in this environment; skip rather than fail
+        };
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(
+            expand_leading_tilde(&format!("~{user}")),
+            home.display().to_string()
+        );
+        assert_eq!(
+            expand_leading_tilde(&format!("~{user}/x")),
+            format!("{}/x", home.display())
+        );
     }
 
     #[test]

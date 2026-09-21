@@ -657,6 +657,7 @@ dependencies = [
  "clap",
  "crossterm",
  "dirs",
+ "libc",
  "regex",
  "ropey",
  "rustix",

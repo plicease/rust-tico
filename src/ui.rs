@@ -823,7 +823,10 @@ fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
                 }
                 return;
             }
-            let path = std::path::PathBuf::from(&text);
+            // `~`/`~/rest` expands to the current user's home directory;
+            // `~user`/`~user/rest` to that user's (matching nano exactly —
+            // see expand_leading_tilde).
+            let path = std::path::PathBuf::from(crate::fileio::expand_leading_tilde(&text));
             if path.is_dir() {
                 editor.set_status_alert(format!("'{}' is a directory", path.display()));
                 return;
