@@ -1487,9 +1487,11 @@ mod tests {
 
     #[test]
     fn config_options_seed_initial_search_state() {
-        let mut opts = Options::default();
-        opts.casesensitive = true;
-        opts.regexp = true;
+        let opts = Options {
+            casesensitive: true,
+            regexp: true,
+            ..Default::default()
+        };
         let ed = Editor::new(opts, KeyMap::new());
         assert!(ed.search.case_sensitive);
         assert!(ed.search.use_regex);
