@@ -233,6 +233,7 @@ pub fn reload(buffer: &mut Buffer) -> std::io::Result<()> {
     let text = std::fs::read_to_string(&path)?;
     let cursor = buffer.cursor;
     buffer.rope = ropey::Rope::from_str(&text);
+    buffer.invalidate_highlight_cache();
     buffer.original_content = text;
     buffer.modified = false;
     buffer.undo_stack.clear();

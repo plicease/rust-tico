@@ -58,7 +58,7 @@ pub enum HighlightKind {
 }
 
 /// One highlighted span of the buffer, as byte offsets into its text.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HighlightSpan {
     pub start: usize,
     pub end: usize,

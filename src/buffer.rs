@@ -57,6 +57,17 @@ pub struct DiskState {
     pub content_hash: u64,
 }
 
+/// A memoized `syntax::highlight()` result, valid as long as `version`
+/// matches the buffer's `content_version` and `language` is still the same
+/// language (compared by identity — languages live in a `'static` table,
+/// so pointer equality is exact and free).
+#[derive(Debug, Clone)]
+struct HighlightCache {
+    version: u64,
+    language: *const crate::syntax::LanguageDef,
+    spans: Vec<crate::syntax::HighlightSpan>,
+}
+
 pub struct Buffer {
     pub rope: Rope,
     pub path: Option<PathBuf>,
@@ -98,6 +109,16 @@ pub struct Buffer {
     /// saves — the user asked to stop being asked about this file, not
     /// just about the one change already on screen.
     pub ignore_external_changes: bool,
+    /// Bumped on every edit (see `replace_range`/`undo`/`redo`) — lets
+    /// `highlighted_spans_cached` tell whether its cache is still valid
+    /// without re-hashing or re-stringifying the whole buffer.
+    content_version: u64,
+    /// Cache for `syntax::highlight()`: reparsing the whole file with
+    /// tree-sitter and re-running its query is too expensive to redo on
+    /// every render, but every render (including pure cursor movement) used
+    /// to do exactly that. Interior mutability lets the read-only render
+    /// pass populate it.
+    highlight_cache: std::cell::RefCell<Option<HighlightCache>>,
 }
 
 impl Buffer {
@@ -120,6 +141,8 @@ impl Buffer {
             lock_filename: None,
             lock_modified_written: false,
             ignore_external_changes: false,
+            content_version: 0,
+            highlight_cache: std::cell::RefCell::new(None),
         }
     }
 
@@ -183,6 +206,15 @@ impl Buffer {
         self.modified = true;
         self.cursor = cursor_after;
         self.goal_col = None;
+        self.content_version = self.content_version.wrapping_add(1);
+    }
+
+    /// Invalidate the highlight cache after replacing `rope` wholesale
+    /// (reload from disk, applying a merge, ...) — those bypass
+    /// `replace_range`/`undo`/`redo`, the usual places that bump
+    /// `content_version`.
+    pub fn invalidate_highlight_cache(&mut self) {
+        self.content_version = self.content_version.wrapping_add(1);
     }
 
     pub fn insert_char(&mut self, c: char) {
@@ -275,6 +307,7 @@ impl Buffer {
         self.redo_stack.push(edit);
         self.modified = !self.undo_stack.is_empty();
         self.goal_col = None;
+        self.content_version = self.content_version.wrapping_add(1);
         true
     }
 
@@ -290,6 +323,7 @@ impl Buffer {
         self.undo_stack.push(edit.clone());
         self.modified = true;
         self.goal_col = None;
+        self.content_version = self.content_version.wrapping_add(1);
         true
     }
 
@@ -342,6 +376,35 @@ impl Buffer {
     pub fn move_end(&mut self) {
         self.goal_col = None;
         self.cursor.col = self.line(self.cursor.line).chars().count();
+    }
+
+    /// `syntax::highlight(&self.to_string(), lang)`, memoized against
+    /// `content_version` and `lang` — recomputing that on every render
+    /// (a full tree-sitter reparse plus a full query run) is what made
+    /// moving the cursor through a large file with syntax highlighting on
+    /// dramatically slower than with it off, or than nano's own (much
+    /// cheaper, regex-based) highlighting.
+    pub fn highlighted_spans_cached(
+        &self,
+        lang: &'static crate::syntax::LanguageDef,
+    ) -> Vec<crate::syntax::HighlightSpan> {
+        let lang_ptr: *const crate::syntax::LanguageDef = lang;
+        {
+            let cache = self.highlight_cache.borrow();
+            if let Some(c) = &*cache
+                && c.version == self.content_version
+                && c.language == lang_ptr
+            {
+                return c.spans.clone();
+            }
+        }
+        let spans = crate::syntax::highlight(&self.to_string(), lang);
+        *self.highlight_cache.borrow_mut() = Some(HighlightCache {
+            version: self.content_version,
+            language: lang_ptr,
+            spans: spans.clone(),
+        });
+        spans
     }
 }
 
@@ -403,6 +466,54 @@ mod tests {
         assert_eq!(b.cursor, Pos::new(0, 3));
         assert!(b.redo());
         assert_eq!(b.to_string(), "abcdef");
+    }
+
+    #[test]
+    fn highlighted_spans_cached_is_stable_without_edits() {
+        let lang = crate::syntax::detect_with_override(None, "", Some("rust")).unwrap();
+        let b = Buffer::from_text("fn main() { let x = 1; }\n", None);
+        let first = b.highlighted_spans_cached(lang);
+        let second = b.highlighted_spans_cached(lang);
+        assert!(!first.is_empty());
+        assert_eq!(first, second, "repeated calls with no edit must agree");
+    }
+
+    #[test]
+    fn highlighted_spans_cached_reflects_a_subsequent_edit() {
+        let lang = crate::syntax::detect_with_override(None, "", Some("rust")).unwrap();
+        let mut b = Buffer::from_text("fn main() {}\n", None);
+        let before = b.highlighted_spans_cached(lang);
+
+        b.cursor = Pos::new(0, 0);
+        b.insert_str("// a comment\n");
+        let after = b.highlighted_spans_cached(lang);
+
+        assert_ne!(
+            before, after,
+            "an edit must invalidate the cache, not return stale spans"
+        );
+    }
+
+    #[test]
+    fn highlighted_spans_cached_reflects_undo_and_redo() {
+        let lang = crate::syntax::detect_with_override(None, "", Some("rust")).unwrap();
+        let mut b = Buffer::from_text("fn main() {}\n", None);
+        let original = b.highlighted_spans_cached(lang);
+
+        b.cursor = Pos::new(0, 0);
+        b.insert_str("// a comment\n");
+        let edited = b.highlighted_spans_cached(lang);
+        assert_ne!(original, edited);
+
+        b.undo();
+        assert_eq!(
+            b.highlighted_spans_cached(lang),
+            original,
+            "undo must invalidate the cache too, not just replace_range edits"
+        );
+
+        b.redo();
+        assert_eq!(b.highlighted_spans_cached(lang), edited);
     }
 
     #[test]

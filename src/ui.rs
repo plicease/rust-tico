@@ -976,6 +976,7 @@ fn handle_diff_key(
             KeyCode::Char('a') | KeyCode::Char('A') => {
                 let text = merged_text.clone();
                 editor.buf_mut().rope = ropey::Rope::from_str(&text);
+                editor.buf_mut().invalidate_highlight_cache();
                 editor.buf_mut().modified = true;
                 if let Some(path) = editor.buf().path.clone() {
                     editor.buf_mut().disk_state = crate::fileio::stat_disk_state(&path);
@@ -2668,13 +2669,13 @@ fn render_buffer(
     let cols = editor.screen_cols;
     let tabsize = editor.options.tabsize as usize;
 
-    // Recomputed on every render rather than cached/incrementally reparsed:
-    // tree-sitter is fast, and redraws are already limited to actual dirty
-    // events elsewhere, so a full-buffer reparse per redraw is an acceptable
-    // v1 cost.
+    // Memoized on the buffer itself, invalidated only by an actual edit or
+    // language change (see `Buffer::highlighted_spans_cached`) -- a full
+    // tree-sitter reparse plus query run is too expensive to redo on every
+    // render, which used to happen even for pure cursor movement.
     let spans: Vec<crate::syntax::HighlightSpan> = if editor.options.syntax_highlighting {
         buf.language
-            .map(|lang| crate::syntax::highlight(&buf.to_string(), lang))
+            .map(|lang| buf.highlighted_spans_cached(lang))
             .unwrap_or_default()
     } else {
         Vec::new()
