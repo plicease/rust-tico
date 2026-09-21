@@ -177,18 +177,18 @@ fn handle_help_key(editor: &mut Editor, lines: Vec<String>, top: usize, return_t
 
     if matches!(key.code, KeyCode::Esc) {
         close = true;
-    } else if let Some(tkey) = normalize_key(key) {
-        if let Some(Binding::Action(action)) = editor.keymap.lookup_menu_only(Menu::Help, tkey).cloned() {
-            match action {
-                Action::Cancel => close = true,
-                Action::Up => top = top.saturating_sub(1),
-                Action::Down => top = (top + 1).min(max_top),
-                Action::PageUp => top = top.saturating_sub(body_rows),
-                Action::PageDown => top = (top + body_rows).min(max_top),
-                Action::FirstLine => top = 0,
-                Action::LastLine => top = max_top,
-                _ => {}
-            }
+    } else if let Some(tkey) = normalize_key(key)
+        && let Some(Binding::Action(action)) = editor.keymap.lookup_menu_only(Menu::Help, tkey).cloned()
+    {
+        match action {
+            Action::Cancel => close = true,
+            Action::Up => top = top.saturating_sub(1),
+            Action::Down => top = (top + 1).min(max_top),
+            Action::PageUp => top = top.saturating_sub(body_rows),
+            Action::PageDown => top = (top + body_rows).min(max_top),
+            Action::FirstLine => top = 0,
+            Action::LastLine => top = max_top,
+            _ => {}
         }
     }
 
@@ -203,21 +203,21 @@ fn handle_help_key(editor: &mut Editor, lines: Vec<String>, top: usize, return_t
 }
 
 fn handle_editing_key(editor: &mut Editor, key: KeyEvent) {
-    if let Some(tkey) = normalize_key(key) {
-        if let Some(binding) = editor.keymap.lookup(Menu::Main, tkey).cloned() {
-            apply_binding(editor, binding);
-            editor.maybe_update_lock_modified_flag();
-            return;
-        }
+    if let Some(tkey) = normalize_key(key)
+        && let Some(binding) = editor.keymap.lookup(Menu::Main, tkey).cloned()
+    {
+        apply_binding(editor, binding);
+        editor.maybe_update_lock_modified_flag();
+        return;
     }
-    if let KeyCode::Char(c) = key.code {
-        if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
-            editor.insert_char(c);
-            // Plain self-insertion bypasses execute(), which is what
-            // normally keeps the cursor in view (vertically and, for a
-            // long line, horizontally) after an action.
-            editor.scroll_to_cursor();
-        }
+    if let KeyCode::Char(c) = key.code
+        && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        editor.insert_char(c);
+        // Plain self-insertion bypasses execute(), which is what normally
+        // keeps the cursor in view (vertically and, for a long line,
+        // horizontally) after an action.
+        editor.scroll_to_cursor();
     }
     editor.maybe_update_lock_modified_flag();
 }
@@ -289,14 +289,14 @@ fn handle_prompt_key(editor: &mut Editor, mut prompt: Prompt, key: KeyEvent) {
             return;
         }
     }
-    if let KeyCode::Char(c) = key.code {
-        if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
-            let idx = prompt.input.char_indices().nth(prompt.cursor).map(|(i, _)| i).unwrap_or(prompt.input.len());
-            prompt.input.insert(idx, c);
-            prompt.cursor += 1;
-            prompt.history_pos = None;
-            prompt.saved_input = None;
-        }
+    if let KeyCode::Char(c) = key.code
+        && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        let idx = prompt.input.char_indices().nth(prompt.cursor).map(|(i, _)| i).unwrap_or(prompt.input.len());
+        prompt.input.insert(idx, c);
+        prompt.cursor += 1;
+        prompt.history_pos = None;
+        prompt.saved_input = None;
     }
     editor.mode = Mode::Prompt(prompt);
 }
@@ -1231,13 +1231,13 @@ fn render_buffer(editor: &Editor, out: &mut impl Write, start_row: u16, rows: us
             rendered.push_str(&expanded);
             kinds.extend(expanded_kinds);
 
-            if let Some((pos, len)) = editor.spotlight {
-                if pos.line == line_idx {
-                    let start = gutter_chars + crate::buffer::display_width(&raw, pos.col, tabsize);
-                    let end = gutter_chars + crate::buffer::display_width(&raw, pos.col + len, tabsize);
-                    if end > start {
-                        highlight = Some((start, end));
-                    }
+            if let Some((pos, len)) = editor.spotlight
+                && pos.line == line_idx
+            {
+                let start = gutter_chars + crate::buffer::display_width(&raw, pos.col, tabsize);
+                let end = gutter_chars + crate::buffer::display_width(&raw, pos.col + len, tabsize);
+                if end > start {
+                    highlight = Some((start, end));
                 }
             }
         } else if gutter > 0 {

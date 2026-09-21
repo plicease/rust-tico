@@ -120,17 +120,12 @@ pub enum StatusLevel {
     Alert,
 }
 
+#[derive(Default)]
 pub struct SearchState {
     pub last_pattern: Option<String>,
     pub case_sensitive: bool,
     pub use_regex: bool,
     pub backwards: bool,
-}
-
-impl Default for SearchState {
-    fn default() -> Self {
-        SearchState { last_pattern: None, case_sensitive: false, use_regex: false, backwards: false }
-    }
 }
 
 pub struct Editor {
@@ -259,11 +254,11 @@ impl Editor {
     /// If a timed spotlight's deadline has passed, clear it. Returns true
     /// if it just got cleared (so the caller knows to redraw).
     pub fn tick_spotlight_deadline(&mut self) -> bool {
-        if let Some(deadline) = self.spotlight_deadline {
-            if std::time::Instant::now() >= deadline {
-                self.clear_spotlight();
-                return true;
-            }
+        if let Some(deadline) = self.spotlight_deadline
+            && std::time::Instant::now() >= deadline
+        {
+            self.clear_spotlight();
+            return true;
         }
         false
     }
@@ -510,11 +505,12 @@ impl Editor {
         }
         let target = self.buf().path.as_ref().map(|p| p.display().to_string());
         let buf = self.buf_mut();
-        if buf.modified && !buf.lock_modified_written {
-            if let (Some(lock), Some(target)) = (&buf.lock_filename, target) {
-                let _ = crate::lockfile::write_lock(lock, &target, true);
-                buf.lock_modified_written = true;
-            }
+        if buf.modified
+            && !buf.lock_modified_written
+            && let (Some(lock), Some(target)) = (&buf.lock_filename, target)
+        {
+            let _ = crate::lockfile::write_lock(lock, &target, true);
+            buf.lock_modified_written = true;
         }
     }
 
@@ -1094,10 +1090,10 @@ pub fn search_prompt_label(base: &str, suffix: &str, search: &SearchState) -> St
     // end, after any suffix (e.g. "Search [Case Sensitive] (to replace)
     // [apple]:") - confirmed against the installed nano's exact wording.
     // Pressing Enter with nothing typed reuses this as the search text.
-    if let Some(default) = &search.last_pattern {
-        if !default.is_empty() {
-            label.push_str(&format!(" [{default}]"));
-        }
+    if let Some(default) = &search.last_pattern
+        && !default.is_empty()
+    {
+        label.push_str(&format!(" [{default}]"));
     }
     label
 }

@@ -5,13 +5,11 @@
 //! Cargo has no `./configure` step, so the equivalent here is an
 //! environment variable read at build time:
 //!
-//!   - unset                      -> defaults to `/etc` (so the system
-//!                                    nanorc is looked for at `/etc/nanorc`,
-//!                                    same as a stock nano).
-//!   - `TICO_SYSCONFDIR=/some/dir` -> use that directory instead.
-//!   - `TICO_SYSCONFDIR=` (empty)  -> disable system-wide config lookup
-//!                                    entirely; the built binary will never
-//!                                    look for a system nanorc.
+//! - unset: defaults to `/etc` (so the system nanorc is looked for at
+//!   `/etc/nanorc`, same as a stock nano).
+//! - `TICO_SYSCONFDIR=/some/dir`: use that directory instead.
+//! - `TICO_SYSCONFDIR=` (empty): disable system-wide config lookup
+//!   entirely; the built binary will never look for a system nanorc.
 //!
 //! Example: `TICO_SYSCONFDIR=/usr/local/etc cargo build --release`
 

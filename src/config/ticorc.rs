@@ -1,18 +1,16 @@
 //! Parser for tico's own `~/.ticorc`: an INI-style file with three sections.
 //!
-//! - `[main]`     — the same `set`-style option vocabulary as `~/.nanorc`
-//!                  (see `nanorc(5)`), one option per line, without the
-//!                  leading `set`/`unset` keyword: `optionname` or
-//!                  `optionname = value` to set/configure it, and
-//!                  `unset optionname` to explicitly turn a boolean off.
-//! - `[keybindings]` — `[menu.]key = function` (menu defaults to `main`),
-//!                  e.g. `^G = help` or `search.^Y = older`. A quoted value
-//!                  produces a literal-string/macro binding, as in nano's
-//!                  `bind key "string" menu`. `key = unbind` removes a
-//!                  binding.
-//! - `[syntax]`   — tico's own syntax-highlighting configuration; not
-//!                  required to resemble nano's `color`/`icolor` format at
-//!                  all. (Reserved for future use.)
+//! - `[main]`: the same `set`-style option vocabulary as `~/.nanorc` (see
+//!   `nanorc(5)`), one option per line, without the leading `set`/`unset`
+//!   keyword: `optionname` or `optionname = value` to set/configure it,
+//!   and `unset optionname` to explicitly turn a boolean off.
+//! - `[keybindings]`: `[menu.]key = function` (menu defaults to `main`),
+//!   e.g. `^G = help` or `search.^Y = older`. A quoted value produces a
+//!   literal-string/macro binding, as in nano's `bind key "string" menu`.
+//!   `key = unbind` removes a binding.
+//! - `[syntax]`: tico's own syntax-highlighting configuration; not
+//!   required to resemble nano's `color`/`icolor` format at all.
+//!   (Reserved for future use.)
 //!
 //! Settings here take precedence over `~/.nanorc`.
 

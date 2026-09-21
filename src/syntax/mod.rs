@@ -201,10 +201,10 @@ fn add_numeric_fallback(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<Hi
         if spans.iter().any(|s| s.start <= start && end <= s.end) {
             continue;
         }
-        if let Ok(text) = std::str::from_utf8(&bytes[start..end]) {
-            if looks_numeric(text) {
-                spans.push(HighlightSpan { start, end, kind: HighlightKind::Number });
-            }
+        if let Ok(text) = std::str::from_utf8(&bytes[start..end])
+            && looks_numeric(text)
+        {
+            spans.push(HighlightSpan { start, end, kind: HighlightKind::Number });
         }
     }
 }

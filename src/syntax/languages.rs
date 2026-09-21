@@ -459,10 +459,10 @@ const LANGUAGES: &[LanguageDef] = &[
 /// found in the first or last few lines — matching how other editors
 /// layer these signals, most-specific (and cheapest to check) first.
 pub fn detect(path: Option<&Path>, text: &str) -> Option<&'static LanguageDef> {
-    if let Some(path) = path {
-        if let Some(lang) = detect_by_filename(path) {
-            return Some(lang);
-        }
+    if let Some(path) = path
+        && let Some(lang) = detect_by_filename(path)
+    {
+        return Some(lang);
     }
     let first_line = text.lines().next().unwrap_or("");
     if let Some(lang) = detect_by_shebang(first_line) {
@@ -478,18 +478,13 @@ fn detect_by_filename(path: &Path) -> Option<&'static LanguageDef> {
     let filename = path.file_name().and_then(|f| f.to_str());
     if let Some(filename) = filename {
         for lang in LANGUAGES {
-            if lang.filenames.iter().any(|f| *f == filename) {
+            if lang.filenames.contains(&filename) {
                 return Some(lang);
             }
         }
     }
     let ext = path.extension().and_then(|e| e.to_str())?;
-    for lang in LANGUAGES {
-        if lang.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext)) {
-            return Some(lang);
-        }
-    }
-    None
+    LANGUAGES.iter().find(|lang| lang.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext)))
 }
 
 /// Parse a shebang line, following `env` indirection (e.g.
@@ -508,12 +503,7 @@ fn detect_by_shebang(first_line: &str) -> Option<&'static LanguageDef> {
     // Strip a trailing version number, e.g. "python3" already handled by
     // exact shebang lists below, but "perl5.34" or "python3.11" isn't.
     let interpreter_trimmed = interpreter.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
-    for lang in LANGUAGES {
-        if lang.shebangs.iter().any(|s| *s == interpreter || *s == interpreter_trimmed) {
-            return Some(lang);
-        }
-    }
-    None
+    LANGUAGES.iter().find(|lang| lang.shebangs.iter().any(|s| *s == interpreter || *s == interpreter_trimmed))
 }
 
 /// Scan the first and last few lines for a vim modeline (`vim: set ft=X`,
@@ -526,10 +516,10 @@ fn detect_by_modeline(text: &str) -> Option<&'static LanguageDef> {
     let head = lines.iter().take(5);
     let tail = lines.iter().rev().take(5);
     for line in head.chain(tail) {
-        if let Some(name) = parse_vim_modeline(line).or_else(|| parse_emacs_modeline(line)) {
-            if let Some(lang) = find_by_name(&name) {
-                return Some(lang);
-            }
+        if let Some(name) = parse_vim_modeline(line).or_else(|| parse_emacs_modeline(line))
+            && let Some(lang) = find_by_name(&name)
+        {
+            return Some(lang);
         }
     }
     let _ = n;

@@ -82,10 +82,10 @@ pub fn load(explicit_rcfile: Option<&str>, ignore_rcfiles: bool) -> LoadedConfig
     } else {
         // System-wide file (unless disabled at build time), always read if
         // present.
-        if let Some(sys_path) = system_nanorc_path() {
-            if let Ok(text) = std::fs::read_to_string(&sys_path) {
-                nanorc::parse(&text, &mut options, &mut keymap, &mut warnings);
-            }
+        if let Some(sys_path) = system_nanorc_path()
+            && let Ok(text) = std::fs::read_to_string(&sys_path)
+        {
+            nanorc::parse(&text, &mut options, &mut keymap, &mut warnings);
         }
         // First user nanorc found, in nano's documented search order.
         for path in user_nanorc_paths() {
@@ -96,10 +96,10 @@ pub fn load(explicit_rcfile: Option<&str>, ignore_rcfiles: bool) -> LoadedConfig
         }
     }
 
-    if let Some(path) = ticorc_path() {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            ticorc::parse(&text, &mut options, &mut keymap, &mut warnings);
-        }
+    if let Some(path) = ticorc_path()
+        && let Ok(text) = std::fs::read_to_string(&path)
+    {
+        ticorc::parse(&text, &mut options, &mut keymap, &mut warnings);
     }
 
     LoadedConfig { options, keymap, warnings }

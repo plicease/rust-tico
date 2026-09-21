@@ -111,10 +111,10 @@ pub fn apply(options: &mut Options, name: &str, arg: Option<&str>, enable: bool)
             Ok(())
         }
         "tabsize" => {
-            if let Some(v) = arg.and_then(|s| s.parse::<u32>().ok()) {
-                if v > 0 {
-                    options.tabsize = v;
-                }
+            if let Some(v) = arg.and_then(|s| s.parse::<u32>().ok())
+                && v > 0
+            {
+                options.tabsize = v;
             }
             Ok(())
         }

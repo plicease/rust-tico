@@ -554,12 +554,11 @@ impl Key {
         if spec.eq_ignore_ascii_case("del") {
             return Some(Key::Del);
         }
-        if let Some(rest) = spec.strip_prefix("F").or_else(|| spec.strip_prefix('f')) {
-            if let Ok(n) = rest.parse::<u8>() {
-                if (1..=24).contains(&n) {
-                    return Some(Key::F(n));
-                }
-            }
+        if let Some(rest) = spec.strip_prefix("F").or_else(|| spec.strip_prefix('f'))
+            && let Ok(n) = rest.parse::<u8>()
+            && (1..=24).contains(&n)
+        {
+            return Some(Key::F(n));
         }
         if let Some(rest) = spec.strip_prefix("Sh-M-").or_else(|| spec.strip_prefix("sh-m-")) {
             let ch = normalize_letter(rest)?;
