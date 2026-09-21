@@ -1168,21 +1168,38 @@ fn run_alt_speller(editor: &mut Editor, speller_cmd: &str) {
     let mut cmd = std::process::Command::new(&program);
     cmd.args(&argv).arg(&tmp);
     match run_suspended(cmd) {
-        Ok(status) if status.code().is_some_and(|c| (0..=2).contains(&c)) => {
+        Ok(status) => {
+            let code = status.code();
+            if !code.is_some_and(|c| (0..=2).contains(&c)) {
+                editor.set_status_alert(format!("Error invoking '{speller_cmd}'"));
+                let _ = std::fs::remove_file(&tmp);
+                return;
+            }
+            // Exit code 1 or 2 means the program is unhappy about
+            // something; nano shows that ALERT-level complaint and, per
+            // its status-bar importance rule (a lower-priority message
+            // never overwrites a still-showing higher one), leaves it up
+            // instead of replacing it with the routine "Nothing
+            // changed"/"Finished..." message that follows.
+            let complained = code != Some(0);
+            if complained {
+                editor.set_status_alert(format!("Program '{speller_cmd}' complained"));
+            }
             let after = std::fs::metadata(&tmp).and_then(|m| m.modified()).ok();
             if after != before {
                 match std::fs::read_to_string(&tmp) {
                     Ok(new_text) => {
                         editor.replace_tool_input(&new_text);
-                        editor.set_status("Finished checking spelling");
+                        if !complained {
+                            editor.set_status("Finished checking spelling");
+                        }
                     }
                     Err(e) => editor.set_status_alert(format!("Error reading temp file: {e}")),
                 }
-            } else {
+            } else if !complained {
                 editor.set_status("Nothing changed");
             }
         }
-        Ok(_) => editor.set_status_alert(format!("Program '{speller_cmd}' complained")),
         Err(e) => editor.set_status_alert(format!("Error invoking '{speller_cmd}': {e}")),
     }
     let _ = std::fs::remove_file(&tmp);
@@ -1299,21 +1316,35 @@ fn run_formatter(editor: &mut Editor) {
     let mut cmd = std::process::Command::new(&program);
     cmd.args(&argv).arg(&tmp);
     match run_suspended(cmd) {
-        Ok(status) if status.code().is_some_and(|c| (0..=2).contains(&c)) => {
+        Ok(status) => {
+            let code = status.code();
+            if !code.is_some_and(|c| (0..=2).contains(&c)) {
+                editor.set_status_alert(format!("Error invoking '{formatter_cmd}'"));
+                let _ = std::fs::remove_file(&tmp);
+                return;
+            }
+            // See run_alt_speller: a "complained" ALERT outranks the
+            // routine messages that follow, so it stays up instead of
+            // being overwritten by them.
+            let complained = code != Some(0);
+            if complained {
+                editor.set_status_alert(format!("Program '{formatter_cmd}' complained"));
+            }
             let after = std::fs::metadata(&tmp).and_then(|m| m.modified()).ok();
             if after != before {
                 match std::fs::read_to_string(&tmp) {
                     Ok(new_text) => {
                         editor.replace_tool_input(&new_text);
-                        editor.set_status("Buffer has been processed");
+                        if !complained {
+                            editor.set_status("Buffer has been processed");
+                        }
                     }
                     Err(e) => editor.set_status_alert(format!("Error reading temp file: {e}")),
                 }
-            } else {
+            } else if !complained {
                 editor.set_status("Nothing changed");
             }
         }
-        Ok(_) => editor.set_status_alert(format!("Program '{formatter_cmd}' complained")),
         Err(e) => editor.set_status_alert(format!("Error invoking '{formatter_cmd}': {e}")),
     }
     let _ = std::fs::remove_file(&tmp);
