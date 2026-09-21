@@ -286,6 +286,13 @@ fn handle_prompt_key(editor: &mut Editor, mut prompt: Prompt, key: KeyEvent) {
         _ => {}
     }
 
+    // Any keystroke other than Tab drops a filename-completion listing
+    // that's currently shown (matches nano: typing something else clears
+    // the "(more)" grid rather than leaving it stale on screen).
+    if !matches!(normalize_key(key), Some(TKey::Ctrl('I'))) {
+        editor.file_completions = None;
+    }
+
     if let Some(tkey) = normalize_key(key) {
         if tkey == TKey::Ctrl('C') || matches!(key.code, KeyCode::Esc) {
             editor.mode = Mode::Editing;
@@ -327,6 +334,15 @@ fn handle_prompt_key(editor: &mut Editor, mut prompt: Prompt, key: KeyEvent) {
             }
             prompt.history_pos = None;
             prompt.saved_input = None;
+            editor.mode = Mode::Prompt(prompt);
+            return;
+        }
+        // `Tab` at the `^R` Read File prompt (only in file-insert mode,
+        // not Execute Command — matches nano's `MINSERTFILE` gate).
+        if tkey == TKey::Ctrl('I')
+            && let PromptKind::InsertFile { execute: false, .. } = prompt.kind
+        {
+            apply_filename_completion(editor, &mut prompt);
             editor.mode = Mode::Prompt(prompt);
             return;
         }
@@ -567,6 +583,71 @@ fn apply_prompt_action(editor: &mut Editor, prompt: &mut Prompt, action: Action)
         }
         _ => false,
     }
+}
+
+/// `Tab` at the `^R` Read File prompt: complete the typed fragment to the
+/// longest common prefix among matching directory entries (nano's
+/// `input_tab`/`filename_completion`), and list them all in
+/// `editor.file_completions` when there's more than one, rendered as a
+/// grid in place of the buffer (`render_completions_grid`). Username
+/// completion (`~user<Tab>`) isn't implemented — only plain filenames.
+fn apply_filename_completion(editor: &mut Editor, prompt: &mut Prompt) {
+    // Matches nano: completion only applies at the end of the input.
+    if prompt.cursor != prompt.input.chars().count() {
+        return;
+    }
+    let morsel = prompt.input.clone();
+    let (dir_part, fragment) = match morsel.rfind('/') {
+        Some(i) => (morsel[..=i].to_string(), morsel[i + 1..].to_string()),
+        None => (String::new(), morsel.clone()),
+    };
+    // The directory is resolved with `~` expanded, but the completed text
+    // keeps whatever the user actually typed (so `~/Doc<Tab>` completes to
+    // `~/Documents/`, not the expanded home path).
+    let expanded_dir = crate::fileio::expand_leading_tilde(&dir_part);
+    let dir_path = if expanded_dir.is_empty() {
+        std::path::PathBuf::from(".")
+    } else {
+        std::path::PathBuf::from(&expanded_dir)
+    };
+    let Ok(entries) = std::fs::read_dir(&dir_path) else {
+        return;
+    };
+    let mut matches: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|name| name.starts_with(&fragment))
+        .collect();
+    if matches.is_empty() {
+        return;
+    }
+    matches.sort();
+
+    let mut common = matches[0].clone();
+    for m in &matches[1..] {
+        common = common_prefix(&common, m);
+    }
+
+    let mut new_input = format!("{dir_part}{common}");
+    if matches.len() == 1 && dir_path.join(&common).is_dir() {
+        new_input.push('/');
+    }
+    if new_input != morsel {
+        prompt.input = new_input;
+        prompt.cursor = prompt.input.chars().count();
+    }
+    if matches.len() > 1 {
+        editor.file_completions = Some(matches);
+    }
+}
+
+/// The longest common leading substring of `a` and `b`.
+fn common_prefix(a: &str, b: &str) -> String {
+    a.chars()
+        .zip(b.chars())
+        .take_while(|(x, y)| x == y)
+        .map(|(x, _)| x)
+        .collect()
 }
 
 /// Recall history at a Search/Replace/ReplaceWith/Execute prompt with
@@ -1670,7 +1751,11 @@ fn render(editor: &Editor) -> io::Result<()> {
     let help_rows = if editor.options.nohelp { 0 } else { 2 };
     let text_start_row = 1u16;
     let text_rows = rows.saturating_sub(2 + help_rows);
-    render_buffer(editor, &mut out, text_start_row, text_rows)?;
+    if let Some(matches) = &editor.file_completions {
+        render_completions_grid(&mut out, text_start_row, text_rows, cols, matches)?;
+    } else {
+        render_buffer(editor, &mut out, text_start_row, text_rows)?;
+    }
 
     let status_row = text_start_row + text_rows as u16;
     render_status_line(editor, &mut out, status_row, cols)?;
@@ -2325,6 +2410,68 @@ fn render_shortcut_bar(
     Ok(())
 }
 
+/// The `^R` Read File prompt's `Tab`-completion listing, shown in place of
+/// the buffer — matches nano's `input_tab` (`blank_edit()` + a sorted,
+/// multi-column grid, bottom-aligned within the edit window, with
+/// `"(more)"` in the last cell when it doesn't all fit).
+fn render_completions_grid(
+    out: &mut impl Write,
+    start_row: u16,
+    rows: usize,
+    cols: usize,
+    matches: &[String],
+) -> io::Result<()> {
+    for r in 0..rows {
+        queue!(
+            out,
+            MoveTo(0, start_row + r as u16),
+            Print(" ".repeat(cols))
+        )?;
+    }
+    if matches.is_empty() || rows == 0 || cols == 0 {
+        return Ok(());
+    }
+    let longest = matches
+        .iter()
+        .map(|m| m.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(cols.saturating_sub(1));
+    let col_width = longest + 2;
+    let ncols = ((cols + 1) / col_width).max(1);
+    let nrows = matches.len().div_ceil(ncols);
+    let top_row = rows.saturating_sub(nrows);
+
+    let mut row = top_row;
+    for (i, name) in matches.iter().enumerate() {
+        if row >= rows {
+            break;
+        }
+        let col_idx = i % ncols;
+        let is_last_row = row == rows - 1;
+        let fills_row = (i + 1) % ncols == 0;
+        let more_remain = i + 1 < matches.len();
+        if is_last_row && fills_row && more_remain {
+            queue!(
+                out,
+                MoveTo((col_width * col_idx) as u16, start_row + row as u16),
+                Print("(more)")
+            )?;
+            break;
+        }
+        let display: String = name.chars().take(longest).collect();
+        queue!(
+            out,
+            MoveTo((col_width * col_idx) as u16, start_row + row as u16),
+            Print(&display)
+        )?;
+        if fills_row {
+            row += 1;
+        }
+    }
+    Ok(())
+}
+
 fn render_buffer(
     editor: &Editor,
     out: &mut impl Write,
@@ -2723,6 +2870,109 @@ mod tests {
         assert_eq!(ed.buf().to_string(), "hello\nINSERTED\nworld\n");
         assert_eq!(ed.buffers.len(), 1, "should not have opened a new buffer");
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn common_prefix_of_strings() {
+        assert_eq!(common_prefix("foobar", "foobaz"), "fooba");
+        assert_eq!(common_prefix("foo", "bar"), "");
+        assert_eq!(common_prefix("foo", "foo"), "foo");
+        assert_eq!(common_prefix("foo", "foobar"), "foo");
+    }
+
+    fn tab_complete_test_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn tab_completion_single_match_completes_fully() {
+        let dir = tab_complete_test_dir("tico_test_tabcomplete_single");
+        std::fs::write(dir.join("readme.txt"), "").unwrap();
+        let mut ed = test_editor("x");
+        let mut prompt = insert_prompt(false, &format!("{}/rea", dir.display()));
+        apply_filename_completion(&mut ed, &mut prompt);
+        assert_eq!(prompt.input, format!("{}/readme.txt", dir.display()));
+        assert_eq!(prompt.cursor, prompt.input.chars().count());
+        assert!(ed.file_completions.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tab_completion_directory_match_appends_slash() {
+        let dir = tab_complete_test_dir("tico_test_tabcomplete_dir");
+        std::fs::create_dir(dir.join("subdir")).unwrap();
+        let mut ed = test_editor("x");
+        let mut prompt = insert_prompt(false, &format!("{}/sub", dir.display()));
+        apply_filename_completion(&mut ed, &mut prompt);
+        assert_eq!(prompt.input, format!("{}/subdir/", dir.display()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tab_completion_multiple_matches_completes_common_prefix_and_lists() {
+        let dir = tab_complete_test_dir("tico_test_tabcomplete_multi");
+        std::fs::write(dir.join("foo_alpha.txt"), "").unwrap();
+        std::fs::write(dir.join("foo_beta.txt"), "").unwrap();
+        let mut ed = test_editor("x");
+        let mut prompt = insert_prompt(false, &format!("{}/foo_", dir.display()));
+        apply_filename_completion(&mut ed, &mut prompt);
+        assert_eq!(prompt.input, format!("{}/foo_", dir.display()));
+        let matches = ed
+            .file_completions
+            .expect("should list the ambiguous matches");
+        let mut sorted = matches.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec!["foo_alpha.txt", "foo_beta.txt"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tab_completion_no_matches_leaves_input_unchanged() {
+        let dir = tab_complete_test_dir("tico_test_tabcomplete_none");
+        let mut ed = test_editor("x");
+        let mut prompt = insert_prompt(false, &format!("{}/nope", dir.display()));
+        apply_filename_completion(&mut ed, &mut prompt);
+        assert_eq!(prompt.input, format!("{}/nope", dir.display()));
+        assert!(ed.file_completions.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tab_completion_not_offered_in_execute_command_mode() {
+        // Matches nano's MINSERTFILE-only gate: Execute Command (^T)
+        // doesn't get filename completion.
+        let dir = tab_complete_test_dir("tico_test_tabcomplete_execute");
+        std::fs::write(dir.join("readme.txt"), "").unwrap();
+        let mut ed = test_editor("x");
+        let original_input = format!("{}/rea", dir.display());
+        let prompt = Prompt {
+            kind: PromptKind::InsertFile {
+                new_buffer: false,
+                execute: true,
+            },
+            menu: Menu::Execute,
+            label: "Command to execute".to_string(),
+            input: original_input.clone(),
+            cursor: original_input.chars().count(),
+            history_pos: None,
+            saved_input: None,
+        };
+        handle_prompt_key(
+            &mut ed,
+            prompt,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        );
+        // The Tab key normalizes to Ctrl('I'), which has no binding in
+        // Menu::Execute, so the prompt is left completely unchanged.
+        if let Mode::Prompt(p) = &ed.mode {
+            assert_eq!(p.input, original_input);
+        } else {
+            panic!("expected prompt to still be open");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

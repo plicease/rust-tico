@@ -214,6 +214,11 @@ pub struct Editor {
     pub mode: Mode,
     pub screen_rows: usize,
     pub screen_cols: usize,
+    /// The `^R` Read File prompt's `Tab`-completion listing, when more than
+    /// one filename matches the typed fragment — shown as a grid in place
+    /// of the buffer, matching nano's `input_tab`. Cleared by any other
+    /// keystroke.
+    pub file_completions: Option<Vec<String>>,
 }
 
 impl Editor {
@@ -249,6 +254,7 @@ impl Editor {
             mode: Mode::Editing,
             screen_rows: 24,
             screen_cols: 80,
+            file_completions: None,
         }
     }
 
