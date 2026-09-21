@@ -51,8 +51,10 @@ pub fn build_conflict_help(width: usize) -> Vec<String> {
         "[M]erge previews a three-way merge of both sets of changes in a \
          scrollable diff screen, which you can then apply or back out of \
          (back out returns here).",
-        "[C]ancel dismisses this prompt without touching the buffer. Like \
-         Keep, tico won't ask again about this same on-disk change.",
+        "[I]gnore All stops checking this file for on-disk changes \
+         entirely, for the rest of this session -- unlike Keep, which only \
+         silences the one change already showing, a further change to the \
+         file won't prompt either.",
     ] {
         lines.extend(wrap(para, width));
         lines.push(String::new());

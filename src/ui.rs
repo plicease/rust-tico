@@ -105,12 +105,16 @@ fn render_and_ring(editor: &mut Editor) -> io::Result<()> {
 
 /// Build the "file changed on disk, you have unsaved edits" choice prompt —
 /// shared by the initial detection and by backing out of the merge-diff
-/// viewer, so both offer the same [R]eload/[K]eep/[M]erge/[C]ancel choice.
+/// viewer, so both offer the same [R]eload/[K]eep/[M]erge/[I]gnore choice.
+/// No separate [C]ancel: it was always identical to Keep mine in effect, so
+/// Esc still works as the usual escape hatch (see handle_conflict_choice)
+/// without being advertised as its own, redundant option.
 fn external_conflict_prompt() -> Prompt {
     Prompt {
         kind: PromptKind::ExternalChangeConflict,
         menu: Menu::YesNo,
-        label: "File changed on disk and you have unsaved edits: [R]eload  [K]eep mine  [M]erge  [C]ancel".to_string(),
+        label: "File changed on disk and you have unsaved edits: [R]eload  [K]eep mine  [M]erge  [I]gnore All"
+            .to_string(),
         input: String::new(),
         cursor: 0,
         history_pos: None,
@@ -121,6 +125,9 @@ fn external_conflict_prompt() -> Prompt {
 /// Returns true if editor state changed (and so needs a redraw).
 fn maybe_check_external_change(editor: &mut Editor) -> bool {
     use crate::fileio::ExternalChange;
+    if editor.buf().ignore_external_changes {
+        return false;
+    }
     match crate::fileio::check_external_change(editor.buf()) {
         ExternalChange::Unchanged => return false,
         ExternalChange::ChangedNoLocalEdits => {
@@ -553,7 +560,11 @@ fn handle_conflict_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {
             editor.mode = Mode::Editing;
             editor.set_status("Reloaded from disk; local edits discarded");
         }
-        KeyCode::Char('k') | KeyCode::Char('K') => {
+        // Esc is folded in here rather than removed outright: it and
+        // [C]ancel used to be identical to Keep mine in every way but the
+        // status message, so dropping Cancel as a separately-advertised
+        // (redundant) choice still leaves Esc as the usual escape hatch.
+        KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Esc => {
             if let Some(path) = editor.buf().path.clone() {
                 editor.buf_mut().disk_state = crate::fileio::stat_disk_state(&path);
             }
@@ -563,15 +574,13 @@ fn handle_conflict_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {
         KeyCode::Char('m') | KeyCode::Char('M') => {
             editor.begin_merge_preview();
         }
-        KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
-            // Acknowledge this on-disk change (same as [K]eep, just without
-            // claiming to have made any decision about the content) so the
-            // idle poll doesn't immediately re-flag it and pop this same
-            // prompt up again; a *further* change to the file still will.
+        KeyCode::Char('i') | KeyCode::Char('I') => {
+            editor.buf_mut().ignore_external_changes = true;
             if let Some(path) = editor.buf().path.clone() {
                 editor.buf_mut().disk_state = crate::fileio::stat_disk_state(&path);
             }
             editor.mode = Mode::Editing;
+            editor.set_status("Ignoring further on-disk changes to this file");
         }
         _ => editor.mode = Mode::Prompt(prompt),
     }
@@ -602,7 +611,8 @@ fn handle_diff_key(
             editor.mode = Mode::Prompt(Prompt {
                 kind: PromptKind::ExternalChangeConflict,
                 menu: Menu::YesNo,
-                label: "Could not merge automatically: [R]eload  [K]eep mine  [C]ancel".to_string(),
+                label: "Could not merge automatically: [R]eload  [K]eep mine  [I]gnore All"
+                    .to_string(),
                 input: String::new(),
                 cursor: 0,
                 history_pos: None,
@@ -1339,7 +1349,7 @@ const EXTERNAL_CONFLICT_SHORTCUTS: &[(&str, &str)] = &[
     ("R", "Reload"),
     ("K", "Keep mine"),
     ("M", "Merge"),
-    ("C", "Cancel"),
+    ("I", "Ignore All"),
 ];
 
 /// Which shortcut list to show at the bottom for the current prompt (or

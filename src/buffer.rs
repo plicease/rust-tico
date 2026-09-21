@@ -87,6 +87,12 @@ pub struct Buffer {
     /// nano's `set_modified()`, which does this only on the false->true
     /// transition).
     pub lock_modified_written: bool,
+    /// Set by `[I]gnore All` at the "file changed on disk" prompt: skips
+    /// external-change detection for this buffer entirely (not just the
+    /// change that was showing), until the buffer is closed. Sticky across
+    /// saves — the user asked to stop being asked about this file, not
+    /// just about the one change already on screen.
+    pub ignore_external_changes: bool,
 }
 
 impl Buffer {
@@ -107,6 +113,7 @@ impl Buffer {
             goal_col: None,
             lock_filename: None,
             lock_modified_written: false,
+            ignore_external_changes: false,
         }
     }
 
