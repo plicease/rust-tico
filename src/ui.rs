@@ -1243,11 +1243,28 @@ fn render_title_bar(editor: &Editor, out: &mut impl Write, cols: usize) -> io::R
     let modified = if editor.buf().modified { " *" } else { "" };
     let mut center_text = format!("{name}{modified}");
 
-    // Reserve space for the left prefix (plus one column of separation on
-    // each side); if the filename doesn't fit, truncate it, keeping the
-    // tail (the most identifying part of a long path) and prefixing "...".
+    // When more than one buffer is open, show "[i/n]" (1-based current
+    // buffer index / total buffer count) in the upper-right corner. Nano
+    // shows this same indicator but replaces its version text with it; we
+    // keep the "tico version" text on the left and add the indicator on
+    // the right instead so neither is lost.
+    let indicator = if editor.buffers.len() > 1 {
+        format!("[{}/{}]", editor.current + 1, editor.buffers.len())
+    } else {
+        String::new()
+    };
+    let right_w = if indicator.is_empty() {
+        0
+    } else {
+        indicator.chars().count() + 2
+    };
+
+    // Reserve space for the left prefix and the right indicator (plus one
+    // column of separation on each side); if the filename doesn't fit,
+    // truncate it, keeping the tail (the most identifying part of a long
+    // path) and prefixing "...".
     let left_w = left.chars().count();
-    let available = cols.saturating_sub(left_w + 2);
+    let available = cols.saturating_sub(left_w + right_w + 2);
     if center_text.chars().count() > available {
         if available > 3 {
             let tail: String = center_text
@@ -1274,6 +1291,15 @@ fn render_title_bar(editor: &Editor, out: &mut impl Write, cols: usize) -> io::R
     for (i, c) in center_text.chars().enumerate() {
         if start + i < cols {
             line[start + i] = c;
+        }
+    }
+    if !indicator.is_empty() {
+        let ind_start = cols.saturating_sub(indicator.chars().count() + 2);
+        for (i, c) in indicator.chars().enumerate() {
+            let pos = ind_start + i;
+            if pos < cols {
+                line[pos] = c;
+            }
         }
     }
     let s: String = line.into_iter().collect();
