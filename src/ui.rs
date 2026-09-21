@@ -5,7 +5,7 @@
 
 use crate::app::{DiffOutcome, Editor, Mode, Prompt, PromptKind};
 use crate::buffer::Pos;
-use crate::keymap::{Action, Binding, Key as TKey, Menu};
+use crate::keymap::{Action, Binding, Key as TKey, KeyMap, Menu};
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::style::{
@@ -280,7 +280,18 @@ fn handle_prompt_key(editor: &mut Editor, mut prompt: Prompt, key: KeyEvent) {
             submit_prompt(editor, prompt);
             return;
         }
-        if tkey == TKey::Ctrl('H') {
+        if tkey == TKey::Ctrl('H') || tkey == TKey::Backspace {
+            // In `--modernbindings`, Ctrl+H is Help for most prompt menus
+            // (physical Backspace is unaffected — always deletes); check
+            // the live keymap rather than hardcoding editing here always,
+            // so this stays correct if that binding is customized further.
+            if tkey == TKey::Ctrl('H')
+                && editor.keymap.lookup_menu_only(prompt.menu, tkey)
+                    == Some(&Binding::Action(Action::Help))
+            {
+                apply_prompt_action(editor, &mut prompt, Action::Help);
+                return;
+            }
             if prompt.cursor > 0 {
                 let idx = prompt
                     .input
@@ -521,8 +532,12 @@ fn handle_exit_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {
 }
 
 fn handle_conflict_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {
-    if matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G'))
-        && key.modifiers.contains(KeyModifiers::CONTROL)
+    // Get Help is normally ^G, but moves to ^H under `--modernbindings`
+    // like every other prompt menu (see install_modern_overrides) — check
+    // the live keymap rather than hardcoding ^G, so this stays correct
+    // there and for any further nanorc/ticorc customization.
+    if let Some(tkey) = normalize_key(key)
+        && editor.keymap.lookup_menu_only(Menu::YesNo, tkey) == Some(&Binding::Action(Action::Help))
     {
         let lines = crate::help::build_conflict_help(editor.screen_cols);
         editor.mode = Mode::Help {
@@ -781,7 +796,7 @@ fn normalize_key(key: KeyEvent) -> Option<TKey> {
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
     match key.code {
-        KeyCode::Backspace => Some(TKey::Ctrl('H')),
+        KeyCode::Backspace => Some(TKey::Backspace),
         KeyCode::Tab => Some(TKey::Ctrl('I')),
         KeyCode::BackTab => Some(TKey::ShiftTab),
         KeyCode::Enter => Some(TKey::Ctrl('M')),
@@ -897,7 +912,8 @@ fn render(editor: &Editor) -> io::Result<()> {
         } else {
             None
         };
-        render_shortcut_bar(&mut out, status_row + 1, cols, shortcuts_for_prompt(prompt))?;
+        let entries = shortcut_bar_entries(&editor.keymap, prompt);
+        render_shortcut_bar(&mut out, status_row + 1, cols, &entries)?;
     }
 
     finish_cursor(editor, &mut out, text_start_row)?;
@@ -938,7 +954,8 @@ fn render_help_screen(
         None,
         syntax_color,
     )?;
-    render_shortcut_bar(out, rows.saturating_sub(2) as u16, cols, HELP_SHORTCUTS)
+    let entries = resolve_shortcuts(&editor.keymap, Menu::Help, HELP_SHORTCUTS);
+    render_shortcut_bar(out, rows.saturating_sub(2) as u16, cols, &entries)
 }
 
 /// The merge-diff viewer (`Mode::Diff`): same full-screen layout as the
@@ -987,7 +1004,8 @@ fn render_diff_screen(
         ],
         DiffOutcome::Conflict => &[("(any key)", "Continue")],
     };
-    render_shortcut_bar(out, rows.saturating_sub(2) as u16, cols, shortcuts)
+    let entries: Vec<(String, &str)> = shortcuts.iter().map(|&(k, d)| (k.to_string(), d)).collect();
+    render_shortcut_bar(out, rows.saturating_sub(2) as u16, cols, &entries)
 }
 
 /// Center `title` on its own reverse-video row at the top of the screen —
@@ -1229,122 +1247,164 @@ fn render_status_line(
 
 /// The default main-menu shortcut priority list, in the exact order GNU
 /// nano 8.7.1 lays them out (captured directly from the installed binary),
-/// as (key label, description) pairs, filled two rows at a time into as
-/// many columns as fit the terminal width.
-const SHORTCUT_PRIORITY: &[(&str, &str)] = &[
-    ("^G", "Help"),
-    ("^X", "Exit"),
-    ("^O", "Write Out"),
-    ("^R", "Read File"),
-    ("^F", "Where Is"),
-    ("^\\", "Replace"),
-    ("^K", "Cut"),
-    ("^U", "Paste"),
-    ("^T", "Execute"),
-    ("^J", "Justify"),
-    ("^C", "Location"),
-    ("^/", "Go To Line"),
-    ("M-U", "Undo"),
-    ("M-E", "Redo"),
-    ("M-A", "Set Mark"),
-    ("M-6", "Copy"),
-    ("M-]", "To Bracket"),
-    ("^B", "Where Was"),
-    ("M-B", "Previous"),
-    ("M-F", "Next"),
+/// as (action, description) pairs — resolved against the *live* keymap at
+/// render time (via `key_label_for`) rather than baking in a fixed key
+/// label, so a `bind`/`unbind` in nanorc/ticorc, or `--modernbindings`,
+/// shows up here immediately instead of leaving the bar showing stale
+/// defaults.
+const SHORTCUT_PRIORITY: &[(Action, &str)] = &[
+    (Action::Help, "Help"),
+    (Action::Exit, "Exit"),
+    (Action::WriteOut, "Write Out"),
+    (Action::Insert, "Read File"),
+    (Action::WhereIs, "Where Is"),
+    (Action::Replace, "Replace"),
+    (Action::Cut, "Cut"),
+    (Action::Paste, "Paste"),
+    (Action::Execute, "Execute"),
+    (Action::Justify, "Justify"),
+    (Action::Location, "Location"),
+    (Action::GotoLine, "Go To Line"),
+    (Action::Undo, "Undo"),
+    (Action::Redo, "Redo"),
+    (Action::Mark, "Set Mark"),
+    (Action::Copy, "Copy"),
+    (Action::FindBracket, "To Bracket"),
+    (Action::WhereWas, "Where Was"),
+    (Action::FindPrevious, "Previous"),
+    (Action::FindNext, "Next"),
 ];
 
 /// The Search (WhereIs) prompt's shortcut list, captured the same way.
-const SEARCH_SHORTCUTS: &[(&str, &str)] = &[
-    ("^G", "Help"),
-    ("^C", "Cancel"),
-    ("M-C", "Case Sens"),
-    ("M-R", "Reg.exp."),
-    ("M-B", "Backwards"),
-    ("^R", "Replace"),
-    ("^P", "Older"),
-    ("^N", "Newer"),
-    ("^T", "Go To Line"),
+const SEARCH_SHORTCUTS: &[(Action, &str)] = &[
+    (Action::Help, "Help"),
+    (Action::Cancel, "Cancel"),
+    (Action::CaseSens, "Case Sens"),
+    (Action::Regexp, "Reg.exp."),
+    (Action::Backwards, "Backwards"),
+    (Action::FlipReplace, "Replace"),
+    (Action::Older, "Older"),
+    (Action::Newer, "Newer"),
+    (Action::FlipGoto, "Go To Line"),
 ];
 
 /// The "Search (to replace)" prompt: same as Search but without ^T
 /// (MREPLACE isn't bound to flip_goto in nano) and ^R now offers to flip
 /// *back* to plain search.
-const REPLACE1_SHORTCUTS: &[(&str, &str)] = &[
-    ("^G", "Help"),
-    ("^C", "Cancel"),
-    ("M-C", "Case Sens"),
-    ("M-R", "Reg.exp."),
-    ("M-B", "Backwards"),
-    ("^R", "No Replace"),
-    ("^P", "Older"),
-    ("^N", "Newer"),
+const REPLACE1_SHORTCUTS: &[(Action, &str)] = &[
+    (Action::Help, "Help"),
+    (Action::Cancel, "Cancel"),
+    (Action::CaseSens, "Case Sens"),
+    (Action::Regexp, "Reg.exp."),
+    (Action::Backwards, "Backwards"),
+    (Action::FlipReplace, "No Replace"),
+    (Action::Older, "Older"),
+    (Action::Newer, "Newer"),
 ];
 
-const REPLACEWITH_SHORTCUTS: &[(&str, &str)] = &[
-    ("^G", "Help"),
-    ("^C", "Cancel"),
-    ("^P", "Older"),
-    ("^N", "Newer"),
+const REPLACEWITH_SHORTCUTS: &[(Action, &str)] = &[
+    (Action::Help, "Help"),
+    (Action::Cancel, "Cancel"),
+    (Action::Older, "Older"),
+    (Action::Newer, "Newer"),
 ];
 
-const GOTOLINE_SHORTCUTS: &[(&str, &str)] = &[
-    ("^G", "Help"),
-    ("^C", "Cancel"),
-    ("^W", "Begin of Paragr."),
-    ("^O", "End of Paragraph"),
-    ("^Y", "First Line"),
-    ("^V", "Last Line"),
-    ("^T", "Go To Text"),
+const GOTOLINE_SHORTCUTS: &[(Action, &str)] = &[
+    (Action::Help, "Help"),
+    (Action::Cancel, "Cancel"),
+    (Action::BeginPara, "Begin of Paragr."),
+    (Action::EndPara, "End of Paragraph"),
+    (Action::FirstLine, "First Line"),
+    (Action::LastLine, "Last Line"),
+    (Action::FlipGoto, "Go To Text"),
 ];
 
 /// The `^G` help viewer's own bottom bar (confirmed against the installed
 /// nano's help screen).
-const HELP_SHORTCUTS: &[(&str, &str)] = &[
-    ("^P", "Prev Line"),
-    ("^Y", "Prev Page"),
-    ("M-\\", "First Line"),
-    ("^X", "Close"),
-    ("^N", "Next Line"),
-    ("^V", "Next Page"),
-    ("M-/", "Last Line"),
+const HELP_SHORTCUTS: &[(Action, &str)] = &[
+    (Action::Up, "Prev Line"),
+    (Action::PageUp, "Prev Page"),
+    (Action::FirstLine, "First Line"),
+    (Action::Cancel, "Close"),
+    (Action::Down, "Next Line"),
+    (Action::PageDown, "Next Page"),
+    (Action::LastLine, "Last Line"),
 ];
 
-/// The "file changed on disk, you have unsaved edits" choice prompt: its
-/// own bar rather than falling back to the main editing shortcuts (which
-/// don't apply here — R/K/M/C aren't main-window bindings at all), plus
-/// `^G` since this prompt, like every other, has its own help screen.
+/// The "file changed on disk, you have unsaved edits" choice prompt: R/K/M
+/// aren't keymap-driven (this prompt is tico-original and matches those
+/// raw keystrokes directly — see `handle_conflict_choice`), so only the
+/// `^G` entry is resolved against the live keymap; the rest stay literal.
 const EXTERNAL_CONFLICT_SHORTCUTS: &[(&str, &str)] = &[
     ("R", "Reload"),
     ("K", "Keep mine"),
     ("M", "Merge"),
     ("C", "Cancel"),
-    ("^G", "Get Help"),
 ];
 
-/// Which shortcut list to show at the bottom for the current prompt — nano
-/// rebuilds its two help lines per-menu (see e.g. ask_user()'s
-/// post_one_key calls); menus/prompts not yet curated here fall back to
-/// Main's list rather than showing nothing.
-fn shortcuts_for_prompt(prompt: Option<&Prompt>) -> &'static [(&'static str, &'static str)] {
-    match prompt.map(|p| &p.kind) {
-        Some(PromptKind::ExternalChangeConflict) => EXTERNAL_CONFLICT_SHORTCUTS,
-        _ => match prompt.map(|p| p.menu) {
-            Some(Menu::Search) => SEARCH_SHORTCUTS,
-            Some(Menu::Replace) => REPLACE1_SHORTCUTS,
-            Some(Menu::ReplaceWith) => REPLACEWITH_SHORTCUTS,
-            Some(Menu::GotoLine) => GOTOLINE_SHORTCUTS,
-            Some(Menu::Help) => HELP_SHORTCUTS,
-            _ => SHORTCUT_PRIORITY,
-        },
+/// Which shortcut list to show at the bottom for the current prompt (or
+/// the main editing window, for `None`), with each entry's key label
+/// resolved against the *live* keymap — nano rebuilds its two help lines
+/// per-menu the same way (see e.g. `bottombars()` in its winio.c, which
+/// looks up each function's current binding rather than a fixed table);
+/// menus/prompts not yet curated here fall back to Main's list rather than
+/// showing nothing.
+fn shortcut_bar_entries(keymap: &KeyMap, prompt: Option<&Prompt>) -> Vec<(String, &'static str)> {
+    let Some(p) = prompt else {
+        return resolve_shortcuts(keymap, Menu::Main, SHORTCUT_PRIORITY);
+    };
+    if matches!(p.kind, PromptKind::ExternalChangeConflict) {
+        let mut entries: Vec<(String, &str)> = EXTERNAL_CONFLICT_SHORTCUTS
+            .iter()
+            .map(|&(k, d)| (k.to_string(), d))
+            .collect();
+        entries.push((key_label_for(keymap, Menu::YesNo, Action::Help), "Get Help"));
+        return entries;
     }
+    let table: &[(Action, &str)] = match p.menu {
+        Menu::Search => SEARCH_SHORTCUTS,
+        Menu::Replace => REPLACE1_SHORTCUTS,
+        Menu::ReplaceWith => REPLACEWITH_SHORTCUTS,
+        Menu::GotoLine => GOTOLINE_SHORTCUTS,
+        Menu::Help => HELP_SHORTCUTS,
+        _ => return resolve_shortcuts(keymap, Menu::Main, SHORTCUT_PRIORITY),
+    };
+    resolve_shortcuts(keymap, p.menu, table)
+}
+
+/// Resolve each `(action, description)` pair in `table` to
+/// `(current key label for that action in `menu`, description)`.
+fn resolve_shortcuts(
+    keymap: &KeyMap,
+    menu: Menu,
+    table: &[(Action, &'static str)],
+) -> Vec<(String, &'static str)> {
+    table
+        .iter()
+        .map(|&(action, desc)| (key_label_for(keymap, menu, action), desc))
+        .collect()
+}
+
+/// The best key currently bound to `action` within `menu` — "best" meaning
+/// the one `Key::display_rank` would show first among alternates (Ctrl
+/// before function keys before Meta), matching how the `^G` help screen
+/// already picks a primary key to display. Empty if nothing is bound
+/// (e.g. the user `unbind`-ed it), rather than showing a stale label.
+fn key_label_for(keymap: &KeyMap, menu: Menu, action: Action) -> String {
+    keymap
+        .entries()
+        .filter(|((m, _), binding)| *m == menu && **binding == Binding::Action(action))
+        .map(|((_, k), _)| *k)
+        .min_by_key(|k| k.display_rank())
+        .map(|k| k.describe())
+        .unwrap_or_default()
 }
 
 fn render_shortcut_bar(
     out: &mut impl Write,
     row: u16,
     cols: usize,
-    entries: &[(&str, &str)],
+    entries: &[(String, &str)],
 ) -> io::Result<()> {
     let max_label = entries
         .iter()
@@ -1752,4 +1812,50 @@ fn diff_line_kinds(body: &[String]) -> Option<Vec<Vec<Option<crate::syntax::High
         line_start += line.len() + 1; // +1 for the '\n' joiner
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shortcut_bar_reflects_modern_bindings() {
+        let default_km = KeyMap::defaults(false);
+        let modern_km = KeyMap::defaults(true);
+        assert_eq!(key_label_for(&default_km, Menu::Main, Action::Help), "^G");
+        assert_eq!(key_label_for(&modern_km, Menu::Main, Action::Help), "^H");
+        assert_eq!(key_label_for(&default_km, Menu::Main, Action::Exit), "^X");
+        assert_eq!(key_label_for(&modern_km, Menu::Main, Action::Exit), "^Q");
+    }
+
+    #[test]
+    fn shortcut_bar_reflects_user_rebind() {
+        let mut km = KeyMap::defaults(false);
+        km.unbind(Menu::Main, crate::keymap::Key::Ctrl('X'));
+        km.bind(
+            Menu::Main,
+            crate::keymap::Key::Ctrl('Q'),
+            Binding::Action(Action::Exit),
+        );
+        assert_eq!(key_label_for(&km, Menu::Main, Action::Exit), "^Q");
+    }
+
+    #[test]
+    fn key_label_for_unbound_action_is_empty() {
+        let mut km = KeyMap::defaults(false);
+        // Help has two default keys (^G and F1); unbind both.
+        km.unbind(Menu::Main, crate::keymap::Key::Ctrl('G'));
+        km.unbind(Menu::Main, crate::keymap::Key::F(1));
+        assert_eq!(key_label_for(&km, Menu::Main, Action::Help), "");
+    }
+
+    #[test]
+    fn main_shortcut_priority_resolves_to_nonempty_labels_by_default() {
+        let km = KeyMap::defaults(false);
+        let entries = resolve_shortcuts(&km, Menu::Main, SHORTCUT_PRIORITY);
+        assert_eq!(entries.len(), SHORTCUT_PRIORITY.len());
+        for (key, desc) in &entries {
+            assert!(!key.is_empty(), "no key resolved for {desc:?}");
+        }
+    }
 }

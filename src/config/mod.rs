@@ -64,9 +64,16 @@ fn ticorc_path() -> Option<PathBuf> {
 /// If `explicit_rcfile` is `Some`, only that single file is read (mirrors
 /// nano's `--rcfile`), and `~/.ticorc` is still applied afterward unless
 /// `ignore_ticorc` is set.
-pub fn load(explicit_rcfile: Option<&str>, ignore_rcfiles: bool) -> LoadedConfig {
+///
+/// `modern` is `-/`/`--modernbindings`: CLI-only in nano (it has no `set`
+/// form), so it's threaded in from the caller rather than read from a
+/// parsed option, and applied to the keymap *before* any nanorc/ticorc
+/// `bind`/`unbind` directives, so those can still override individual
+/// modern-mode bindings — matching nano's own `global_init()`, which bakes
+/// modernbindings into the initial shortcut list before `parse_rcfile()`.
+pub fn load(explicit_rcfile: Option<&str>, ignore_rcfiles: bool, modern: bool) -> LoadedConfig {
     let mut options = Options::default();
-    let mut keymap = KeyMap::defaults();
+    let mut keymap = KeyMap::defaults(modern);
     let mut warnings = Vec::new();
 
     if ignore_rcfiles {

@@ -23,7 +23,7 @@ fn main() -> anyhow::Result<()> {
 
     let ignore_rcfiles = cli.ignorercfiles;
     let explicit_rcfile = cli.rcfile.as_deref();
-    let loaded = config::load(explicit_rcfile, ignore_rcfiles);
+    let loaded = config::load(explicit_rcfile, ignore_rcfiles, cli.modernbindings);
     let mut options = loaded.options;
     cli.apply(&mut options);
 

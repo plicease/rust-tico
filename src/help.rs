@@ -296,7 +296,7 @@ mod tests {
 
     #[test]
     fn search_and_replace_get_distinct_intros() {
-        let km = KeyMap::defaults();
+        let km = KeyMap::defaults(false);
         let search = build(Menu::Search, &km, 80);
         let replace_with = build(Menu::ReplaceWith, &km, 80);
         assert_eq!(search[0], "Search Command Help Text");
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn shortcut_listing_reflects_live_keymap() {
-        let km = KeyMap::defaults();
+        let km = KeyMap::defaults(false);
         let lines = build(Menu::Main, &km, 80);
         assert!(
             lines

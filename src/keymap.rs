@@ -440,6 +440,12 @@ pub enum Key {
     F(u8),
     Ins,
     Del,
+    /// The physical Backspace key (nano's "Bsp"/`KEY_BACKSPACE`), kept
+    /// distinct from a literal Ctrl+H keypress: most terminals send a
+    /// different byte for Backspace than for Ctrl+H, and `--modernbindings`
+    /// depends on that distinction (it repurposes Ctrl+H for Help while
+    /// Backspace keeps deleting).
+    Backspace,
     ShiftTab,
     // Dedicated, non-rebindable navigation keys.
     Left,
@@ -499,6 +505,7 @@ impl Key {
             Key::F(n) => format!("F{n}"),
             Key::Ins => "Ins".to_string(),
             Key::Del => "Del".to_string(),
+            Key::Backspace => "Bsp".to_string(),
             Key::ShiftTab => "Sh-Tab".to_string(),
             Key::Left => "Left".to_string(),
             Key::Right => "Right".to_string(),
@@ -550,13 +557,16 @@ impl Key {
     }
 
     /// Parse a key specification as written in a nanorc `bind`/`unbind` line:
-    /// `^X`, `M-X`, `Sh-M-X`, `FN` (F1..F24), `Ins`, or `Del`.
+    /// `^X`, `M-X`, `Sh-M-X`, `FN` (F1..F24), `Ins`, `Del`, or `Bsp`.
     pub fn parse(spec: &str) -> Option<Key> {
         if spec.eq_ignore_ascii_case("ins") {
             return Some(Key::Ins);
         }
         if spec.eq_ignore_ascii_case("del") {
             return Some(Key::Del);
+        }
+        if spec.eq_ignore_ascii_case("bsp") {
+            return Some(Key::Backspace);
         }
         if let Some(rest) = spec.strip_prefix("F").or_else(|| spec.strip_prefix('f'))
             && let Ok(n) = rest.parse::<u8>()
@@ -700,11 +710,18 @@ impl KeyMap {
     /// Build the default keybinding table, matching GNU nano 8.7.1's
     /// compiled-in defaults for the main editing menu (captured directly
     /// from the running `nano` binary's help viewer), plus conventional
-    /// bindings for the prompt/list menus.
-    pub fn defaults() -> KeyMap {
+    /// bindings for the prompt/list menus. `modern` mirrors nano's
+    /// `-/`/`--modernbindings`: CLI-only in nano (no `set` equivalent — not
+    /// in nano's own rcfile.c), so it must be known before any nanorc/
+    /// ticorc `bind`/`unbind` directives are layered on, exactly as it
+    /// would be for nano's own `global_init()`.
+    pub fn defaults(modern: bool) -> KeyMap {
         let mut km = KeyMap::new();
         km.install_main_defaults();
         km.install_prompt_defaults();
+        if modern {
+            km.install_modern_overrides();
+        }
         km
     }
 
@@ -740,6 +757,9 @@ impl KeyMap {
         b(K::Meta('T'), A::CutRestOfFile);
         b(K::Meta('6'), A::Copy);
         b(K::Meta('^'), A::Copy);
+        b(K::Meta('A'), A::Mark);
+        b(K::Ctrl('6'), A::Mark);
+        b(K::Ctrl('^'), A::Mark);
         b(K::MetaDel, A::Zap);
         b(K::ShiftCtrlDel, A::ChopWordLeft);
         b(K::CtrlDel, A::ChopWordRight);
@@ -810,6 +830,7 @@ impl KeyMap {
         b(K::Ctrl('M'), A::Enter);
         b(K::Ctrl('D'), A::Delete);
         b(K::Ctrl('H'), A::Backspace);
+        b(K::Backspace, A::Backspace);
         b(K::Meta(':'), A::RecordMacro);
         b(K::Meta(';'), A::RunMacro);
         b(K::Meta('U'), A::Undo);
@@ -851,6 +872,7 @@ impl KeyMap {
             self.bind(menu, K::Home, Binding::Action(A::Home));
             self.bind(menu, K::End, Binding::Action(A::End));
             self.bind(menu, K::Ctrl('H'), Binding::Action(A::Backspace));
+            self.bind(menu, K::Backspace, Binding::Action(A::Backspace));
             self.bind(menu, K::Ctrl('D'), Binding::Action(A::Delete));
         }
         // Verified against nano's src/global.c (add_to_sclist calls), not
@@ -962,5 +984,186 @@ impl KeyMap {
         self.bind(Menu::Linter, K::Ctrl('M'), Binding::Action(A::Cancel));
         self.bind(Menu::Linter, K::PageUp, Binding::Action(A::PageUp));
         self.bind(Menu::Linter, K::PageDown, Binding::Action(A::PageDown));
+    }
+
+    /// `-/`/`--modernbindings`: rebinds a batch of Main-menu Ctrl-key
+    /// shortcuts to ones considered more familiar outside the Pico/nano
+    /// tradition (^S save, ^X cut, ^C copy, ^V paste, ^Z/^Y undo/redo, ...),
+    /// at the cost of some of nano's own traditional ones. Verified against
+    /// the `ISSET(MODERN_BINDINGS)` branch of nano's `src/global.c`
+    /// (`add_to_sclist` calls), not guessed — including the fact that
+    /// dedicated keys (arrows, Home/End, PageUp/PageDown, the Bsp/Del keys)
+    /// are untouched; only the letter-key Ctrl aliases move.
+    ///
+    /// One simplification: real nano picks Ctrl+H vs Ctrl+N for the "help"
+    /// key via a terminfo query for what the terminal's actual Backspace
+    /// key sends (falling back to Ctrl+N if it can't tell); this always
+    /// uses Ctrl+H, correct for the overwhelming majority of terminals
+    /// (which send a distinct byte for Backspace, not literal Ctrl+H).
+    fn install_modern_overrides(&mut self) {
+        use Action as A;
+        use Key as K;
+        let m = Menu::Main;
+        let mut b = |k: Key, a: Action| self.bind(m, k, Binding::Action(a));
+
+        b(K::Ctrl('H'), A::Help);
+        b(K::Ctrl('G'), A::FindNext);
+        b(K::Ctrl('D'), A::FindPrevious);
+        b(K::Ctrl('Q'), A::Exit);
+        b(K::Ctrl('W'), A::WriteOut);
+        b(K::Ctrl('O'), A::Insert);
+        b(K::Ctrl('R'), A::Replace);
+        b(K::Ctrl('T'), A::GotoLine);
+        b(K::Ctrl('P'), A::Location);
+        b(K::Ctrl('Z'), A::Undo);
+        b(K::Ctrl('Y'), A::Redo);
+        b(K::Ctrl('A'), A::Mark);
+        b(K::Ctrl('X'), A::Cut);
+        b(K::Ctrl('C'), A::Copy);
+        b(K::Ctrl('V'), A::Paste);
+        b(K::Ctrl('E'), A::Execute);
+
+        // nano's own help-key rebinding isn't Main-only: it applies via a
+        // broad `(MMOST|MBROWSER) & ~MFINDINHELP` menu set — "an
+        // abbreviation for all menus except Help and Browser and YesNo"
+        // (src/definitions.h), plus Browser itself, minus the in-help
+        // search submenu tico doesn't have.
+        //
+        // nano's own bare y/n/c confirmations have no help key at all in
+        // *either* mode, which is why nano excludes MYESNO here — but
+        // unlike nano, tico's shared prompt defaults give every non-Main
+        // menu a working ^G Get Help, YesNo included (see the deconflict
+        // screen's own help, which is entirely tico-original — nano has no
+        // equivalent prompt to model this exclusion on). So here, YesNo is
+        // treated the same as every other prompt menu instead: its
+        // existing ^G moves to ^H too, rather than being stranded on the
+        // old key while everything else switches.
+        for &menu in Menu::ALL {
+            if matches!(menu, Menu::Main | Menu::Help) {
+                continue;
+            }
+            self.unbind(menu, K::Ctrl('G'));
+            self.bind(menu, K::Ctrl('H'), Binding::Action(A::Help));
+        }
+
+        // The help key toggles: pressing it again while help is open closes
+        // it, same as nano's `add_to_sclist(MHELP, help_key, 0, do_exit)`.
+        self.unbind(Menu::Help, K::Ctrl('G'));
+        self.bind(Menu::Help, K::Ctrl('H'), Binding::Action(A::Cancel));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backspace_key_and_literal_ctrl_h_both_work_by_default() {
+        let km = KeyMap::defaults(false);
+        assert_eq!(
+            km.lookup(Menu::Main, Key::Backspace),
+            Some(&Binding::Action(Action::Backspace))
+        );
+        assert_eq!(
+            km.lookup(Menu::Main, Key::Ctrl('H')),
+            Some(&Binding::Action(Action::Backspace))
+        );
+    }
+
+    #[test]
+    fn modern_bindings_repurpose_ctrl_h_for_help_but_keep_backspace_key_working() {
+        let km = KeyMap::defaults(true);
+        assert_eq!(
+            km.lookup(Menu::Main, Key::Ctrl('H')),
+            Some(&Binding::Action(Action::Help))
+        );
+        assert_eq!(
+            km.lookup(Menu::Main, Key::Backspace),
+            Some(&Binding::Action(Action::Backspace))
+        );
+    }
+
+    #[test]
+    fn modern_bindings_move_help_to_ctrl_h_in_prompt_menus_too() {
+        // nano's help-key rebinding isn't Main-only: it applies to every
+        // menu except Help and Browser (see src/definitions.h's MMOST;
+        // nano additionally excludes YesNo there, but only because its own
+        // bare y/n/c confirmations have no help key in either mode — tico
+        // gives every prompt menu a working ^G by default, YesNo included,
+        // so YesNo switches to ^H here too, for consistency).
+        let km = KeyMap::defaults(true);
+        for menu in [
+            Menu::Search,
+            Menu::Replace,
+            Menu::ReplaceWith,
+            Menu::GotoLine,
+            Menu::WriteOut,
+            Menu::Insert,
+            Menu::Execute,
+            Menu::YesNo,
+        ] {
+            assert_eq!(
+                km.lookup_menu_only(menu, Key::Ctrl('H')),
+                Some(&Binding::Action(Action::Help)),
+                "{menu:?}"
+            );
+            assert_ne!(
+                km.lookup_menu_only(menu, Key::Ctrl('G')),
+                Some(&Binding::Action(Action::Help)),
+                "{menu:?} should no longer use ^G for help"
+            );
+        }
+    }
+
+    #[test]
+    fn modern_bindings_remap_the_documented_set() {
+        // Spot-check against nano's ISSET(MODERN_BINDINGS) branch in
+        // src/global.c, not exhaustive.
+        let km = KeyMap::defaults(true);
+        let cases = [
+            (Key::Ctrl('G'), Action::FindNext),
+            (Key::Ctrl('Q'), Action::Exit),
+            (Key::Ctrl('W'), Action::WriteOut),
+            (Key::Ctrl('O'), Action::Insert),
+            (Key::Ctrl('R'), Action::Replace),
+            (Key::Ctrl('T'), Action::GotoLine),
+            (Key::Ctrl('X'), Action::Cut),
+            (Key::Ctrl('C'), Action::Copy),
+            (Key::Ctrl('V'), Action::Paste),
+            (Key::Ctrl('Z'), Action::Undo),
+            (Key::Ctrl('Y'), Action::Redo),
+            (Key::Ctrl('A'), Action::Mark),
+            (Key::Ctrl('E'), Action::Execute),
+        ];
+        for (key, action) in cases {
+            assert_eq!(
+                km.lookup(Menu::Main, key),
+                Some(&Binding::Action(action)),
+                "{key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_modern_keeps_traditional_bindings() {
+        let km = KeyMap::defaults(false);
+        assert_eq!(
+            km.lookup(Menu::Main, Key::Ctrl('G')),
+            Some(&Binding::Action(Action::Help))
+        );
+        assert_eq!(
+            km.lookup(Menu::Main, Key::Ctrl('X')),
+            Some(&Binding::Action(Action::Exit))
+        );
+        assert_eq!(
+            km.lookup(Menu::Main, Key::Ctrl('W')),
+            Some(&Binding::Action(Action::WhereIs))
+        );
+    }
+
+    #[test]
+    fn key_parse_recognizes_bsp() {
+        assert_eq!(Key::parse("Bsp"), Some(Key::Backspace));
+        assert_eq!(Key::parse("bsp"), Some(Key::Backspace));
     }
 }
