@@ -276,15 +276,51 @@ fn handle_help_key(
     };
 }
 
+/// The movement actions Shift-selection applies to -- matches nano's
+/// `wanted_to_move()`, the set of functions its own shift-held handling
+/// treats as "just moving the cursor".
+fn is_movement_action(action: Action) -> bool {
+    matches!(
+        action,
+        Action::Left
+            | Action::Right
+            | Action::Up
+            | Action::Down
+            | Action::Home
+            | Action::End
+            | Action::PrevWord
+            | Action::NextWord
+            | Action::BeginPara
+            | Action::EndPara
+            | Action::PrevBlock
+            | Action::NextBlock
+            | Action::PageUp
+            | Action::PageDown
+            | Action::FirstLine
+            | Action::LastLine
+    )
+}
+
 fn handle_editing_key(editor: &mut Editor, key: KeyEvent) {
-    if let Some(tkey) = normalize_key(key)
-        && let Some(binding) = editor.keymap.lookup(Menu::Main, tkey).cloned()
-    {
-        apply_binding(editor, binding);
-        editor.maybe_update_lock_modified_flag();
-        return;
+    // Shift-selection (nano's "soft mark"): crossterm reports Shift as a
+    // modifier on the same key codes as plain movement (no separate
+    // Shift+Left binding needed), so the resolved action is identical
+    // either way -- only whether to also manage a mark around it differs.
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let tkey = normalize_key(key);
+    let binding = tkey.and_then(|tk| editor.keymap.lookup(Menu::Main, tk).cloned());
+    let is_movement = matches!(&binding, Some(Binding::Action(a)) if is_movement_action(*a));
+
+    if shift && is_movement && editor.buf().mark.is_none() {
+        let cur = editor.buf().cursor;
+        editor.buf_mut().mark = Some(cur);
+        editor.buf_mut().softmark = true;
     }
-    if let KeyCode::Char(c) = key.code
+    let before = editor.buf().cursor;
+
+    if let Some(binding) = binding {
+        apply_binding(editor, binding);
+    } else if let KeyCode::Char(c) = key.code
         && !key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
@@ -296,6 +332,19 @@ fn handle_editing_key(editor: &mut Editor, key: KeyEvent) {
         editor.scroll_to_cursor();
     }
     editor.maybe_update_lock_modified_flag();
+
+    // Any plain (non-Shift) movement or edit drops a soft mark -- matches
+    // nano's own post-dispatch check (a hard mark, set via `^^`/`M-A`,
+    // isn't touched here at all).
+    if !editor.buffers.is_empty()
+        && !shift
+        && editor.buf().softmark
+        && editor.buf().mark.is_some()
+        && (editor.buf().cursor != before || is_movement)
+    {
+        editor.buf_mut().mark = None;
+        editor.buf_mut().softmark = false;
+    }
 }
 
 fn apply_binding(editor: &mut Editor, binding: Binding) {
@@ -1150,6 +1199,20 @@ fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
         PromptKind::WriteOut { exiting } => {
             editor.mode = Mode::Editing;
             let path = std::path::PathBuf::from(text);
+            // A marked region (outside of the exit-time save prompt)
+            // writes just the selection to `path` as a standalone file --
+            // it doesn't touch the current buffer's own path/modified/
+            // disk-state, matching nano's write_region_to_file, and
+            // doesn't clear the mark (confirmed against the installed
+            // nano: the selection stays highlighted afterward).
+            if !exiting && let Some((start, end)) = editor.selection_range() {
+                let selected = editor.buf().text_range(start, end);
+                match std::fs::write(&path, &selected) {
+                    Ok(()) => editor.set_status(format!("Wrote {}", path.display())),
+                    Err(e) => editor.set_status(format!("Error writing file: {e}")),
+                }
+                return;
+            }
             match crate::fileio::save_file(editor.buf_mut(), &path) {
                 Ok(()) => {
                     editor.set_status(format!("Wrote {}", path.display()));
@@ -2586,6 +2649,7 @@ fn render_buffer(
     } else {
         Vec::new()
     };
+    let selection = editor.selection_range();
 
     for r in 0..rows {
         queue!(out, MoveTo(0, start_row + r as u16))?;
@@ -2598,6 +2662,10 @@ fn render_buffer(
         // precedence over syntax colors, if the active search/replace match
         // is on this line.
         let mut highlight: Option<(usize, usize)> = None;
+        // Character range covering the marked selection on this line, if
+        // any -- lower priority than `highlight` (an active search/replace
+        // match), matching nano's own SELECTED_TEXT vs. spotlight layering.
+        let mut selected: Option<(usize, usize)> = None;
         let mut gutter_chars = 0;
         let is_real_line = line_idx < buf.line_count();
 
@@ -2624,6 +2692,27 @@ fn render_buffer(
                 let end = gutter_chars + crate::buffer::display_width(&raw, pos.col + len, tabsize);
                 if end > start {
                     highlight = Some((start, end));
+                }
+            }
+
+            if let Some((sel_start, sel_end)) = selection
+                && line_idx >= sel_start.line
+                && line_idx <= sel_end.line
+            {
+                let start_col = if line_idx == sel_start.line {
+                    sel_start.col
+                } else {
+                    0
+                };
+                let end_col = if line_idx == sel_end.line {
+                    sel_end.col
+                } else {
+                    raw.chars().count()
+                };
+                let start = gutter_chars + crate::buffer::display_width(&raw, start_col, tabsize);
+                let end = gutter_chars + crate::buffer::display_width(&raw, end_col, tabsize);
+                if end > start {
+                    selected = Some((start, end));
                 }
             }
         } else if gutter > 0 {
@@ -2672,21 +2761,28 @@ fn render_buffer(
         }
         let kinds = windowed_kinds;
         let marker_shift = gutter_chars + if show_left { 1 } else { 0 };
-        let highlight = highlight.map(|(s, e)| {
+        let clamp_to_view = |(s, e): (usize, usize)| {
             let clamp = |x: usize| marker_shift + x.clamp(vis_start, vis_end) - vis_start;
             (clamp(s), clamp(e))
-        });
+        };
+        let highlight = highlight.map(clamp_to_view);
+        let selected = selected.map(clamp_to_view);
 
         let len = chars.len();
         let spot = highlight
             .map(|(s, e)| (s.min(len), e.min(len)))
             .filter(|(s, e)| s < e);
+        let sel = selected
+            .map(|(s, e)| (s.min(len), e.min(len)))
+            .filter(|(s, e)| s < e);
 
         let (spot_fg, spot_bg) = spotlight_colors(&editor.options.spotlightcolor);
+        let selection_style = selection_render_style(&editor.options.selectedcolor);
         let mut i = 0;
         while i < len {
             let in_spot = spot.is_some_and(|(s, e)| i >= s && i < e);
-            let kind = if in_spot {
+            let in_sel = !in_spot && sel.is_some_and(|(s, e)| i >= s && i < e);
+            let kind = if in_spot || in_sel {
                 None
             } else {
                 kinds.get(i).copied().flatten()
@@ -2694,10 +2790,11 @@ fn render_buffer(
             let mut j = i + 1;
             while j < len {
                 let j_in_spot = spot.is_some_and(|(s, e)| j >= s && j < e);
-                if j_in_spot != in_spot {
+                let j_in_sel = !j_in_spot && sel.is_some_and(|(s, e)| j >= s && j < e);
+                if j_in_spot != in_spot || j_in_sel != in_sel {
                     break;
                 }
-                let j_kind = if j_in_spot {
+                let j_kind = if j_in_spot || j_in_sel {
                     None
                 } else {
                     kinds.get(j).copied().flatten()
@@ -2716,6 +2813,26 @@ fn render_buffer(
                     Print(segment),
                     SetAttribute(Attribute::Reset)
                 )?;
+            } else if in_sel {
+                match selection_style {
+                    SelectionStyle::Reverse => {
+                        queue!(
+                            out,
+                            SetAttribute(Attribute::Reverse),
+                            Print(segment),
+                            SetAttribute(Attribute::Reset)
+                        )?;
+                    }
+                    SelectionStyle::Colored(fg, bg) => {
+                        queue!(
+                            out,
+                            SetForegroundColor(fg),
+                            SetBackgroundColor(bg),
+                            Print(segment),
+                            SetAttribute(Attribute::Reset)
+                        )?;
+                    }
+                }
             } else if let Some(kind) = kind {
                 queue!(
                     out,
@@ -2744,6 +2861,25 @@ fn spotlight_colors(cp: &crate::options::ColorPair) -> (Color, Color) {
     let fg = cp.fg.map(map_named_color).unwrap_or(Color::Black);
     let bg = cp.bg.map(map_named_color).unwrap_or(Color::Yellow);
     (fg, bg)
+}
+
+/// How to paint the marked selection (`buf.mark`).
+#[derive(Clone, Copy)]
+enum SelectionStyle {
+    /// nano's own default (`hilite_attribute`, `A_REVERSE`): plain reverse
+    /// video, used whenever `selectedcolor` hasn't been configured.
+    Reverse,
+    /// An explicit `set selectedcolor` — a real color pair, like spotlight.
+    Colored(Color, Color),
+}
+
+fn selection_render_style(cp: &crate::options::ColorPair) -> SelectionStyle {
+    if cp.fg.is_none() && cp.bg.is_none() {
+        return SelectionStyle::Reverse;
+    }
+    let fg = cp.fg.map(map_named_color).unwrap_or(Color::Reset);
+    let bg = cp.bg.map(map_named_color).unwrap_or(Color::Reset);
+    SelectionStyle::Colored(fg, bg)
 }
 
 fn map_named_color(nc: crate::options::NamedColor) -> Color {
@@ -2935,6 +3071,93 @@ mod tests {
         let mut ed = Editor::new(crate::options::Options::default(), KeyMap::defaults(false));
         ed.buffers[0] = crate::buffer::Buffer::from_text(text, None);
         ed
+    }
+
+    #[test]
+    fn shift_right_sets_a_soft_mark_and_extends_the_selection() {
+        let mut ed = test_editor("hello world");
+        handle_editing_key(&mut ed, KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+        assert_eq!(ed.buf().mark, Some(Pos::new(0, 0)));
+        assert!(ed.buf().softmark);
+        assert_eq!(ed.buf().cursor, Pos::new(0, 1));
+
+        handle_editing_key(&mut ed, KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+        assert_eq!(
+            ed.buf().mark,
+            Some(Pos::new(0, 0)),
+            "the mark's anchor shouldn't move on further shift-movement"
+        );
+        assert_eq!(ed.buf().cursor, Pos::new(0, 2));
+    }
+
+    #[test]
+    fn plain_movement_after_shift_selection_drops_the_soft_mark() {
+        let mut ed = test_editor("hello world");
+        handle_editing_key(&mut ed, KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+        assert!(ed.buf().mark.is_some());
+
+        handle_editing_key(&mut ed, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(
+            ed.buf().mark,
+            None,
+            "a plain movement key should collapse the selection"
+        );
+        assert!(!ed.buf().softmark);
+        assert_eq!(ed.buf().cursor, Pos::new(0, 2), "the cursor still moves");
+    }
+
+    #[test]
+    fn hard_mark_survives_plain_movement() {
+        let mut ed = test_editor("hello world");
+        ed.execute(Action::Mark);
+        assert!(ed.buf().mark.is_some());
+        handle_editing_key(&mut ed, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(
+            ed.buf().mark.is_some(),
+            "^^/M-A sets a hard mark, unaffected by plain movement"
+        );
+    }
+
+    #[test]
+    fn typing_a_character_drops_a_soft_mark() {
+        let mut ed = test_editor("hello world");
+        handle_editing_key(&mut ed, KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+        assert!(ed.buf().mark.is_some());
+        handle_editing_key(
+            &mut ed,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+        assert!(ed.buf().mark.is_none());
+        assert_eq!(ed.buf().to_string(), "hxello world");
+    }
+
+    #[test]
+    fn write_selection_to_file_writes_only_the_marked_text() {
+        let path = std::env::temp_dir().join("tico_test_write_selection.txt");
+        std::fs::remove_file(&path).ok();
+        let mut ed = test_editor("hello\nworld\nagain\n");
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(2, 0); // selects the first two lines whole
+        let prompt = Prompt {
+            kind: PromptKind::WriteOut { exiting: false },
+            menu: Menu::WriteOut,
+            label: "Write Selection to File".to_string(),
+            input: path.to_str().unwrap().to_string(),
+            cursor: 0,
+            history_pos: None,
+            saved_input: None,
+        };
+        submit_prompt(&mut ed, prompt);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello\nworld\n");
+        assert!(
+            ed.buf().mark.is_some(),
+            "writing the selection shouldn't clear it (confirmed against the installed nano)"
+        );
+        assert!(
+            ed.buf().path.is_none(),
+            "the buffer's own path/state shouldn't change from a selection-only write"
+        );
+        std::fs::remove_file(&path).ok();
     }
 
     fn insert_prompt(new_buffer: bool, input: &str) -> Prompt {

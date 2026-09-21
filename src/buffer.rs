@@ -62,6 +62,11 @@ pub struct Buffer {
     pub path: Option<PathBuf>,
     pub cursor: Pos,
     pub mark: Option<Pos>,
+    /// Whether `mark` was auto-set by Shift+movement (nano's "soft mark")
+    /// rather than explicitly toggled on with `^^`/`M-A` (a "hard" mark).
+    /// A soft mark is auto-cleared by the next plain (non-Shift) movement
+    /// or edit; a hard one persists until toggled off again.
+    pub softmark: bool,
     pub modified: bool,
     pub undo_stack: Vec<Edit>,
     pub redo_stack: Vec<Edit>,
@@ -102,6 +107,7 @@ impl Buffer {
             path: None,
             cursor: Pos::new(0, 0),
             mark: None,
+            softmark: false,
             modified: false,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
