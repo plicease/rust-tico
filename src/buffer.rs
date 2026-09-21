@@ -119,6 +119,10 @@ pub struct Buffer {
     /// to do exactly that. Interior mutability lets the read-only render
     /// pass populate it.
     highlight_cache: std::cell::RefCell<Option<HighlightCache>>,
+    /// Whether the "syntax highlighting disabled: file too large" notice
+    /// has already been shown for this buffer, so it's a one-time heads-up
+    /// rather than repeated on every render.
+    pub highlighting_size_warning_shown: bool,
 }
 
 impl Buffer {
@@ -143,6 +147,7 @@ impl Buffer {
             ignore_external_changes: false,
             content_version: 0,
             highlight_cache: std::cell::RefCell::new(None),
+            highlighting_size_warning_shown: false,
         }
     }
 
