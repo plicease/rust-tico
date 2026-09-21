@@ -1915,7 +1915,8 @@ fn render(editor: &Editor) -> io::Result<()> {
     let rows = editor.screen_rows;
     if editor.options.zero {
         render_buffer(editor, &mut out, 0, rows)?;
-        return finish_cursor(editor, &mut out, 0);
+        finish_cursor(editor, &mut out, 0)?;
+        return out.flush();
     }
 
     queue!(out, MoveTo(0, 0))?;
