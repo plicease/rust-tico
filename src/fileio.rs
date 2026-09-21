@@ -88,6 +88,38 @@ fn user_home_dir(_name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// All usernames on the system, for `~user<Tab>` completion at the `^R`
+/// Read File prompt — matches nano's `username_completion`, which walks
+/// the same database with `getpwent(3)`.
+#[cfg(unix)]
+pub fn list_usernames() -> Vec<String> {
+    use std::ffi::CStr;
+
+    let mut names = Vec::new();
+    // getpwent/setpwent/endpwent share one static iteration cursor and
+    // aren't thread-safe, but tico only ever calls this from the single
+    // main UI thread, same as nano itself.
+    unsafe {
+        libc::setpwent();
+        loop {
+            let entry = libc::getpwent();
+            if entry.is_null() {
+                break;
+            }
+            if let Ok(name) = CStr::from_ptr((*entry).pw_name).to_str() {
+                names.push(name.to_string());
+            }
+        }
+        libc::endpwent();
+    }
+    names
+}
+
+#[cfg(not(unix))]
+pub fn list_usernames() -> Vec<String> {
+    Vec::new()
+}
+
 fn hash_content(s: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut h);

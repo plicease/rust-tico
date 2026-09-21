@@ -587,16 +587,23 @@ fn apply_prompt_action(editor: &mut Editor, prompt: &mut Prompt, action: Action)
 
 /// `Tab` at the `^R` Read File prompt: complete the typed fragment to the
 /// longest common prefix among matching directory entries (nano's
-/// `input_tab`/`filename_completion`), and list them all in
-/// `editor.file_completions` when there's more than one, rendered as a
-/// grid in place of the buffer (`render_completions_grid`). Username
-/// completion (`~user<Tab>`) isn't implemented — only plain filenames.
+/// `input_tab`/`filename_completion`), or, when the fragment starts with
+/// `~` and contains no `/` yet, among system usernames instead (nano's
+/// `username_completion`) — and list them all in `editor.file_completions`
+/// when there's more than one, rendered as a grid in place of the buffer
+/// (`render_completions_grid`).
 fn apply_filename_completion(editor: &mut Editor, prompt: &mut Prompt) {
     // Matches nano: completion only applies at the end of the input.
     if prompt.cursor != prompt.input.chars().count() {
         return;
     }
     let morsel = prompt.input.clone();
+
+    if morsel.starts_with('~') && !morsel.contains('/') {
+        apply_username_completion(editor, prompt, &morsel);
+        return;
+    }
+
     let (dir_part, fragment) = match morsel.rfind('/') {
         Some(i) => (morsel[..=i].to_string(), morsel[i + 1..].to_string()),
         None => (String::new(), morsel.clone()),
@@ -639,6 +646,46 @@ fn apply_filename_completion(editor: &mut Editor, prompt: &mut Prompt) {
     if matches.len() > 1 {
         editor.file_completions = Some(matches);
     }
+}
+
+/// `Tab` on a bare `~fragment` (no `/` yet): complete against system
+/// usernames instead of filenames — matches nano's `username_completion`.
+/// Unlike plain filename completion, a single match never gets a trailing
+/// `/` appended (nano doesn't either: the completed `~name` isn't itself a
+/// real path to check `is_dir` against), so finishing into that user's
+/// home directory still takes one more keystroke plus a further Tab.
+fn apply_username_completion(editor: &mut Editor, prompt: &mut Prompt, morsel: &str) {
+    let matches = username_completion_matches(&crate::fileio::list_usernames(), &morsel[1..]);
+    if matches.is_empty() {
+        return;
+    }
+
+    let mut common = matches[0].clone();
+    for m in &matches[1..] {
+        common = common_prefix(&common, m);
+    }
+    if common != morsel {
+        prompt.input = common;
+        prompt.cursor = prompt.input.chars().count();
+    }
+    if matches.len() > 1 {
+        editor.file_completions = Some(matches);
+    }
+}
+
+/// The `~`-prefixed usernames (sorted) among `users` that start with
+/// `fragment` — the pure matching logic behind `apply_username_completion`,
+/// kept separate from `list_usernames()`'s real system lookup so it can be
+/// tested against a fixed, portable list instead of the actual (and
+/// environment-dependent) `/etc/passwd`.
+fn username_completion_matches(users: &[String], fragment: &str) -> Vec<String> {
+    let mut matches: Vec<String> = users
+        .iter()
+        .filter(|name| name.starts_with(fragment))
+        .map(|name| format!("~{name}"))
+        .collect();
+    matches.sort();
+    matches
 }
 
 /// The longest common leading substring of `a` and `b`.
@@ -2973,6 +3020,89 @@ mod tests {
             panic!("expected prompt to still be open");
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn username_completion_matches_filters_by_prefix_and_sorts() {
+        let users: Vec<String> = ["bob", "alice", "alicia"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            username_completion_matches(&users, "ali"),
+            vec!["~alice", "~alicia"]
+        );
+        assert_eq!(username_completion_matches(&users, "bob"), vec!["~bob"]);
+        assert!(username_completion_matches(&users, "nope").is_empty());
+        // An empty fragment (a bare "~") matches everyone.
+        assert_eq!(
+            username_completion_matches(&users, ""),
+            vec!["~alice", "~alicia", "~bob"]
+        );
+    }
+
+    #[test]
+    fn apply_username_completion_no_match_leaves_input_unchanged() {
+        let mut ed = test_editor("x");
+        let mut prompt = insert_prompt(false, "~tico_test_no_such_user_xyz");
+        let morsel = prompt.input.clone();
+        apply_username_completion(&mut ed, &mut prompt, &morsel);
+        assert_eq!(prompt.input, "~tico_test_no_such_user_xyz");
+        assert!(ed.file_completions.is_none());
+    }
+
+    #[test]
+    fn apply_username_completion_current_user_stays_stable_when_already_complete() {
+        // Portable against whatever /etc/passwd actually contains: typing
+        // the current user's full name is already the longest common
+        // prefix of every matching entry (itself, and anything else that
+        // happens to start with the same string), so completion must
+        // leave it exactly as-is regardless of the environment.
+        let Ok(user) = std::env::var("USER") else {
+            return; // not set in this environment; skip rather than fail
+        };
+        let mut ed = test_editor("x");
+        let fragment = format!("~{user}");
+        let mut prompt = insert_prompt(false, &fragment);
+        apply_username_completion(&mut ed, &mut prompt, &fragment);
+        assert_eq!(prompt.input, fragment);
+    }
+
+    #[test]
+    fn apply_username_completion_lists_real_matches_when_ambiguous() {
+        // Find two real usernames on this system sharing a nonempty common
+        // prefix, to exercise the >1-match listing path against the
+        // actual system database rather than only the pure matcher above.
+        let users = crate::fileio::list_usernames();
+        let common = users.iter().enumerate().find_map(|(i, u)| {
+            users[i + 1..]
+                .iter()
+                .map(|v| common_prefix(u, v))
+                .find(|c| !c.is_empty())
+        });
+        let Some(common) = common else {
+            return; // no ambiguous pair of usernames on this system; skip
+        };
+        let mut ed = test_editor("x");
+        let fragment = format!("~{common}");
+        let mut prompt = insert_prompt(false, &fragment);
+        apply_username_completion(&mut ed, &mut prompt, &fragment);
+        let matches = ed
+            .file_completions
+            .expect("an ambiguous fragment should list its matches");
+        assert!(matches.len() > 1);
+        assert!(matches.iter().all(|m| m.starts_with(&fragment)));
+    }
+
+    #[test]
+    fn tab_completion_tilde_fragment_with_slash_is_not_username_completion() {
+        // "~/..." contains a slash, so it must go through plain filename
+        // completion (against the real home directory) rather than
+        // username completion, even though it starts with `~`.
+        let mut ed = test_editor("x");
+        let mut prompt = insert_prompt(false, "~/tico_test_no_such_dir_xyz123/rea");
+        apply_filename_completion(&mut ed, &mut prompt);
+        assert_eq!(prompt.input, "~/tico_test_no_such_dir_xyz123/rea");
     }
 
     #[test]
