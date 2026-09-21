@@ -1352,6 +1352,27 @@ const EXTERNAL_CONFLICT_SHORTCUTS: &[(&str, &str)] = &[
     ("I", "Ignore All"),
 ];
 
+/// "Save modified buffer?" — confirmed against the installed nano's own
+/// bar. The blank third entry keeps Cancel in the bottom-right slot,
+/// matching nano's layout (its Y/N/^C bar isn't a plain fill-in-order
+/// grid: Yes/No stack in the left column, Cancel sits alone at bottom
+/// right).
+const EXIT_SHORTCUTS: &[(&str, &str)] = &[("Y", "Yes"), ("N", "No"), ("", ""), ("^C", "Cancel")];
+
+/// "Replace this instance?" — confirmed against the installed nano's own
+/// bar; unlike the exit prompt this one fills all four slots, so no blank
+/// padding is needed.
+const REPLACE_CONFIRM_SHORTCUTS: &[(&str, &str)] =
+    &[("Y", "Yes"), ("N", "No"), ("A", "All"), ("^C", "Cancel")];
+
+/// The lock-conflict prompt ("File is being edited by ...; open anyway?")
+/// is tico-original (no nano equivalent — nano has no interactive
+/// lock-file prompt). ^C/N both decline identically (see
+/// handle_lock_conflict_choice), so — matching the same reasoning that
+/// dropped the deconflict prompt's redundant Cancel — only Yes/No are
+/// advertised here.
+const LOCK_CONFLICT_SHORTCUTS: &[(&str, &str)] = &[("Y", "Yes"), ("N", "No")];
+
 /// Which shortcut list to show at the bottom for the current prompt (or
 /// the main editing window, for `None`), with each entry's key label
 /// resolved against the *live* keymap — nano rebuilds its two help lines
@@ -1370,6 +1391,19 @@ fn shortcut_bar_entries(keymap: &KeyMap, prompt: Option<&Prompt>) -> Vec<(String
             .collect();
         entries.push((key_label_for(keymap, Menu::YesNo, Action::Help), "Get Help"));
         return entries;
+    }
+    // The other Y/N-style choice prompts: none of Y/N/A/^C go through the
+    // keymap (they're raw keystrokes each handler matches directly — see
+    // handle_exit_choice/handle_lock_conflict_choice/
+    // handle_replace_confirm_choice), so these stay literal too.
+    let literal: Option<&[(&str, &str)]> = match &p.kind {
+        PromptKind::Exit { .. } => Some(EXIT_SHORTCUTS),
+        PromptKind::LockConflict { .. } => Some(LOCK_CONFLICT_SHORTCUTS),
+        PromptKind::ReplaceConfirm(_) => Some(REPLACE_CONFIRM_SHORTCUTS),
+        _ => None,
+    };
+    if let Some(table) = literal {
+        return table.iter().map(|&(k, d)| (k.to_string(), d)).collect();
     }
     let table: &[(Action, &str)] = match p.menu {
         Menu::Search => SEARCH_SHORTCUTS,
@@ -1435,7 +1469,7 @@ fn render_shortcut_bar(
         let mut written = 0usize;
         for c in 0..n_pairs {
             let idx = c * 2 + r as usize;
-            if let Some((key, desc)) = entries.get(idx) {
+            if let Some((key, desc)) = entries.get(idx).filter(|(k, _)| !k.is_empty()) {
                 // As in nano: the key combo is shown in reverse video, the
                 // description in the terminal's normal colors.
                 let key_padded = format!("{key:<lw$}", lw = max_label);
