@@ -8,7 +8,12 @@ use crate::options::{self, Options};
 /// for `unset`. `arg` is the raw remainder of the line after the option
 /// name (already stripped of surrounding quotes, if any), for options that
 /// take a value. Returns `Err` with a message for an unknown option name.
-pub fn apply(options: &mut Options, name: &str, arg: Option<&str>, enable: bool) -> Result<(), String> {
+pub fn apply(
+    options: &mut Options,
+    name: &str,
+    arg: Option<&str>,
+    enable: bool,
+) -> Result<(), String> {
     macro_rules! flag {
         ($field:ident) => {{
             options.$field = enable;

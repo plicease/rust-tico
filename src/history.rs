@@ -88,8 +88,12 @@ impl HistoryStore {
     /// callers should gate the call on that themselves).
     pub fn load() -> HistoryStore {
         let mut store = HistoryStore::new();
-        let Some(path) = Self::history_path() else { return store };
-        let Ok(text) = std::fs::read_to_string(&path) else { return store };
+        let Some(path) = Self::history_path() else {
+            return store;
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return store;
+        };
 
         let mut section = 0u8; // 0 = search, 1 = replace, 2 = execute
         for line in text.lines() {
@@ -116,7 +120,9 @@ impl HistoryStore {
         if !self.changed {
             return;
         }
-        let Some(path) = Self::history_path() else { return };
+        let Some(path) = Self::history_path() else {
+            return;
+        };
         let mut text = String::new();
         for line in &self.search {
             text.push_str(line);

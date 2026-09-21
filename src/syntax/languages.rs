@@ -484,7 +484,9 @@ fn detect_by_filename(path: &Path) -> Option<&'static LanguageDef> {
         }
     }
     let ext = path.extension().and_then(|e| e.to_str())?;
-    LANGUAGES.iter().find(|lang| lang.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext)))
+    LANGUAGES
+        .iter()
+        .find(|lang| lang.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext)))
 }
 
 /// Parse a shebang line, following `env` indirection (e.g.
@@ -502,8 +504,13 @@ fn detect_by_shebang(first_line: &str) -> Option<&'static LanguageDef> {
     }
     // Strip a trailing version number, e.g. "python3" already handled by
     // exact shebang lists below, but "perl5.34" or "python3.11" isn't.
-    let interpreter_trimmed = interpreter.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
-    LANGUAGES.iter().find(|lang| lang.shebangs.iter().any(|s| *s == interpreter || *s == interpreter_trimmed))
+    let interpreter_trimmed =
+        interpreter.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    LANGUAGES.iter().find(|lang| {
+        lang.shebangs
+            .iter()
+            .any(|s| *s == interpreter || *s == interpreter_trimmed)
+    })
 }
 
 /// Scan the first and last few lines for a vim modeline (`vim: set ft=X`,
@@ -533,9 +540,15 @@ fn parse_vim_modeline(line: &str) -> Option<String> {
     for marker in ["vim:", "vi:", "ex:"] {
         if let Some(pos) = line.find(marker) {
             let rest = &line[pos + marker.len()..];
-            let rest = rest.strip_prefix(" set ").or_else(|| rest.strip_prefix("set ")).unwrap_or(rest);
+            let rest = rest
+                .strip_prefix(" set ")
+                .or_else(|| rest.strip_prefix("set "))
+                .unwrap_or(rest);
             for field in rest.split(|c: char| c == ':' || c.is_whitespace()) {
-                if let Some(v) = field.strip_prefix("ft=").or_else(|| field.strip_prefix("filetype=")) {
+                if let Some(v) = field
+                    .strip_prefix("ft=")
+                    .or_else(|| field.strip_prefix("filetype="))
+                {
                     return Some(v.to_string());
                 }
                 if let Some(v) = field.strip_prefix("syntax=") {
@@ -578,5 +591,7 @@ pub(crate) fn names() -> Vec<&'static str> {
 /// `-Y`/`--syntax` CLI override.
 pub(crate) fn find_by_name(name: &str) -> Option<&'static LanguageDef> {
     let name = name.to_ascii_lowercase();
-    LANGUAGES.iter().find(|l| l.name == name || l.modeline_aliases.iter().any(|a| *a == name))
+    LANGUAGES
+        .iter()
+        .find(|l| l.name == name || l.modeline_aliases.iter().any(|a| *a == name))
 }

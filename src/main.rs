@@ -43,7 +43,8 @@ fn main() -> anyhow::Result<()> {
     } else {
         for (i, fa) in file_args.iter().enumerate() {
             let path = std::path::PathBuf::from(&fa.path);
-            let (mut buf, message, level) = open_one(&path, editor.options.locking, syntax_override.as_deref());
+            let (mut buf, message, level) =
+                open_one(&path, editor.options.locking, syntax_override.as_deref());
             if let Some(line) = fa.line {
                 let target = (line.max(1) as usize) - 1;
                 buf.cursor.line = target.min(buf.line_count().saturating_sub(1));
@@ -92,7 +93,10 @@ fn print_syntax_names() {
     // nano wraps this listing at a hardcoded 45 columns regardless of the
     // actual terminal size; wrap to the real width instead (falling back
     // to 80 when it can't be queried, e.g. output is piped to a file).
-    let width = crossterm::terminal::size().map(|(cols, _)| cols as usize).unwrap_or(80).max(10);
+    let width = crossterm::terminal::size()
+        .map(|(cols, _)| cols as usize)
+        .unwrap_or(80)
+        .max(10);
     let mut line = String::new();
     for name in syntax::names() {
         let extra = 1 + name.chars().count(); // leading space + the name itself
@@ -114,7 +118,11 @@ fn print_syntax_names() {
 /// acquiring the lock immediately (the caller must set it as the editor's
 /// mode); otherwise a conflicting lock is taken over anyway, as nano itself
 /// does in its non-interactive (`ask_the_user = FALSE`) path.
-fn acquire_lock(editor: &mut app::Editor, buf: &mut buffer::Buffer, interactive: bool) -> Option<app::Prompt> {
+fn acquire_lock(
+    editor: &mut app::Editor,
+    buf: &mut buffer::Buffer,
+    interactive: bool,
+) -> Option<app::Prompt> {
     if !editor.options.locking || editor.options.view {
         return None;
     }
@@ -172,11 +180,15 @@ fn open_one(
     // all on by default, or forced by -Y/--syntax); the on/off toggle (M-Y)
     // only controls whether rendering actually uses it, so toggling back on
     // doesn't need to re-detect.
-    buf.language = syntax::detect_with_override(buf.path.as_deref(), &buf.to_string(), syntax_override);
+    buf.language =
+        syntax::detect_with_override(buf.path.as_deref(), &buf.to_string(), syntax_override);
     (buf, msg, level)
 }
 
-fn open_one_inner(path: &std::path::Path, locking: bool) -> (buffer::Buffer, String, app::StatusLevel) {
+fn open_one_inner(
+    path: &std::path::Path,
+    locking: bool,
+) -> (buffer::Buffer, String, app::StatusLevel) {
     if path.is_dir() {
         return (
             buffer::Buffer::empty(),
@@ -186,7 +198,10 @@ fn open_one_inner(path: &std::path::Path, locking: bool) -> (buffer::Buffer, Str
     }
     if !path.exists() {
         if locking {
-            let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| std::path::Path::new("."));
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new("."));
             if parent.is_dir() && !fileio::path_writable(parent) {
                 return (
                     buffer::Buffer::from_text("", Some(path.to_path_buf())),
@@ -204,7 +219,11 @@ fn open_one_inner(path: &std::path::Path, locking: bool) -> (buffer::Buffer, Str
     match fileio::load_file(path) {
         Ok(buf) => {
             if !fileio::path_writable(path) {
-                (buf, format!("File '{}' is unwritable", path.display()), app::StatusLevel::Alert)
+                (
+                    buf,
+                    format!("File '{}' is unwritable", path.display()),
+                    app::StatusLevel::Alert,
+                )
             } else {
                 let msg = fileio::describe_read(&buf.to_string());
                 (buf, msg, app::StatusLevel::Normal)

@@ -40,7 +40,14 @@ fn take_arg(s: &str) -> (Option<String>, &str) {
 }
 
 const SYNTAX_BODY_COMMANDS: &[&str] = &[
-    "color", "icolor", "header", "magic", "formatter", "linter", "comment", "tabgives",
+    "color",
+    "icolor",
+    "header",
+    "magic",
+    "formatter",
+    "linter",
+    "comment",
+    "tabgives",
 ];
 
 pub fn parse(text: &str, options: &mut Options, keymap: &mut KeyMap, warnings: &mut Vec<String>) {
@@ -72,27 +79,42 @@ pub fn parse(text: &str, options: &mut Options, keymap: &mut KeyMap, warnings: &
                 let enable = cmd_lower == "set";
                 let (name, after) = split_first(rest);
                 if name.is_empty() {
-                    warnings.push(format!("nanorc:{}: `{}` with no option name", lineno + 1, cmd_lower));
+                    warnings.push(format!(
+                        "nanorc:{}: `{}` with no option name",
+                        lineno + 1,
+                        cmd_lower
+                    ));
                     continue;
                 }
                 let (arg, _) = take_arg(after);
-                if let Err(e) = settings::apply(options, &name.to_ascii_lowercase(), arg.as_deref(), enable) {
+                if let Err(e) =
+                    settings::apply(options, &name.to_ascii_lowercase(), arg.as_deref(), enable)
+                {
                     warnings.push(format!("nanorc:{}: {}", lineno + 1, e));
                 }
             }
             "bind" => {
                 let (key_spec, after) = split_first(rest);
                 let Some(key) = Key::parse(key_spec) else {
-                    warnings.push(format!("nanorc:{}: invalid key spec `{key_spec}`", lineno + 1));
+                    warnings.push(format!(
+                        "nanorc:{}: invalid key spec `{key_spec}`",
+                        lineno + 1
+                    ));
                     continue;
                 };
                 if !crate::keymap::is_rebindable(&key) {
-                    warnings.push(format!("nanorc:{}: `{key_spec}` cannot be rebound", lineno + 1));
+                    warnings.push(format!(
+                        "nanorc:{}: `{key_spec}` cannot be rebound",
+                        lineno + 1
+                    ));
                     continue;
                 }
                 let (arg, after) = take_arg(after);
                 let Some(arg) = arg else {
-                    warnings.push(format!("nanorc:{}: `bind` missing function/string", lineno + 1));
+                    warnings.push(format!(
+                        "nanorc:{}: `bind` missing function/string",
+                        lineno + 1
+                    ));
                     continue;
                 };
                 let (menu_name, _) = split_first(after);
@@ -105,12 +127,22 @@ pub fn parse(text: &str, options: &mut Options, keymap: &mut KeyMap, warnings: &
                 } else {
                     Binding::Macro(arg)
                 };
-                apply_bind(keymap, &menu_name.to_ascii_lowercase(), key, binding, warnings, lineno);
+                apply_bind(
+                    keymap,
+                    &menu_name.to_ascii_lowercase(),
+                    key,
+                    binding,
+                    warnings,
+                    lineno,
+                );
             }
             "unbind" => {
                 let (key_spec, after) = split_first(rest);
                 let Some(key) = Key::parse(key_spec) else {
-                    warnings.push(format!("nanorc:{}: invalid key spec `{key_spec}`", lineno + 1));
+                    warnings.push(format!(
+                        "nanorc:{}: invalid key spec `{key_spec}`",
+                        lineno + 1
+                    ));
                     continue;
                 };
                 let (menu_name, _) = split_first(after);
@@ -123,7 +155,10 @@ pub fn parse(text: &str, options: &mut Options, keymap: &mut KeyMap, warnings: &
                 }
             }
             _ => {
-                warnings.push(format!("nanorc:{}: unrecognized command `{cmd}`", lineno + 1));
+                warnings.push(format!(
+                    "nanorc:{}: unrecognized command `{cmd}`",
+                    lineno + 1
+                ));
             }
         }
     }

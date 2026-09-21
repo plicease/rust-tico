@@ -535,9 +535,13 @@ impl Key {
     pub(crate) fn display_rank(&self) -> (u8, i32) {
         match self {
             Key::Ctrl(c) => (0, *c as i32),
-            Key::CtrlLeft | Key::CtrlRight | Key::CtrlUp | Key::CtrlDown | Key::CtrlHome | Key::CtrlEnd | Key::CtrlDel => {
-                (0, 0)
-            }
+            Key::CtrlLeft
+            | Key::CtrlRight
+            | Key::CtrlUp
+            | Key::CtrlDown
+            | Key::CtrlHome
+            | Key::CtrlEnd
+            | Key::CtrlDel => (0, 0),
             Key::F(n) => (1, *n as i32),
             Key::Meta(c) => (2, *c as i32),
             Key::ShiftMeta(c) => (3, *c as i32),
@@ -560,7 +564,10 @@ impl Key {
         {
             return Some(Key::F(n));
         }
-        if let Some(rest) = spec.strip_prefix("Sh-M-").or_else(|| spec.strip_prefix("sh-m-")) {
+        if let Some(rest) = spec
+            .strip_prefix("Sh-M-")
+            .or_else(|| spec.strip_prefix("sh-m-"))
+        {
             let ch = normalize_letter(rest)?;
             return Some(Key::ShiftMeta(ch));
         }
@@ -616,11 +623,7 @@ fn normalize_meta_char(rest: &str) -> Option<char> {
     if chars.next().is_some() {
         return None;
     }
-    if c == '[' {
-        None
-    } else {
-        Some(c)
-    }
+    if c == '[' { None } else { Some(c) }
 }
 
 /// A binding target: either an [`Action`], or a literal string to type
@@ -642,7 +645,9 @@ pub struct KeyMap {
 
 impl KeyMap {
     pub fn new() -> KeyMap {
-        KeyMap { table: HashMap::new() }
+        KeyMap {
+            table: HashMap::new(),
+        }
     }
 
     pub fn bind(&mut self, menu: Menu, key: Key, binding: Binding) {
@@ -871,7 +876,12 @@ impl KeyMap {
         self.bind(Menu::Replace, K::Meta('B'), Binding::Action(A::Backwards));
         self.bind(Menu::ReplaceWith, K::Ctrl('M'), Binding::Action(A::Replace));
 
-        for &menu in &[Menu::Search, Menu::Replace, Menu::ReplaceWith, Menu::Execute] {
+        for &menu in &[
+            Menu::Search,
+            Menu::Replace,
+            Menu::ReplaceWith,
+            Menu::Execute,
+        ] {
             self.bind(menu, K::Ctrl('P'), Binding::Action(A::Older));
             self.bind(menu, K::Ctrl('N'), Binding::Action(A::Newer));
             // nano also binds the Up/Down arrows themselves to history
@@ -893,7 +903,11 @@ impl KeyMap {
         // prompt code (they read the literal character), not via the keymap.
 
         self.bind(Menu::WriteOut, K::Ctrl('M'), Binding::Action(A::WriteOut));
-        self.bind(Menu::WriteOut, K::Ctrl('Q'), Binding::Action(A::DiscardBuffer));
+        self.bind(
+            Menu::WriteOut,
+            K::Ctrl('Q'),
+            Binding::Action(A::DiscardBuffer),
+        );
         self.bind(Menu::WriteOut, K::Meta('D'), Binding::Action(A::DosFormat));
         self.bind(Menu::WriteOut, K::Meta('M'), Binding::Action(A::MacFormat));
         self.bind(Menu::WriteOut, K::Meta('A'), Binding::Action(A::Append));
@@ -901,7 +915,11 @@ impl KeyMap {
         self.bind(Menu::WriteOut, K::Meta('B'), Binding::Action(A::Backup));
 
         self.bind(Menu::Insert, K::Ctrl('M'), Binding::Action(A::Insert));
-        self.bind(Menu::Insert, K::Meta('F'), Binding::Action(A::FlipNewBuffer));
+        self.bind(
+            Menu::Insert,
+            K::Meta('F'),
+            Binding::Action(A::FlipNewBuffer),
+        );
         self.bind(Menu::Insert, K::Meta('N'), Binding::Action(A::FlipConvert));
         self.bind(Menu::Insert, K::Ctrl('X'), Binding::Action(A::FlipExecute));
 
@@ -910,11 +928,19 @@ impl KeyMap {
         self.bind(Menu::Execute, K::Ctrl('T'), Binding::Action(A::Speller));
         self.bind(Menu::Execute, K::Ctrl('Y'), Binding::Action(A::Linter));
         self.bind(Menu::Execute, K::Ctrl('O'), Binding::Action(A::Formatter));
-        self.bind(Menu::Execute, K::Ctrl('V'), Binding::Action(A::CutRestOfFile));
+        self.bind(
+            Menu::Execute,
+            K::Ctrl('V'),
+            Binding::Action(A::CutRestOfFile),
+        );
         self.bind(Menu::Execute, K::Ctrl('Z'), Binding::Action(A::Suspend));
         self.bind(Menu::Execute, K::Ctrl('J'), Binding::Action(A::FullJustify));
         self.bind(Menu::Execute, K::Ctrl('X'), Binding::Action(A::FlipExecute));
-        self.bind(Menu::Execute, K::Meta('F'), Binding::Action(A::FlipNewBuffer));
+        self.bind(
+            Menu::Execute,
+            K::Meta('F'),
+            Binding::Action(A::FlipNewBuffer),
+        );
         self.bind(Menu::Execute, K::Meta('\\'), Binding::Action(A::FlipPipe));
 
         self.bind(Menu::Help, K::Home, Binding::Action(A::FirstLine));

@@ -15,7 +15,7 @@
 
 mod languages;
 
-pub use languages::{detect, LanguageDef};
+pub use languages::{LanguageDef, detect};
 pub(crate) use languages::{find_by_name, names};
 
 /// Resolve a buffer's language, honoring an optional `-Y`/`--syntax` CLI
@@ -80,8 +80,12 @@ pub fn highlight(text: &str, lang: &LanguageDef) -> Vec<HighlightSpan> {
     if parser.set_language(&language).is_err() {
         return Vec::new();
     }
-    let Some(tree) = parser.parse(text, None) else { return Vec::new() };
-    let Ok(query) = tree_sitter::Query::new(&language, lang.highlights_query) else { return Vec::new() };
+    let Some(tree) = parser.parse(text, None) else {
+        return Vec::new();
+    };
+    let Ok(query) = tree_sitter::Query::new(&language, lang.highlights_query) else {
+        return Vec::new();
+    };
 
     let mut spans = Vec::new();
     let mut cursor = tree_sitter::QueryCursor::new();
@@ -90,7 +94,11 @@ pub fn highlight(text: &str, lang: &LanguageDef) -> Vec<HighlightSpan> {
         let capture = m.captures[*capture_ix];
         let name = query.capture_names()[capture.index as usize];
         if let Some(kind) = bucket_capture(name) {
-            spans.push(HighlightSpan { start: capture.node.start_byte(), end: capture.node.end_byte(), kind });
+            spans.push(HighlightSpan {
+                start: capture.node.start_byte(),
+                end: capture.node.end_byte(),
+                kind,
+            });
         }
     }
 
@@ -129,7 +137,9 @@ fn inject_heredocs(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<Highlig
     // structural link in the tree between a start identifier and its body.
     for (start_id, body) in starts.iter().zip(bodies.iter()) {
         let raw = &text[start_id.start_byte()..start_id.end_byte()];
-        let Some(lang) = languages::find_by_name(heredoc_language_name(raw)) else { continue };
+        let Some(lang) = languages::find_by_name(heredoc_language_name(raw)) else {
+            continue;
+        };
 
         // The body node includes its own closing terminator line (as a
         // `heredoc_end_identifier` child); only the text before that should
@@ -178,7 +188,11 @@ fn heredoc_language_name(raw: &str) -> &str {
     s
 }
 
-fn collect_by_kind<'a>(node: tree_sitter::Node<'a>, kind: &str, out: &mut Vec<tree_sitter::Node<'a>>) {
+fn collect_by_kind<'a>(
+    node: tree_sitter::Node<'a>,
+    kind: &str,
+    out: &mut Vec<tree_sitter::Node<'a>>,
+) {
     if node.kind() == kind {
         out.push(node);
     }
@@ -204,12 +218,19 @@ fn add_numeric_fallback(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<Hi
         if let Ok(text) = std::str::from_utf8(&bytes[start..end])
             && looks_numeric(text)
         {
-            spans.push(HighlightSpan { start, end, kind: HighlightKind::Number });
+            spans.push(HighlightSpan {
+                start,
+                end,
+                kind: HighlightKind::Number,
+            });
         }
     }
 }
 
-fn collect_leaves<'a>(cursor: &mut tree_sitter::TreeCursor<'a>, out: &mut Vec<tree_sitter::Node<'a>>) {
+fn collect_leaves<'a>(
+    cursor: &mut tree_sitter::TreeCursor<'a>,
+    out: &mut Vec<tree_sitter::Node<'a>>,
+) {
     loop {
         if cursor.node().child_count() == 0 {
             out.push(cursor.node());
@@ -228,7 +249,10 @@ fn looks_numeric(text: &str) -> bool {
     if t.is_empty() {
         return false;
     }
-    let t = t.strip_prefix('-').or_else(|| t.strip_prefix('+')).unwrap_or(t);
+    let t = t
+        .strip_prefix('-')
+        .or_else(|| t.strip_prefix('+'))
+        .unwrap_or(t);
     if t.is_empty() {
         return false;
     }
@@ -270,8 +294,8 @@ fn bucket_capture(name: &str) -> Option<HighlightKind> {
         "string" | "character" | "char" | "escape" => HighlightKind::String,
         "number" | "float" => HighlightKind::Number,
         "boolean" | "constant" => HighlightKind::Constant,
-        "keyword" | "conditional" | "repeat" | "storageclass" | "storage" | "include" | "exception"
-        | "label" | "preproc" => HighlightKind::Keyword,
+        "keyword" | "conditional" | "repeat" | "storageclass" | "storage" | "include"
+        | "exception" | "label" | "preproc" => HighlightKind::Keyword,
         "function" | "_function" | "method" | "constructor" => HighlightKind::Function,
         "type" | "_type" | "interface" => HighlightKind::Type,
         "variable" | "parameter" | "property" | "field" | "_name" => HighlightKind::Variable,
@@ -298,7 +322,10 @@ mod tests {
         assert_eq!(lang.name, name, "detected wrong language for {path}");
         let spans = highlight(source, lang);
         if want_at_least_one {
-            assert!(!spans.is_empty(), "{name}: expected at least one highlight span, got none");
+            assert!(
+                !spans.is_empty(),
+                "{name}: expected at least one highlight span, got none"
+            );
         }
     }
 
@@ -323,15 +350,15 @@ mod tests {
         let select_start = src.find("SELECT").unwrap();
         let from_start = src.find("FROM").unwrap();
         assert!(
-            spans
-                .iter()
-                .any(|s| s.kind == HighlightKind::Keyword && s.start == select_start && s.end == select_start + 6),
+            spans.iter().any(|s| s.kind == HighlightKind::Keyword
+                && s.start == select_start
+                && s.end == select_start + 6),
             "expected a Keyword span for SELECT at {select_start}, got {spans:?}"
         );
         assert!(
-            spans
-                .iter()
-                .any(|s| s.kind == HighlightKind::Keyword && s.start == from_start && s.end == from_start + 4),
+            spans.iter().any(|s| s.kind == HighlightKind::Keyword
+                && s.start == from_start
+                && s.end == from_start + 4),
             "expected a Keyword span for FROM at {from_start}, got {spans:?}"
         );
     }
@@ -345,25 +372,32 @@ mod tests {
         // be covered by the outer Perl query's plain @string capture.
         let body_start = src.find("some text").unwrap();
         assert!(
-            spans.iter().any(|s| s.kind == HighlightKind::String && s.start <= body_start && s.end >= body_start + 9),
+            spans.iter().any(|s| s.kind == HighlightKind::String
+                && s.start <= body_start
+                && s.end >= body_start + 9),
             "expected the heredoc body to remain a String span, got {spans:?}"
         );
     }
 
     #[test]
     fn override_forces_language_regardless_of_filename() {
-        let lang = detect_with_override(Some(std::path::Path::new("foo.txt")), "", Some("perl")).unwrap();
+        let lang =
+            detect_with_override(Some(std::path::Path::new("foo.txt")), "", Some("perl")).unwrap();
         assert_eq!(lang.name, "perl");
     }
 
     #[test]
     fn override_none_disables_detection() {
-        assert!(detect_with_override(Some(std::path::Path::new("foo.pl")), "", Some("none")).is_none());
+        assert!(
+            detect_with_override(Some(std::path::Path::new("foo.pl")), "", Some("none")).is_none()
+        );
     }
 
     #[test]
     fn override_unknown_name_falls_back_to_detection() {
-        let lang = detect_with_override(Some(std::path::Path::new("foo.pl")), "", Some("boguslang")).unwrap();
+        let lang =
+            detect_with_override(Some(std::path::Path::new("foo.pl")), "", Some("boguslang"))
+                .unwrap();
         assert_eq!(lang.name, "perl");
     }
 
@@ -381,7 +415,8 @@ mod tests {
     fn perl_extensions() {
         for ext in ["pl", "pm", "t", "xs"] {
             let path = format!("foo.{ext}");
-            let lang = detect(Some(std::path::Path::new(&path)), "").expect("perl file should be detected");
+            let lang = detect(Some(std::path::Path::new(&path)), "")
+                .expect("perl file should be detected");
             assert_eq!(lang.name, "perl");
         }
     }
@@ -389,12 +424,28 @@ mod tests {
     #[test]
     fn all_languages_query_compiles_and_highlights() {
         let cases: &[(&str, &str, &str)] = &[
-            ("c", "a.c", "#include <stdio.h>\nint main() { return 0; } // hi\n"),
-            ("cpp", "a.cpp", "#include <iostream>\nclass Foo { public: int x; }; // hi\n"),
+            (
+                "c",
+                "a.c",
+                "#include <stdio.h>\nint main() { return 0; } // hi\n",
+            ),
+            (
+                "cpp",
+                "a.cpp",
+                "#include <iostream>\nclass Foo { public: int x; }; // hi\n",
+            ),
             ("rust", "a.rs", "fn main() { let x = 1; } // hi\n"),
             ("go", "a.go", "package main\nfunc main() { x := 1 } // hi\n"),
-            ("python", "a.py", "def foo():\n    x = 1  # hi\n    return x\n"),
-            ("bash", "a.sh", "#!/bin/bash\nfoo() { echo hi; } # comment\n"),
+            (
+                "python",
+                "a.py",
+                "def foo():\n    x = 1  # hi\n    return x\n",
+            ),
+            (
+                "bash",
+                "a.sh",
+                "#!/bin/bash\nfoo() { echo hi; } # comment\n",
+            ),
             ("json", "a.json", "{\"a\": 1, \"b\": \"c\"}\n"),
             ("yaml", "a.yaml", "a: 1\nb: \"c\" # hi\n"),
             ("toml", "a.toml", "a = 1\nb = \"c\" # hi\n"),
@@ -402,13 +453,25 @@ mod tests {
             ("css", "a.css", "/* hi */ .a { color: red; }\n"),
             ("sql", "a.sql", "SELECT * FROM foo WHERE x = 1; -- hi\n"),
             ("javascript", "a.js", "function foo() { return 1; } // hi\n"),
-            ("typescript", "a.ts", "function foo(): number { return 1; } // hi\n"),
+            (
+                "typescript",
+                "a.ts",
+                "function foo(): number { return 1; } // hi\n",
+            ),
             ("java", "a.java", "class Foo { void bar() {} } // hi\n"),
             ("ruby", "a.rb", "def foo\n  1 # hi\nend\n"),
-            ("php", "a.php", "<?php\nfunction foo() { return 1; } // hi\n"),
+            (
+                "php",
+                "a.php",
+                "<?php\nfunction foo() { return 1; } // hi\n",
+            ),
             ("csharp", "a.cs", "class Foo { void Bar() {} } // hi\n"),
             ("make", "Makefile", "all:\n\techo hi # comment\n"),
-            ("fortran", "a.f90", "program hi\n  integer :: x = 1\nend program hi\n"),
+            (
+                "fortran",
+                "a.f90",
+                "program hi\n  integer :: x = 1\nend program hi\n",
+            ),
             ("markdown", "a.md", "# Title\n\nSome *text*.\n"),
             ("toml", "Cargo.toml", "[package]\nname = \"x\"\n"),
             ("haskell", "a.hs", "main = putStrLn \"hi\" -- comment\n"),
@@ -419,13 +482,25 @@ mod tests {
             ("xml", "a.xml", "<!-- hi --><root><a>1</a></root>\n"),
             ("diff", "a.diff", "--- a\n+++ b\n@@ -1 +1 @@\n-x\n+y\n"),
             ("ini", "a.ini", "[section]\n; comment\nkey = value\n"),
-            ("elixir", "a.ex", "defmodule Foo do\n  def bar, do: 1 # hi\nend\n"),
+            (
+                "elixir",
+                "a.ex",
+                "defmodule Foo do\n  def bar, do: 1 # hi\nend\n",
+            ),
             ("elm", "a.elm", "foo x = x + 1 -- hi\n"),
             ("zig", "a.zig", "pub fn main() void { } // hi\n"),
             ("dart", "a.dart", "void main() { print('hi'); } // hi\n"),
             ("scss", "a.scss", "// hi\n.a { color: red; }\n"),
-            ("proto", "a.proto", "// hi\nmessage Foo { string bar = 1; }\n"),
-            ("cmake", "CMakeLists.txt", "# hi\nadd_executable(foo bar.c)\n"),
+            (
+                "proto",
+                "a.proto",
+                "// hi\nmessage Foo { string bar = 1; }\n",
+            ),
+            (
+                "cmake",
+                "CMakeLists.txt",
+                "# hi\nadd_executable(foo bar.c)\n",
+            ),
             ("nix", "a.nix", "# hi\n{ foo = 1; }\n"),
             ("vim", "a.vim", "\" hi\nlet g:foo = 1\n"),
             ("lua", "a.lua", "-- hi\nfunction foo() return 1 end\n"),

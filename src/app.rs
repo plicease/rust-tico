@@ -11,17 +11,26 @@ use crate::options::Options;
 pub enum PromptKind {
     WhereIs,
     Replace1, // search term
-    Replace2 { search: String }, // replacement term
+    Replace2 {
+        search: String,
+    }, // replacement term
     ReplaceConfirm(ReplaceLoopState),
     GotoLine,
-    WriteOut { exiting: bool },
-    Exit { discard_and_quit: bool },
+    WriteOut {
+        exiting: bool,
+    },
+    Exit {
+        discard_and_quit: bool,
+    },
     ExternalChangeConflict,
     /// Someone else appears to be editing this file (a vim/nano-style lock
     /// file exists for it). `lock_path` is where to write our own lock if
     /// the user chooses to open anyway; `target` is the display path
     /// recorded inside it.
-    LockConflict { lock_path: std::path::PathBuf, target: String },
+    LockConflict {
+        lock_path: std::path::PathBuf,
+        target: String,
+    },
     Help,
 }
 
@@ -67,10 +76,23 @@ pub struct Prompt {
 }
 
 impl Prompt {
-    pub fn new(kind: PromptKind, menu: Menu, label: impl Into<String>, input: impl Into<String>) -> Prompt {
+    pub fn new(
+        kind: PromptKind,
+        menu: Menu,
+        label: impl Into<String>,
+        input: impl Into<String>,
+    ) -> Prompt {
         let input = input.into();
         let cursor = input.chars().count();
-        Prompt { kind, menu, label: label.into(), input, cursor, history_pos: None, saved_input: None }
+        Prompt {
+            kind,
+            menu,
+            label: label.into(),
+            input,
+            cursor,
+            history_pos: None,
+            saved_input: None,
+        }
     }
 }
 
@@ -82,14 +104,22 @@ pub enum Mode {
     /// `return_to` is the prompt to restore on close, when help was opened
     /// from one (e.g. `^G` inside a Search prompt) — `None` means it was
     /// opened from the main editing window, so closing goes back there.
-    Help { lines: Vec<String>, top: usize, return_to: Option<Box<Prompt>> },
+    Help {
+        lines: Vec<String>,
+        top: usize,
+        return_to: Option<Box<Prompt>>,
+    },
     /// A full-screen, scrollable diff viewer — currently used only for
     /// previewing a three-way merge (`^X` reload-conflict -> `[M]erge`)
     /// before applying it, since the diff can easily run to many lines and
     /// doesn't fit in a one-line prompt label (cramming it in there, with
     /// embedded newlines, used to scramble the display). `top` is the
     /// first scrolled-to body line (index into `lines[1..]`).
-    Diff { lines: Vec<String>, top: usize, outcome: DiffOutcome },
+    Diff {
+        lines: Vec<String>,
+        top: usize,
+        outcome: DiffOutcome,
+    },
     Quit,
 }
 
@@ -173,10 +203,16 @@ impl Editor {
         // `set casesensitive` / `set regexp` in nanorc/ticorc set the
         // default search mode, same as nano; there's no CLI flag for
         // either (nano doesn't have one), only the config item.
-        let search =
-            SearchState { case_sensitive: options.casesensitive, use_regex: options.regexp, ..SearchState::default() };
-        let history =
-            if options.historylog { crate::history::HistoryStore::load() } else { crate::history::HistoryStore::new() };
+        let search = SearchState {
+            case_sensitive: options.casesensitive,
+            use_regex: options.regexp,
+            ..SearchState::default()
+        };
+        let history = if options.historylog {
+            crate::history::HistoryStore::load()
+        } else {
+            crate::history::HistoryStore::new()
+        };
         Editor {
             buffers: vec![Buffer::empty()],
             current: 0,
@@ -236,7 +272,8 @@ impl Editor {
     fn set_spotlight_timed(&mut self, pos: Pos, len: usize) {
         self.spotlight = Some((pos, len));
         let ms = if self.options.quickblank { 800 } else { 1500 };
-        self.spotlight_deadline = Some(std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        self.spotlight_deadline =
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(ms));
     }
 
     /// Highlight the match currently up for replace confirmation; persists
@@ -331,7 +368,8 @@ impl Editor {
         let tabsize = self.options.tabsize as usize;
         let width = self.screen_cols.saturating_sub(self.gutter_width());
         let buf = self.buf_mut();
-        let cursor_col = crate::buffer::display_width(&buf.line(buf.cursor.line), buf.cursor.col, tabsize);
+        let cursor_col =
+            crate::buffer::display_width(&buf.line(buf.cursor.line), buf.cursor.col, tabsize);
         let left = buf.left_col;
         buf.left_col = if width <= 2 * CUSHION + 1 {
             // Too narrow for a cushioned scroll; just keep the cursor in
@@ -376,7 +414,11 @@ impl Editor {
         match action {
             Help => {
                 let lines = crate::help::build(Menu::Main, &self.keymap, self.screen_cols);
-                self.mode = Mode::Help { lines, top: 0, return_to: None };
+                self.mode = Mode::Help {
+                    lines,
+                    top: 0,
+                    return_to: None,
+                };
             }
             Cancel => {
                 self.mode = Mode::Editing;
@@ -546,7 +588,9 @@ impl Editor {
     fn do_enter(&mut self) {
         let indent = if self.options.autoindent {
             let line = self.buf().line(self.buf().cursor.line);
-            line.chars().take_while(|c| *c == ' ' || *c == '\t').collect::<String>()
+            line.chars()
+                .take_while(|c| *c == ' ' || *c == '\t')
+                .collect::<String>()
         } else {
             String::new()
         };
@@ -586,7 +630,11 @@ impl Editor {
             let line = self.buf().cursor.line;
             let line_len = self.buf().line(line).chars().count();
             let has_next = line + 1 < self.buf().line_count();
-            let end = if has_next { Pos::new(line + 1, 0) } else { Pos::new(line, line_len) };
+            let end = if has_next {
+                Pos::new(line + 1, 0)
+            } else {
+                Pos::new(line, line_len)
+            };
             let start = Pos::new(line, 0);
             let text = self.buf_mut().delete_range(start, end);
             if self.cut_was_consecutive {
@@ -789,11 +837,17 @@ impl Editor {
     fn begin_exit(&mut self) {
         if self.buf().modified {
             self.mode = Mode::Prompt(Prompt {
-                kind: PromptKind::Exit { discard_and_quit: false },
+                kind: PromptKind::Exit {
+                    discard_and_quit: false,
+                },
                 menu: Menu::YesNo,
                 label: format!(
                     "Save modified buffer{}? ",
-                    self.buf().path.as_ref().map(|p| format!(" ({})", p.display())).unwrap_or_default()
+                    self.buf()
+                        .path
+                        .as_ref()
+                        .map(|p| format!(" ({})", p.display()))
+                        .unwrap_or_default()
                 ),
                 input: String::new(),
                 cursor: 0,
@@ -836,12 +890,20 @@ impl Editor {
             crate::fileio::MergeResult::Clean { text, diff } => {
                 let mut lines = vec!["Merge preview -- [A]pply  [C]ancel".to_string()];
                 lines.extend(diff.lines().map(str::to_string));
-                self.mode = Mode::Diff { lines, top: 0, outcome: DiffOutcome::ApplyMerge { merged_text: text } };
+                self.mode = Mode::Diff {
+                    lines,
+                    top: 0,
+                    outcome: DiffOutcome::ApplyMerge { merged_text: text },
+                };
             }
             crate::fileio::MergeResult::Conflict { diff } => {
                 let mut lines = vec!["Could not merge automatically -- press any key".to_string()];
                 lines.extend(diff.lines().map(str::to_string));
-                self.mode = Mode::Diff { lines, top: 0, outcome: DiffOutcome::Conflict };
+                self.mode = Mode::Diff {
+                    lines,
+                    top: 0,
+                    outcome: DiffOutcome::Conflict,
+                };
             }
         }
     }
@@ -916,7 +978,12 @@ impl Editor {
         let replace_all = matches!(choice, ReplaceChoice::All);
         loop {
             let next_from = if do_replace {
-                let expanded = self.expand_replacement(&state.search, &state.replacement, state.match_pos, state.match_len);
+                let expanded = self.expand_replacement(
+                    &state.search,
+                    &state.replacement,
+                    state.match_pos,
+                    state.match_len,
+                );
                 let end = Pos::new(state.match_pos.line, state.match_pos.col + state.match_len);
                 self.buf_mut().delete_range(state.match_pos, end);
                 self.buf_mut().cursor = state.match_pos;
@@ -927,7 +994,10 @@ impl Editor {
             } else {
                 // Skip past this match (at least one character, so a
                 // zero-length regex match can't be found again forever).
-                Pos::new(state.match_pos.line, state.match_pos.col + state.match_len.max(1))
+                Pos::new(
+                    state.match_pos.line,
+                    state.match_pos.col + state.match_len.max(1),
+                )
             };
             let found = find_next_match_for_replace(
                 self.buf(),
@@ -991,16 +1061,30 @@ impl Editor {
     /// uses the replacement text as-is, with no backreference processing —
     /// nano does the same (`replace_line()` only calls `replace_regexp()`
     /// when `ISSET(USE_REGEXP)`).
-    fn expand_replacement(&self, search: &str, replacement: &str, match_pos: Pos, match_len: usize) -> String {
+    fn expand_replacement(
+        &self,
+        search: &str,
+        replacement: &str,
+        match_pos: Pos,
+        match_len: usize,
+    ) -> String {
         if !self.search.use_regex {
             return replacement.to_string();
         }
-        let pat = if self.search.case_sensitive { search.to_string() } else { format!("(?i){search}") };
-        let Ok(re) = regex::Regex::new(&pat) else { return replacement.to_string() };
+        let pat = if self.search.case_sensitive {
+            search.to_string()
+        } else {
+            format!("(?i){search}")
+        };
+        let Ok(re) = regex::Regex::new(&pat) else {
+            return replacement.to_string();
+        };
         let line_chars: Vec<char> = self.buf().line(match_pos.line).chars().collect();
         let end = (match_pos.col + match_len).min(line_chars.len());
         let matched_text: String = line_chars[match_pos.col..end].iter().collect();
-        let Some(caps) = re.captures(&matched_text) else { return replacement.to_string() };
+        let Some(caps) = re.captures(&matched_text) else {
+            return replacement.to_string();
+        };
         expand_backreferences(replacement, &caps)
     }
 
@@ -1010,7 +1094,14 @@ impl Editor {
         }
         let text = self.buf().to_string();
         let hay: Vec<&str> = text.split_inclusive('\n').collect();
-        let found = find_in_lines(&hay, self.buf().cursor, pattern, backwards, self.search.case_sensitive, self.search.use_regex);
+        let found = find_in_lines(
+            &hay,
+            self.buf().cursor,
+            pattern,
+            backwards,
+            self.search.case_sensitive,
+            self.search.use_regex,
+        );
         match found {
             Some((pos, len)) => {
                 self.buf_mut().cursor = pos;
@@ -1107,7 +1198,11 @@ fn expand_backreferences(template: &str, caps: &regex::Captures) -> String {
     let mut out = String::new();
     let mut i = 0;
     while i < chars.len() {
-        if chars[i] == '\\' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit() && chars[i + 1] != '0' {
+        if chars[i] == '\\'
+            && i + 1 < chars.len()
+            && chars[i + 1].is_ascii_digit()
+            && chars[i + 1] != '0'
+        {
             let n = chars[i + 1].to_digit(10).unwrap() as usize;
             if n < caps.len() {
                 if let Some(m) = caps.get(n) {
@@ -1139,7 +1234,11 @@ fn find_next_match_for_replace(
     use_regex: bool,
 ) -> Result<Option<(Pos, usize, bool)>, String> {
     let re = if use_regex {
-        let pat = if case_sensitive { pattern.to_string() } else { format!("(?i){pattern}") };
+        let pat = if case_sensitive {
+            pattern.to_string()
+        } else {
+            format!("(?i){pattern}")
+        };
         Some(regex::Regex::new(&pat).map_err(|e| e.to_string())?)
     } else {
         None
@@ -1147,7 +1246,12 @@ fn find_next_match_for_replace(
     let matches_at = |line: &str| -> Vec<(usize, usize)> {
         if let Some(re) = &re {
             re.find_iter(line)
-                .map(|m| (line[..m.start()].chars().count(), line[m.start()..m.end()].chars().count()))
+                .map(|m| {
+                    (
+                        line[..m.start()].chars().count(),
+                        line[m.start()..m.end()].chars().count(),
+                    )
+                })
                 .collect()
         } else if case_sensitive {
             line.char_indices()
@@ -1160,7 +1264,12 @@ fn find_next_match_for_replace(
             lower_line
                 .char_indices()
                 .filter(|(i, _)| lower_line[*i..].starts_with(&lower_needle))
-                .map(|(i, _)| (lower_line[..i].chars().count(), lower_needle.chars().count()))
+                .map(|(i, _)| {
+                    (
+                        lower_line[..i].chars().count(),
+                        lower_needle.chars().count(),
+                    )
+                })
                 .collect()
         }
     };
@@ -1197,7 +1306,11 @@ fn find_in_lines(
     use_regex: bool,
 ) -> Option<(Pos, usize)> {
     let re = if use_regex {
-        let pat = if case_sensitive { pattern.to_string() } else { format!("(?i){pattern}") };
+        let pat = if case_sensitive {
+            pattern.to_string()
+        } else {
+            format!("(?i){pattern}")
+        };
         regex::Regex::new(&pat).ok()
     } else {
         None
@@ -1205,7 +1318,12 @@ fn find_in_lines(
     let matches_at = |line: &str, needle: &str| -> Vec<(usize, usize)> {
         if let Some(re) = &re {
             re.find_iter(line)
-                .map(|m| (line[..m.start()].chars().count(), line[m.start()..m.end()].chars().count()))
+                .map(|m| {
+                    (
+                        line[..m.start()].chars().count(),
+                        line[m.start()..m.end()].chars().count(),
+                    )
+                })
                 .collect()
         } else if case_sensitive {
             line.char_indices()
@@ -1218,7 +1336,12 @@ fn find_in_lines(
             lower_line
                 .char_indices()
                 .filter(|(i, _)| lower_line[*i..].starts_with(&lower_needle))
-                .map(|(i, _)| (lower_line[..i].chars().count(), lower_needle.chars().count()))
+                .map(|(i, _)| {
+                    (
+                        lower_line[..i].chars().count(),
+                        lower_needle.chars().count(),
+                    )
+                })
                 .collect()
         }
     };
@@ -1248,8 +1371,6 @@ fn find_in_lines(
     }
     None
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -1345,7 +1466,11 @@ mod tests {
         ed.buf_mut().cursor = Pos::new(0, 0);
         ed.buf_mut().top_line = 0;
         ed.run_search("line3".to_string().as_str(), false); // well within the first screenful
-        assert_eq!(ed.buf().top_line, 0, "already-visible match shouldn't move the viewport");
+        assert_eq!(
+            ed.buf().top_line,
+            0,
+            "already-visible match shouldn't move the viewport"
+        );
     }
 
     #[test]
@@ -1364,7 +1489,11 @@ mod tests {
         ed.buf_mut().cursor = Pos::new(0, 0);
         ed.begin_replace_loop("foo".to_string(), "X".to_string());
         // First match should be found and awaiting confirmation.
-        let Mode::Prompt(Prompt { kind: PromptKind::ReplaceConfirm(state), .. }) = &ed.mode else {
+        let Mode::Prompt(Prompt {
+            kind: PromptKind::ReplaceConfirm(state),
+            ..
+        }) = &ed.mode
+        else {
             panic!("expected a replace-confirm prompt");
         };
         assert_eq!(state.match_pos, Pos::new(0, 0));
@@ -1380,18 +1509,27 @@ mod tests {
         ed.buf_mut().cursor = Pos::new(0, 0);
         ed.begin_replace_loop("cat".to_string(), "dog".to_string());
         let state = match &ed.mode {
-            Mode::Prompt(Prompt { kind: PromptKind::ReplaceConfirm(s), .. }) => s.clone(),
+            Mode::Prompt(Prompt {
+                kind: PromptKind::ReplaceConfirm(s),
+                ..
+            }) => s.clone(),
             _ => panic!("expected prompt"),
         };
         ed.replace_choice(state, ReplaceChoice::No); // skip first "cat"
         let state = match &ed.mode {
-            Mode::Prompt(Prompt { kind: PromptKind::ReplaceConfirm(s), .. }) => s.clone(),
+            Mode::Prompt(Prompt {
+                kind: PromptKind::ReplaceConfirm(s),
+                ..
+            }) => s.clone(),
             _ => panic!("expected prompt after No"),
         };
         ed.replace_choice(state, ReplaceChoice::Yes); // replace second "cat"
         assert_eq!(ed.buf().to_string(), "cat dog cat");
         let state = match &ed.mode {
-            Mode::Prompt(Prompt { kind: PromptKind::ReplaceConfirm(s), .. }) => s.clone(),
+            Mode::Prompt(Prompt {
+                kind: PromptKind::ReplaceConfirm(s),
+                ..
+            }) => s.clone(),
             _ => panic!("expected prompt after Yes"),
         };
         ed.replace_choice(state, ReplaceChoice::Cancel);
@@ -1406,7 +1544,10 @@ mod tests {
         ed.search.use_regex = true;
         ed.begin_replace_loop(r"(\d+)-(\d+)-(\d+)".to_string(), r"\3/\2/\1".to_string());
         let state = match &ed.mode {
-            Mode::Prompt(Prompt { kind: PromptKind::ReplaceConfirm(s), .. }) => s.clone(),
+            Mode::Prompt(Prompt {
+                kind: PromptKind::ReplaceConfirm(s),
+                ..
+            }) => s.clone(),
             _ => panic!("expected prompt"),
         };
         ed.replace_choice(state, ReplaceChoice::Yes);
@@ -1421,7 +1562,10 @@ mod tests {
         ed.buf_mut().cursor = Pos::new(0, 4); // at the second 'x'
         ed.begin_replace_loop("x".to_string(), "Z".to_string());
         let state = match &ed.mode {
-            Mode::Prompt(Prompt { kind: PromptKind::ReplaceConfirm(s), .. }) => s.clone(),
+            Mode::Prompt(Prompt {
+                kind: PromptKind::ReplaceConfirm(s),
+                ..
+            }) => s.clone(),
             _ => panic!("expected prompt"),
         };
         assert_eq!(state.match_pos, Pos::new(0, 4));
@@ -1444,7 +1588,12 @@ mod tests {
         ed.search.use_regex = true;
         ed.begin_replace_loop("(unclosed".to_string(), "y".to_string());
         assert!(matches!(ed.mode, Mode::Editing));
-        assert!(ed.status.as_deref().unwrap_or("").starts_with("Invalid regex"));
+        assert!(
+            ed.status
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("Invalid regex")
+        );
     }
 
     #[test]
@@ -1468,11 +1617,15 @@ mod tests {
             ed.execute(Action::Right);
         }
         assert_eq!(ed.buf().cursor.col, 65);
-        assert!(ed.buf().left_col > 0, "cursor at column 65 in a 60-wide view should have scrolled");
+        assert!(
+            ed.buf().left_col > 0,
+            "cursor at column 65 in a 60-wide view should have scrolled"
+        );
         // The cursor itself must still land within the visible window
         // (leaving room for the '<' marker its scroll implies).
         assert!(
-            ed.buf().cursor.col > ed.buf().left_col && ed.buf().cursor.col < ed.buf().left_col + ed.screen_cols,
+            ed.buf().cursor.col > ed.buf().left_col
+                && ed.buf().cursor.col < ed.buf().left_col + ed.screen_cols,
             "cursor (col={}) should be inside the scrolled window (left_col={})",
             ed.buf().cursor.col,
             ed.buf().left_col
@@ -1503,4 +1656,3 @@ mod tests {
         }
     }
 }
-

@@ -22,7 +22,9 @@ pub fn path_writable(path: &Path) -> bool {
     // No portable equivalent of access(W_OK) wired up yet for non-Unix
     // targets; fall back to the mode-bit check, which at least catches the
     // common "no write bit at all" case.
-    std::fs::metadata(path).map(|m| !m.permissions().readonly()).unwrap_or(true)
+    std::fs::metadata(path)
+        .map(|m| !m.permissions().readonly())
+        .unwrap_or(true)
 }
 
 fn hash_content(s: &str) -> u64 {
@@ -93,9 +95,15 @@ pub enum ExternalChange {
 }
 
 pub fn check_external_change(buffer: &Buffer) -> ExternalChange {
-    let Some(path) = &buffer.path else { return ExternalChange::Unchanged };
-    let Some(known) = &buffer.disk_state else { return ExternalChange::Unchanged };
-    let Some(current) = stat_disk_state(path) else { return ExternalChange::Unchanged };
+    let Some(path) = &buffer.path else {
+        return ExternalChange::Unchanged;
+    };
+    let Some(known) = &buffer.disk_state else {
+        return ExternalChange::Unchanged;
+    };
+    let Some(current) = stat_disk_state(path) else {
+        return ExternalChange::Unchanged;
+    };
     if current.content_hash == known.content_hash {
         return ExternalChange::Unchanged;
     }
@@ -170,13 +178,19 @@ pub fn three_way_merge(base: &str, ours: &str, theirs: &str) -> MergeResult {
         for op in ops {
             match op {
                 similar::DiffOp::Equal { .. } => {}
-                similar::DiffOp::Delete { old_index, old_len, .. } => {
+                similar::DiffOp::Delete {
+                    old_index, old_len, ..
+                } => {
                     changes.push(Change {
                         base_range: *old_index..(*old_index + *old_len),
                         replacement: Vec::new(),
                     });
                 }
-                similar::DiffOp::Insert { old_index, new_index, new_len } => {
+                similar::DiffOp::Insert {
+                    old_index,
+                    new_index,
+                    new_len,
+                } => {
                     changes.push(Change {
                         base_range: *old_index..*old_index,
                         replacement: new_lines[*new_index..*new_index + *new_len]
@@ -185,7 +199,12 @@ pub fn three_way_merge(base: &str, ours: &str, theirs: &str) -> MergeResult {
                             .collect(),
                     });
                 }
-                similar::DiffOp::Replace { old_index, old_len, new_index, new_len } => {
+                similar::DiffOp::Replace {
+                    old_index,
+                    old_len,
+                    new_index,
+                    new_len,
+                } => {
                     changes.push(Change {
                         base_range: *old_index..(*old_index + *old_len),
                         replacement: new_lines[*new_index..*new_index + *new_len]

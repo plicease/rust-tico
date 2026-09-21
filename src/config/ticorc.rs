@@ -78,7 +78,12 @@ fn parse_main_line(line: &str, options: &mut Options, warnings: &mut Vec<String>
         return;
     }
     let value = extract_value(value_part);
-    if let Err(e) = settings::apply(options, &name.to_ascii_lowercase(), value.as_deref(), enable) {
+    if let Err(e) = settings::apply(
+        options,
+        &name.to_ascii_lowercase(),
+        value.as_deref(),
+        enable,
+    ) {
         warnings.push(format!("ticorc:{}: {}", lineno + 1, e));
     }
 }
@@ -97,9 +102,17 @@ fn extract_value(rest: &str) -> Option<String> {
     }
 }
 
-fn parse_keybinding_line(line: &str, keymap: &mut KeyMap, warnings: &mut Vec<String>, lineno: usize) {
+fn parse_keybinding_line(
+    line: &str,
+    keymap: &mut KeyMap,
+    warnings: &mut Vec<String>,
+    lineno: usize,
+) {
     let Some(eq) = line.find('=') else {
-        warnings.push(format!("ticorc:{}: expected `key = function`: `{line}`", lineno + 1));
+        warnings.push(format!(
+            "ticorc:{}: expected `key = function`: `{line}`",
+            lineno + 1
+        ));
         return;
     };
     let lhs = line[..eq].trim();
@@ -110,7 +123,10 @@ fn parse_keybinding_line(line: &str, keymap: &mut KeyMap, warnings: &mut Vec<Str
         None => ("main", lhs),
     };
     let Some(key) = Key::parse(key_spec) else {
-        warnings.push(format!("ticorc:{}: invalid key spec `{key_spec}`", lineno + 1));
+        warnings.push(format!(
+            "ticorc:{}: invalid key spec `{key_spec}`",
+            lineno + 1
+        ));
         return;
     };
 
@@ -126,7 +142,10 @@ fn parse_keybinding_line(line: &str, keymap: &mut KeyMap, warnings: &mut Vec<Str
     }
 
     if !crate::keymap::is_rebindable(&key) {
-        warnings.push(format!("ticorc:{}: `{key_spec}` cannot be rebound", lineno + 1));
+        warnings.push(format!(
+            "ticorc:{}: `{key_spec}` cannot be rebound",
+            lineno + 1
+        ));
         return;
     }
 

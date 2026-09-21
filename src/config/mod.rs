@@ -70,7 +70,11 @@ pub fn load(explicit_rcfile: Option<&str>, ignore_rcfiles: bool) -> LoadedConfig
     let mut warnings = Vec::new();
 
     if ignore_rcfiles {
-        return LoadedConfig { options, keymap, warnings };
+        return LoadedConfig {
+            options,
+            keymap,
+            warnings,
+        };
     }
 
     if let Some(path) = explicit_rcfile {
@@ -102,5 +106,9 @@ pub fn load(explicit_rcfile: Option<&str>, ignore_rcfiles: bool) -> LoadedConfig
         ticorc::parse(&text, &mut options, &mut keymap, &mut warnings);
     }
 
-    LoadedConfig { options, keymap, warnings }
+    LoadedConfig {
+        options,
+        keymap,
+        warnings,
+    }
 }

@@ -139,7 +139,9 @@ impl Buffer {
     }
 
     fn char_idx(&self, pos: Pos) -> usize {
-        let line_start = self.rope.line_to_char(pos.line.min(self.rope.len_lines().saturating_sub(1)));
+        let line_start = self
+            .rope
+            .line_to_char(pos.line.min(self.rope.len_lines().saturating_sub(1)));
         line_start + pos.col
     }
 
@@ -249,9 +251,12 @@ impl Buffer {
     }
 
     pub fn undo(&mut self) -> bool {
-        let Some(edit) = self.undo_stack.pop() else { return false };
+        let Some(edit) = self.undo_stack.pop() else {
+            return false;
+        };
         let inserted_len = edit.inserted.chars().count();
-        self.rope.remove(edit.start_char..edit.start_char + inserted_len);
+        self.rope
+            .remove(edit.start_char..edit.start_char + inserted_len);
         self.rope.insert(edit.start_char, &edit.removed);
         self.cursor = edit.cursor_before;
         self.redo_stack.push(edit);
@@ -261,9 +266,12 @@ impl Buffer {
     }
 
     pub fn redo(&mut self) -> bool {
-        let Some(edit) = self.redo_stack.pop() else { return false };
+        let Some(edit) = self.redo_stack.pop() else {
+            return false;
+        };
         let removed_len = edit.removed.chars().count();
-        self.rope.remove(edit.start_char..edit.start_char + removed_len);
+        self.rope
+            .remove(edit.start_char..edit.start_char + removed_len);
         self.rope.insert(edit.start_char, &edit.inserted);
         self.cursor = edit.cursor_after;
         self.undo_stack.push(edit.clone());
@@ -322,7 +330,6 @@ impl Buffer {
         self.goal_col = None;
         self.cursor.col = self.line(self.cursor.line).chars().count();
     }
-
 }
 
 impl std::fmt::Display for Buffer {

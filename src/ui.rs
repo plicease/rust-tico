@@ -8,9 +8,12 @@ use crate::buffer::Pos;
 use crate::keymap::{Action, Binding, Key as TKey, Menu};
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use crossterm::style::{Attribute, Color, Print, SetAttribute, SetBackgroundColor, SetForegroundColor};
+use crossterm::style::{
+    Attribute, Color, Print, SetAttribute, SetBackgroundColor, SetForegroundColor,
+};
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, size, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
+    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+    enable_raw_mode, size,
 };
 use crossterm::{execute, queue};
 use std::io::{self, Write};
@@ -154,10 +157,18 @@ fn handle_key(editor: &mut Editor, key: KeyEvent) {
             editor.clear_spotlight();
             handle_editing_key(editor, key);
         }
-        Mode::Help { lines, top, return_to } => {
+        Mode::Help {
+            lines,
+            top,
+            return_to,
+        } => {
             handle_help_key(editor, lines, top, return_to, key);
         }
-        Mode::Diff { lines, top, outcome } => {
+        Mode::Diff {
+            lines,
+            top,
+            outcome,
+        } => {
             handle_diff_key(editor, lines, top, outcome, key);
         }
         Mode::Prompt(prompt) => handle_prompt_key(editor, prompt, key),
@@ -168,7 +179,13 @@ fn handle_key(editor: &mut Editor, key: KeyEvent) {
 /// Handle a keystroke while the `^G` help viewer is open: scroll its body,
 /// or close it (via `^X`/`^C`/Esc) and return to whatever was active
 /// before — the main editing window, or the prompt help was opened from.
-fn handle_help_key(editor: &mut Editor, lines: Vec<String>, top: usize, return_to: Option<Box<Prompt>>, key: KeyEvent) {
+fn handle_help_key(
+    editor: &mut Editor,
+    lines: Vec<String>,
+    top: usize,
+    return_to: Option<Box<Prompt>>,
+    key: KeyEvent,
+) {
     let body_len = lines.len().saturating_sub(1);
     let body_rows = help_body_rows(editor);
     let max_top = body_len.saturating_sub(body_rows);
@@ -178,7 +195,8 @@ fn handle_help_key(editor: &mut Editor, lines: Vec<String>, top: usize, return_t
     if matches!(key.code, KeyCode::Esc) {
         close = true;
     } else if let Some(tkey) = normalize_key(key)
-        && let Some(Binding::Action(action)) = editor.keymap.lookup_menu_only(Menu::Help, tkey).cloned()
+        && let Some(Binding::Action(action)) =
+            editor.keymap.lookup_menu_only(Menu::Help, tkey).cloned()
     {
         match action {
             Action::Cancel => close = true,
@@ -198,7 +216,11 @@ fn handle_help_key(editor: &mut Editor, lines: Vec<String>, top: usize, return_t
             None => Mode::Editing,
         }
     } else {
-        Mode::Help { lines, top, return_to }
+        Mode::Help {
+            lines,
+            top,
+            return_to,
+        }
     };
 }
 
@@ -211,7 +233,9 @@ fn handle_editing_key(editor: &mut Editor, key: KeyEvent) {
         return;
     }
     if let KeyCode::Char(c) = key.code
-        && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
     {
         editor.insert_char(c);
         // Plain self-insertion bypasses execute(), which is what normally
@@ -258,7 +282,12 @@ fn handle_prompt_key(editor: &mut Editor, mut prompt: Prompt, key: KeyEvent) {
         }
         if tkey == TKey::Ctrl('H') {
             if prompt.cursor > 0 {
-                let idx = prompt.input.char_indices().nth(prompt.cursor - 1).map(|(i, _)| i).unwrap_or(0);
+                let idx = prompt
+                    .input
+                    .char_indices()
+                    .nth(prompt.cursor - 1)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
                 prompt.input.remove(idx);
                 prompt.cursor -= 1;
             }
@@ -281,7 +310,9 @@ fn handle_prompt_key(editor: &mut Editor, mut prompt: Prompt, key: KeyEvent) {
         // or last line from the Search/GotoLine prompts, without needing
         // to type anything) — see keymap.rs's install_prompt_defaults for
         // the full, source-verified list.
-        if let Some(Binding::Action(action)) = editor.keymap.lookup_menu_only(prompt.menu, tkey).cloned() {
+        if let Some(Binding::Action(action)) =
+            editor.keymap.lookup_menu_only(prompt.menu, tkey).cloned()
+        {
             if apply_prompt_action(editor, &mut prompt, action) {
                 return;
             }
@@ -290,9 +321,16 @@ fn handle_prompt_key(editor: &mut Editor, mut prompt: Prompt, key: KeyEvent) {
         }
     }
     if let KeyCode::Char(c) = key.code
-        && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
     {
-        let idx = prompt.input.char_indices().nth(prompt.cursor).map(|(i, _)| i).unwrap_or(prompt.input.len());
+        let idx = prompt
+            .input
+            .char_indices()
+            .nth(prompt.cursor)
+            .map(|(i, _)| i)
+            .unwrap_or(prompt.input.len());
         prompt.input.insert(idx, c);
         prompt.cursor += 1;
         prompt.history_pos = None;
@@ -317,7 +355,11 @@ fn apply_prompt_action(editor: &mut Editor, prompt: &mut Prompt, action: Action)
         // it (via handle_help_key) returns here to the same prompt.
         Action::Help => {
             let lines = crate::help::build(prompt.menu, &editor.keymap, editor.screen_cols);
-            editor.mode = Mode::Help { lines, top: 0, return_to: Some(Box::new(prompt.clone())) };
+            editor.mode = Mode::Help {
+                lines,
+                top: 0,
+                return_to: Some(Box::new(prompt.clone())),
+            };
             true
         }
         Action::FirstLine => {
@@ -447,12 +489,18 @@ fn cycle_history(editor: &mut Editor, prompt: &mut Prompt, older: bool) {
 /// preserving whichever suffix belongs to its menu (see
 /// `app::search_prompt_label`).
 fn refresh_search_label(editor: &Editor, prompt: &mut Prompt) {
-    let suffix = if prompt.menu == Menu::Replace { " (to replace)" } else { "" };
+    let suffix = if prompt.menu == Menu::Replace {
+        " (to replace)"
+    } else {
+        ""
+    };
     prompt.label = crate::app::search_prompt_label("Search", suffix, &editor.search);
 }
 
 fn handle_exit_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {
-    let PromptKind::Exit { .. } = &prompt.kind else { return };
+    let PromptKind::Exit { .. } = &prompt.kind else {
+        return;
+    };
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             editor.mode = Mode::Editing;
@@ -473,9 +521,15 @@ fn handle_exit_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {
 }
 
 fn handle_conflict_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {
-    if matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+    if matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+    {
         let lines = crate::help::build_conflict_help(editor.screen_cols);
-        editor.mode = Mode::Help { lines, top: 0, return_to: Some(Box::new(prompt)) };
+        editor.mode = Mode::Help {
+            lines,
+            top: 0,
+            return_to: Some(Box::new(prompt)),
+        };
         return;
     }
     match key.code {
@@ -513,7 +567,13 @@ fn handle_conflict_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {
 /// key to dismiss an unmergeable-conflict preview (returning to the
 /// reload/keep/cancel choice, same as before this became a full-screen
 /// view).
-fn handle_diff_key(editor: &mut Editor, lines: Vec<String>, top: usize, outcome: DiffOutcome, key: KeyEvent) {
+fn handle_diff_key(
+    editor: &mut Editor,
+    lines: Vec<String>,
+    top: usize,
+    outcome: DiffOutcome,
+    key: KeyEvent,
+) {
     let body_len = lines.len().saturating_sub(1);
     let body_rows = help_body_rows(editor);
     let max_top = body_len.saturating_sub(body_rows);
@@ -563,18 +623,28 @@ fn handle_diff_key(editor: &mut Editor, lines: Vec<String>, top: usize, outcome:
             _ => {}
         },
     }
-    editor.mode = Mode::Diff { lines, top, outcome };
+    editor.mode = Mode::Diff {
+        lines,
+        top,
+        outcome,
+    };
 }
 
 fn handle_lock_conflict_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {
-    let PromptKind::LockConflict { lock_path, target } = &prompt.kind else { return };
+    let PromptKind::LockConflict { lock_path, target } = &prompt.kind else {
+        return;
+    };
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             let _ = crate::lockfile::write_lock(lock_path, target, false);
             editor.buf_mut().lock_filename = Some(lock_path.clone());
             editor.mode = Mode::Editing;
         }
-        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
+        KeyCode::Char('n')
+        | KeyCode::Char('N')
+        | KeyCode::Char('c')
+        | KeyCode::Char('C')
+        | KeyCode::Esc => {
             // Matches nano: declining leaves this buffer unopened. If it
             // was the only one, fall back to a blank buffer rather than
             // quitting (nano's read_files_from_cmdline() does the same
@@ -598,16 +668,27 @@ fn handle_lock_conflict_choice(editor: &mut Editor, prompt: Prompt, key: KeyEven
 /// to whatever key the MYESNO menu's cancel function has, which includes
 /// Esc via the generic Ctrl-C/Esc handling used throughout this UI).
 fn handle_replace_confirm_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {
-    let PromptKind::ReplaceConfirm(state) = prompt.kind else { return };
+    let PromptKind::ReplaceConfirm(state) = prompt.kind else {
+        return;
+    };
     match key.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') => editor.replace_choice(state, crate::app::ReplaceChoice::Yes),
-        KeyCode::Char('n') | KeyCode::Char('N') => editor.replace_choice(state, crate::app::ReplaceChoice::No),
-        KeyCode::Char('a') | KeyCode::Char('A') => editor.replace_choice(state, crate::app::ReplaceChoice::All),
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            editor.replace_choice(state, crate::app::ReplaceChoice::Yes)
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') => {
+            editor.replace_choice(state, crate::app::ReplaceChoice::No)
+        }
+        KeyCode::Char('a') | KeyCode::Char('A') => {
+            editor.replace_choice(state, crate::app::ReplaceChoice::All)
+        }
         KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
             editor.replace_choice(state, crate::app::ReplaceChoice::Cancel)
         }
         _ => {
-            editor.mode = Mode::Prompt(Prompt { kind: PromptKind::ReplaceConfirm(state), ..prompt });
+            editor.mode = Mode::Prompt(Prompt {
+                kind: PromptKind::ReplaceConfirm(state),
+                ..prompt
+            });
         }
     }
 }
@@ -619,7 +700,11 @@ fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
             // Pressing Enter with nothing typed reuses the remembered last
             // search term (shown bracketed in the label) - confirmed
             // against the installed nano.
-            let text = if text.is_empty() { editor.search.last_pattern.clone().unwrap_or_default() } else { text };
+            let text = if text.is_empty() {
+                editor.search.last_pattern.clone().unwrap_or_default()
+            } else {
+                text
+            };
             editor.mode = Mode::Editing;
             if text.is_empty() {
                 return;
@@ -629,7 +714,11 @@ fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
             editor.run_search(&text, backwards);
         }
         PromptKind::Replace1 => {
-            let text = if text.is_empty() { editor.search.last_pattern.clone().unwrap_or_default() } else { text };
+            let text = if text.is_empty() {
+                editor.search.last_pattern.clone().unwrap_or_default()
+            } else {
+                text
+            };
             if text.is_empty() {
                 editor.mode = Mode::Editing;
                 return;
@@ -654,7 +743,11 @@ fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
             let (line_s, col_s) = text.split_once(',').unwrap_or((text.as_str(), ""));
             if let Ok(line) = line_s.trim().parse::<i64>() {
                 let total = editor.buf().line_count() as i64;
-                let target_line = if line < 0 { (total + line).max(0) } else { (line - 1).max(0) };
+                let target_line = if line < 0 {
+                    (total + line).max(0)
+                } else {
+                    (line - 1).max(0)
+                };
                 let col = col_s.trim().parse::<i64>().unwrap_or(1).max(1) as usize - 1;
                 editor.buf_mut().cursor = Pos::new(target_line as usize, col);
             }
@@ -738,7 +831,9 @@ fn normalize_key(key: KeyEvent) -> Option<TKey> {
             };
             Some(TKey::Ctrl(mapped))
         }
-        KeyCode::Char(c) if alt && shift && c.is_ascii_alphabetic() => Some(TKey::ShiftMeta(c.to_ascii_uppercase())),
+        KeyCode::Char(c) if alt && shift && c.is_ascii_alphabetic() => {
+            Some(TKey::ShiftMeta(c.to_ascii_uppercase()))
+        }
         // Meta+letter is case-insensitive by default in nano (a bare
         // Meta+letter keystroke does the same as Shift+Meta+letter unless
         // a specific Sh-M- binding overrides it), and our keymap stores
@@ -768,7 +863,12 @@ fn render(editor: &Editor) -> io::Result<()> {
         render_help_screen(editor, &mut out, lines, *top)?;
         return out.flush();
     }
-    if let Mode::Diff { lines, top, outcome } = &editor.mode {
+    if let Mode::Diff {
+        lines,
+        top,
+        outcome,
+    } = &editor.mode
+    {
         render_diff_screen(editor, &mut out, lines, *top, outcome)?;
         return out.flush();
     }
@@ -792,7 +892,11 @@ fn render(editor: &Editor) -> io::Result<()> {
     render_status_line(editor, &mut out, status_row, cols)?;
 
     if help_rows > 0 {
-        let prompt = if let Mode::Prompt(p) = &editor.mode { Some(p) } else { None };
+        let prompt = if let Mode::Prompt(p) = &editor.mode {
+            Some(p)
+        } else {
+            None
+        };
         render_shortcut_bar(&mut out, status_row + 1, cols, shortcuts_for_prompt(prompt))?;
     }
 
@@ -811,12 +915,29 @@ fn help_body_rows(editor: &Editor) -> usize {
 /// reverse-video title (`lines[0]`) where the title bar would normally be,
 /// the scrollable body starting at `top` (an index into `lines[1..]`), and
 /// its own shortcut bar in place of the usual status line + shortcuts.
-fn render_help_screen(editor: &Editor, out: &mut impl Write, lines: &[String], top: usize) -> io::Result<()> {
+fn render_help_screen(
+    editor: &Editor,
+    out: &mut impl Write,
+    lines: &[String],
+    top: usize,
+) -> io::Result<()> {
     let cols = editor.screen_cols;
     let rows = editor.screen_rows;
 
-    render_centered_title_row(out, cols, lines.first().map(|s| s.as_str()).unwrap_or("Help"))?;
-    render_scrollable_body(out, cols, &lines[1.min(lines.len())..], top, help_body_rows(editor), None, syntax_color)?;
+    render_centered_title_row(
+        out,
+        cols,
+        lines.first().map(|s| s.as_str()).unwrap_or("Help"),
+    )?;
+    render_scrollable_body(
+        out,
+        cols,
+        &lines[1.min(lines.len())..],
+        top,
+        help_body_rows(editor),
+        None,
+        syntax_color,
+    )?;
     render_shortcut_bar(out, rows.saturating_sub(2) as u16, cols, HELP_SHORTCUTS)
 }
 
@@ -834,10 +955,26 @@ fn render_diff_screen(
     let cols = editor.screen_cols;
     let rows = editor.screen_rows;
 
-    render_centered_title_row(out, cols, lines.first().map(|s| s.as_str()).unwrap_or("Diff"))?;
+    render_centered_title_row(
+        out,
+        cols,
+        lines.first().map(|s| s.as_str()).unwrap_or("Diff"),
+    )?;
     let body = &lines[1.min(lines.len())..];
-    let kinds = if editor.options.syntax_highlighting { diff_line_kinds(body) } else { None };
-    render_scrollable_body(out, cols, body, top, help_body_rows(editor), kinds.as_deref(), diff_color)?;
+    let kinds = if editor.options.syntax_highlighting {
+        diff_line_kinds(body)
+    } else {
+        None
+    };
+    render_scrollable_body(
+        out,
+        cols,
+        body,
+        top,
+        help_body_rows(editor),
+        kinds.as_deref(),
+        diff_color,
+    )?;
 
     let shortcuts: &[(&str, &str)] = match outcome {
         DiffOutcome::ApplyMerge { .. } => &[
@@ -865,7 +1002,12 @@ fn render_centered_title_row(out: &mut impl Write, cols: usize, title: &str) -> 
         }
     }
     let title_line: String = title_row.into_iter().collect();
-    queue!(out, SetAttribute(Attribute::Reverse), Print(title_line), SetAttribute(Attribute::Reset))
+    queue!(
+        out,
+        SetAttribute(Attribute::Reverse),
+        Print(title_line),
+        SetAttribute(Attribute::Reset)
+    )
 }
 
 /// Draw `body_rows` rows of `body` starting at `top`, one screen row per
@@ -897,7 +1039,12 @@ fn render_scrollable_body(
                 }
                 let segment: String = chars[i..j].iter().collect();
                 if let Some(kind) = kind {
-                    queue!(out, SetForegroundColor(color(kind)), Print(segment), SetAttribute(Attribute::Reset))?;
+                    queue!(
+                        out,
+                        SetForegroundColor(color(kind)),
+                        Print(segment),
+                        SetAttribute(Attribute::Reset)
+                    )?;
                 } else {
                     queue!(out, Print(segment))?;
                 }
@@ -916,14 +1063,27 @@ fn render_scrollable_body(
 
 fn finish_cursor(editor: &Editor, out: &mut impl Write, text_start_row: u16) -> io::Result<()> {
     if let Mode::Prompt(prompt) = &editor.mode {
-        let row = editor.screen_rows.saturating_sub(if editor.options.nohelp { 1 } else { 3 });
+        let row = editor
+            .screen_rows
+            .saturating_sub(if editor.options.nohelp { 1 } else { 3 });
         let col = prompt.label.chars().count() + 2 + prompt.cursor;
-        queue!(out, MoveTo(col.min(editor.screen_cols.saturating_sub(1)) as u16, row as u16), Show)?;
+        queue!(
+            out,
+            MoveTo(
+                col.min(editor.screen_cols.saturating_sub(1)) as u16,
+                row as u16
+            ),
+            Show
+        )?;
     } else {
         let buf = editor.buf();
         let screen_line = buf.cursor.line.saturating_sub(buf.top_line);
         let gutter = editor.gutter_width();
-        let cursor_col = crate::buffer::display_width(&buf.line(buf.cursor.line), buf.cursor.col, editor.options.tabsize as usize);
+        let cursor_col = crate::buffer::display_width(
+            &buf.line(buf.cursor.line),
+            buf.cursor.col,
+            editor.options.tabsize as usize,
+        );
         // `left_col` is only ever nonzero for the cursor's own line (see
         // `render_buffer`), and a `<` marker takes up one column whenever
         // it's scrolled, shifting everything after it right by one.
@@ -931,7 +1091,10 @@ fn finish_cursor(editor: &Editor, out: &mut impl Write, text_start_row: u16) -> 
         let col = gutter + if show_left { 1 } else { 0 } + cursor_col.saturating_sub(buf.left_col);
         queue!(
             out,
-            MoveTo(col.min(editor.screen_cols.saturating_sub(1)) as u16, (text_start_row as usize + screen_line) as u16),
+            MoveTo(
+                col.min(editor.screen_cols.saturating_sub(1)) as u16,
+                (text_start_row as usize + screen_line) as u16
+            ),
             Show
         )?;
     }
@@ -984,10 +1147,20 @@ fn render_title_bar(editor: &Editor, out: &mut impl Write, cols: usize) -> io::R
         }
     }
     let s: String = line.into_iter().collect();
-    queue!(out, SetAttribute(Attribute::Reverse), Print(s), SetAttribute(Attribute::Reset))
+    queue!(
+        out,
+        SetAttribute(Attribute::Reverse),
+        Print(s),
+        SetAttribute(Attribute::Reset)
+    )
 }
 
-fn render_status_line(editor: &Editor, out: &mut impl Write, row: u16, cols: usize) -> io::Result<()> {
+fn render_status_line(
+    editor: &Editor,
+    out: &mut impl Write,
+    row: u16,
+    cols: usize,
+) -> io::Result<()> {
     queue!(out, MoveTo(0, row))?;
     if let Mode::Prompt(prompt) = &editor.mode {
         // nano's promptcolor defaults to the title bar's colors (reverse
@@ -998,7 +1171,12 @@ fn render_status_line(editor: &Editor, out: &mut impl Write, row: u16, cols: usi
         while s.chars().count() < cols {
             s.push(' ');
         }
-        queue!(out, SetAttribute(Attribute::Reverse), Print(s), SetAttribute(Attribute::Reset))
+        queue!(
+            out,
+            SetAttribute(Attribute::Reverse),
+            Print(s),
+            SetAttribute(Attribute::Reset)
+        )
     } else if let Some(msg) = &editor.status {
         // nano shows ordinary status-bar messages in reverse video, and
         // Alert-level ones (unwritable file, "is a directory", ...) bold
@@ -1014,7 +1192,12 @@ fn render_status_line(editor: &Editor, out: &mut impl Write, row: u16, cols: usi
         let shown_len = shown.chars().count();
         match editor.status_level {
             crate::app::StatusLevel::Normal => {
-                queue!(out, SetAttribute(Attribute::Reverse), Print(shown), SetAttribute(Attribute::Reset))?;
+                queue!(
+                    out,
+                    SetAttribute(Attribute::Reverse),
+                    Print(shown),
+                    SetAttribute(Attribute::Reset)
+                )?;
             }
             crate::app::StatusLevel::Mild | crate::app::StatusLevel::Alert => {
                 // Matches nano's captured escape codes exactly: ESC[1m
@@ -1098,7 +1281,12 @@ const REPLACE1_SHORTCUTS: &[(&str, &str)] = &[
     ("^N", "Newer"),
 ];
 
-const REPLACEWITH_SHORTCUTS: &[(&str, &str)] = &[("^G", "Help"), ("^C", "Cancel"), ("^P", "Older"), ("^N", "Newer")];
+const REPLACEWITH_SHORTCUTS: &[(&str, &str)] = &[
+    ("^G", "Help"),
+    ("^C", "Cancel"),
+    ("^P", "Older"),
+    ("^N", "Newer"),
+];
 
 const GOTOLINE_SHORTCUTS: &[(&str, &str)] = &[
     ("^G", "Help"),
@@ -1152,9 +1340,22 @@ fn shortcuts_for_prompt(prompt: Option<&Prompt>) -> &'static [(&'static str, &'s
     }
 }
 
-fn render_shortcut_bar(out: &mut impl Write, row: u16, cols: usize, entries: &[(&str, &str)]) -> io::Result<()> {
-    let max_label = entries.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(2);
-    let max_desc = entries.iter().map(|(_, d)| d.chars().count()).max().unwrap_or(4);
+fn render_shortcut_bar(
+    out: &mut impl Write,
+    row: u16,
+    cols: usize,
+    entries: &[(&str, &str)],
+) -> io::Result<()> {
+    let max_label = entries
+        .iter()
+        .map(|(k, _)| k.chars().count())
+        .max()
+        .unwrap_or(2);
+    let max_desc = entries
+        .iter()
+        .map(|(_, d)| d.chars().count())
+        .max()
+        .unwrap_or(4);
     let col_width = max_label + 1 + max_desc + 2;
     let n_cols = (cols / col_width).max(1);
     let n_pairs = n_cols.min(entries.len().div_ceil(2));
@@ -1168,7 +1369,12 @@ fn render_shortcut_bar(out: &mut impl Write, row: u16, cols: usize, entries: &[(
                 // As in nano: the key combo is shown in reverse video, the
                 // description in the terminal's normal colors.
                 let key_padded = format!("{key:<lw$}", lw = max_label);
-                queue!(out, SetAttribute(Attribute::Reverse), Print(&key_padded), SetAttribute(Attribute::Reset))?;
+                queue!(
+                    out,
+                    SetAttribute(Attribute::Reverse),
+                    Print(&key_padded),
+                    SetAttribute(Attribute::Reset)
+                )?;
                 let rest = format!(" {desc:<dw$}  ", dw = max_desc);
                 queue!(out, Print(&rest))?;
                 written += key_padded.chars().count() + rest.chars().count();
@@ -1185,7 +1391,12 @@ fn render_shortcut_bar(out: &mut impl Write, row: u16, cols: usize, entries: &[(
     Ok(())
 }
 
-fn render_buffer(editor: &Editor, out: &mut impl Write, start_row: u16, rows: usize) -> io::Result<()> {
+fn render_buffer(
+    editor: &Editor,
+    out: &mut impl Write,
+    start_row: u16,
+    rows: usize,
+) -> io::Result<()> {
     let buf = editor.buf();
     let gutter = editor.gutter_width();
     let cols = editor.screen_cols;
@@ -1196,7 +1407,9 @@ fn render_buffer(editor: &Editor, out: &mut impl Write, start_row: u16, rows: us
     // events elsewhere, so a full-buffer reparse per redraw is an acceptable
     // v1 cost.
     let spans: Vec<crate::syntax::HighlightSpan> = if editor.options.syntax_highlighting {
-        buf.language.map(|lang| crate::syntax::highlight(&buf.to_string(), lang)).unwrap_or_default()
+        buf.language
+            .map(|lang| crate::syntax::highlight(&buf.to_string(), lang))
+            .unwrap_or_default()
     } else {
         Vec::new()
     };
@@ -1252,7 +1465,11 @@ fn render_buffer(editor: &Editor, out: &mut impl Write, start_row: u16, rows: us
         // line's text still overflows the available width, on any line.
         let full_chars: Vec<char> = rendered.chars().collect();
         let text_total = full_chars.len().saturating_sub(gutter_chars);
-        let left = if is_real_line && line_idx == buf.cursor.line { buf.left_col.min(text_total) } else { 0 };
+        let left = if is_real_line && line_idx == buf.cursor.line {
+            buf.left_col.min(text_total)
+        } else {
+            0
+        };
         let content_width = cols.saturating_sub(gutter_chars);
         let show_left = left > 0;
         let mut capacity = content_width.saturating_sub(if show_left { 1 } else { 0 });
@@ -1271,7 +1488,8 @@ fn render_buffer(editor: &Editor, out: &mut impl Write, start_row: u16, rows: us
         if show_right {
             chars.push('>');
         }
-        let mut windowed_kinds: Vec<Option<crate::syntax::HighlightKind>> = kinds[..gutter_chars].to_vec();
+        let mut windowed_kinds: Vec<Option<crate::syntax::HighlightKind>> =
+            kinds[..gutter_chars].to_vec();
         if show_left {
             windowed_kinds.push(None);
         }
@@ -1287,20 +1505,30 @@ fn render_buffer(editor: &Editor, out: &mut impl Write, start_row: u16, rows: us
         });
 
         let len = chars.len();
-        let spot = highlight.map(|(s, e)| (s.min(len), e.min(len))).filter(|(s, e)| s < e);
+        let spot = highlight
+            .map(|(s, e)| (s.min(len), e.min(len)))
+            .filter(|(s, e)| s < e);
 
         let (spot_fg, spot_bg) = spotlight_colors(&editor.options.spotlightcolor);
         let mut i = 0;
         while i < len {
             let in_spot = spot.is_some_and(|(s, e)| i >= s && i < e);
-            let kind = if in_spot { None } else { kinds.get(i).copied().flatten() };
+            let kind = if in_spot {
+                None
+            } else {
+                kinds.get(i).copied().flatten()
+            };
             let mut j = i + 1;
             while j < len {
                 let j_in_spot = spot.is_some_and(|(s, e)| j >= s && j < e);
                 if j_in_spot != in_spot {
                     break;
                 }
-                let j_kind = if j_in_spot { None } else { kinds.get(j).copied().flatten() };
+                let j_kind = if j_in_spot {
+                    None
+                } else {
+                    kinds.get(j).copied().flatten()
+                };
                 if j_kind != kind {
                     break;
                 }
@@ -1308,9 +1536,20 @@ fn render_buffer(editor: &Editor, out: &mut impl Write, start_row: u16, rows: us
             }
             let segment: String = chars[i..j].iter().collect();
             if in_spot {
-                queue!(out, SetForegroundColor(spot_fg), SetBackgroundColor(spot_bg), Print(segment), SetAttribute(Attribute::Reset))?;
+                queue!(
+                    out,
+                    SetForegroundColor(spot_fg),
+                    SetBackgroundColor(spot_bg),
+                    Print(segment),
+                    SetAttribute(Attribute::Reset)
+                )?;
             } else if let Some(kind) = kind {
-                queue!(out, SetForegroundColor(syntax_color(kind)), Print(segment), SetAttribute(Attribute::Reset))?;
+                queue!(
+                    out,
+                    SetForegroundColor(syntax_color(kind)),
+                    Print(segment),
+                    SetAttribute(Attribute::Reset)
+                )?;
             } else {
                 queue!(out, Print(segment))?;
             }
@@ -1486,11 +1725,11 @@ fn syntax_color(kind: crate::syntax::HighlightKind) -> Color {
 fn diff_color(kind: crate::syntax::HighlightKind) -> Color {
     use crate::syntax::HighlightKind as HK;
     match kind {
-        HK::String => Color::Green,   // (addition) / (new_file)
-        HK::Keyword => Color::Red,    // (deletion) / (old_file)
+        HK::String => Color::Green,    // (addition) / (new_file)
+        HK::Keyword => Color::Red,     // (deletion) / (old_file)
         HK::Constant => Color::Yellow, // (commit)
-        HK::Attribute => Color::Cyan, // (location), e.g. an "@@" hunk header
-        HK::Variable => Color::Blue,  // (command)
+        HK::Attribute => Color::Cyan,  // (location), e.g. an "@@" hunk header
+        HK::Variable => Color::Blue,   // (command)
         _ => syntax_color(kind),
     }
 }

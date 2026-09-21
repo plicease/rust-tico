@@ -26,7 +26,10 @@ pub struct NamedColor {
 
 impl NamedColor {
     const fn new(color: Color) -> NamedColor {
-        NamedColor { color, light: false }
+        NamedColor {
+            color,
+            light: false,
+        }
     }
 
     const fn light(color: Color) -> NamedColor {

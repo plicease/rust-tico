@@ -15,8 +15,14 @@ const LOCK_SIZE: usize = 1024;
 /// The lock-file path for `target`: `.basename.swp` next to it (nano's
 /// `locking_prefix`/`locking_suffix`).
 pub fn lock_path(target: &Path) -> PathBuf {
-    let dir = target.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
-    let name = target.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let dir = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
     dir.join(format!(".{name}.swp"))
 }
 
@@ -39,7 +45,9 @@ pub enum LockCheck {
 
 /// Inspect an existing lock file, if any, without creating or modifying it.
 pub fn check_lock(path: &Path) -> LockCheck {
-    let Ok(data) = std::fs::read(path) else { return LockCheck::None };
+    let Ok(data) = std::fs::read(path) else {
+        return LockCheck::None;
+    };
     if data.len() < 68 || data[0] != 0x62 || data[1] != 0x30 {
         return LockCheck::Bad;
     }
@@ -77,7 +85,12 @@ pub fn write_lock(lock_path: &Path, target_filename: &str, modified: bool) -> st
     data[0] = 0x62;
     data[1] = 0x30;
 
-    write_field(&mut data, 2, 10, &format!("tico {}", env!("CARGO_PKG_VERSION")));
+    write_field(
+        &mut data,
+        2,
+        10,
+        &format!("tico {}", env!("CARGO_PKG_VERSION")),
+    );
 
     let pid = std::process::id();
     data[24..28].copy_from_slice(&pid.to_le_bytes());
@@ -91,12 +104,20 @@ pub fn write_lock(lock_path: &Path, target_filename: &str, modified: bool) -> st
     // nano always removes an existing lock first, then creates with
     // O_EXCL, rather than truncating in place.
     let _ = std::fs::remove_file(lock_path);
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o666).open(lock_path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o666)
+        .open(lock_path)?;
     f.write_all(&data)
 }
 
 #[cfg(not(unix))]
-pub fn write_lock(_lock_path: &Path, _target_filename: &str, _modified: bool) -> std::io::Result<()> {
+pub fn write_lock(
+    _lock_path: &Path,
+    _target_filename: &str,
+    _modified: bool,
+) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -108,12 +129,17 @@ fn write_field(buf: &mut [u8], offset: usize, max_len: usize, s: &str) {
 
 #[cfg(unix)]
 fn current_username() -> String {
-    std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).unwrap_or_else(|_| "unknown".to_string())
+    std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "unknown".to_string())
 }
 
 #[cfg(unix)]
 fn current_hostname() -> String {
-    rustix::system::uname().nodename().to_string_lossy().into_owned()
+    rustix::system::uname()
+        .nodename()
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Delete a lock file, ignoring errors (including "it's already gone").
@@ -127,8 +153,14 @@ mod tests {
 
     #[test]
     fn lock_path_matches_nano_convention() {
-        assert_eq!(lock_path(Path::new("/tmp/foo.txt")), PathBuf::from("/tmp/.foo.txt.swp"));
-        assert_eq!(lock_path(Path::new("bar.rs")), PathBuf::from("./.bar.rs.swp"));
+        assert_eq!(
+            lock_path(Path::new("/tmp/foo.txt")),
+            PathBuf::from("/tmp/.foo.txt.swp")
+        );
+        assert_eq!(
+            lock_path(Path::new("bar.rs")),
+            PathBuf::from("./.bar.rs.swp")
+        );
     }
 
     #[test]

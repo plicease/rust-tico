@@ -209,7 +209,10 @@ fn intro_for(menu: Menu) -> (&'static str, &'static [&'static str]) {
         ),
         // YesNo and anything else not called out above: a generic screen
         // (still populated with that menu's real bindings below).
-        _ => ("Help Text", &["The following function keys are available at this prompt:"]),
+        _ => (
+            "Help Text",
+            &["The following function keys are available at this prompt:"],
+        ),
     }
 }
 
@@ -219,7 +222,11 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut current = String::new();
     for word in text.split_whitespace() {
-        let extra = if current.is_empty() { word.chars().count() } else { current.chars().count() + 1 + word.chars().count() };
+        let extra = if current.is_empty() {
+            word.chars().count()
+        } else {
+            current.chars().count() + 1 + word.chars().count()
+        };
         if extra > width && !current.is_empty() {
             lines.push(std::mem::take(&mut current));
         }
@@ -248,7 +255,10 @@ fn shortcut_lines(menu: Menu, keymap: &KeyMap) -> Vec<String> {
             continue;
         }
         if let Binding::Action(action) = binding {
-            by_description.entry(action.description()).or_default().push(*key);
+            by_description
+                .entry(action.description())
+                .or_default()
+                .push(*key);
         }
     }
 
@@ -274,7 +284,9 @@ fn shortcut_lines(menu: Menu, keymap: &KeyMap) -> Vec<String> {
     // Always at least one space before the description, even when the key
     // column (a key plus a long list of alternates) overruns the normal
     // 17-column field.
-    rows.into_iter().map(|(key_col, desc)| format!("{key_col:<17} {desc}")).collect()
+    rows.into_iter()
+        .map(|(key_col, desc)| format!("{key_col:<17} {desc}"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -296,7 +308,11 @@ mod tests {
     fn shortcut_listing_reflects_live_keymap() {
         let km = KeyMap::defaults();
         let lines = build(Menu::Main, &km, 80);
-        assert!(lines.iter().any(|l| l.contains("^G") && l.contains("Display this help text")));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("^G") && l.contains("Display this help text"))
+        );
         assert!(lines.iter().any(|l| l.contains("Search forward")));
     }
 
