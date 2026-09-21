@@ -31,14 +31,46 @@ pub enum PromptKind {
         lock_path: std::path::PathBuf,
         target: String,
     },
-    /// `^R` Read File: `new_buffer` mirrors nano's `NEW_BUFFER` flag, toggled
-    /// live by `M-F` within this one prompt (seeded from `set multibuffer`,
-    /// reset back to that baseline the next time the prompt opens) — when
-    /// set, the file opens as a separate buffer instead of being inserted
-    /// into the current one at the cursor.
+    /// `^R` Read File / `^T` Execute Command: `new_buffer` mirrors nano's
+    /// `NEW_BUFFER` flag, toggled live by `M-F` within this one prompt
+    /// (seeded from `set multibuffer`, reset back to that baseline the next
+    /// time the prompt opens) — when set, the file/command output opens as
+    /// a separate buffer instead of being inserted into the current one at
+    /// the cursor. `execute` mirrors nano's own toggle between "insert a
+    /// file" and "run a command", flipped in place by `^X` (both prompts
+    /// share one underlying UI in nano, `insert_a_file_or()`).
     InsertFile {
         new_buffer: bool,
+        execute: bool,
     },
+    /// The Execute-Command prompt's `^T` (no `set speller`/`--speller`
+    /// configured): one step of nano's own word-by-word spell-fix loop.
+    /// `word` is the currently spotlighted misspelling, pre-filled into the
+    /// "Edit a replacement" prompt; `remaining` holds the still-unchecked
+    /// words after it, already sorted and deduplicated like nano's own
+    /// `hunspell -l | sort -f | uniq` pipeline.
+    SpellFix {
+        word: String,
+        remaining: Vec<String>,
+    },
+    /// The linter's interactive result viewer (nano's `MLINTER` menu):
+    /// `^Y`/PageUp and `^V`/PageDown step through `messages`, moving the
+    /// cursor to each one's reported location; `index` is the currently
+    /// shown message.
+    Linter {
+        messages: Vec<LintMessage>,
+        index: usize,
+    },
+}
+
+/// One parsed line of linter output: `filename:line[:col]: msg` (or
+/// `filename:line,col: msg`), matching nano's own linter-output parser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LintMessage {
+    pub filename: String,
+    pub line: usize,
+    pub col: usize,
+    pub msg: String,
 }
 
 /// State threaded through an in-progress interactive replace, one match at
@@ -488,9 +520,13 @@ impl Editor {
             RecordMacro | RunMacro => self.set_status("macros: not yet implemented"),
             Refresh => {}
             Suspend => self.set_status("suspend: not supported in this build"),
-            Speller | Formatter | Linter | Execute => {
-                self.set_status("external command integration: not yet implemented");
-            }
+            Execute => self.begin_execute(),
+            // Speller/Formatter/Linter need to run an external process (and,
+            // for the alt-speller/formatter, hand the terminal over to it),
+            // which this UI-agnostic dispatcher can't do — ui.rs's
+            // apply_binding/apply_prompt_action intercept them before they
+            // would ever reach here.
+            Speller | Formatter | Linter => {}
             NoHelp => self.options.nohelp = !self.options.nohelp,
             Zero => self.options.zero = !self.options.zero,
             ConstantShow => self.options.constantshow = !self.options.constantshow,
@@ -595,6 +631,40 @@ impl Editor {
                 (buf.cursor, m)
             }
         })
+    }
+
+    /// What the spell checker and formatter operate on: the marked
+    /// selection if one is active, otherwise the whole buffer — matching
+    /// nano's own `write_region_to_file`/`write_file` choice in `do_spell`.
+    pub(crate) fn tool_input_text(&self) -> String {
+        match self.selection_range() {
+            Some((start, end)) => self.buf().text_range(start, end),
+            None => self.buf().to_string(),
+        }
+    }
+
+    /// Replace whatever `tool_input_text` returned with `new_text`,
+    /// matching nano's `replace_buffer` (used by `treat()` for the
+    /// alt-speller and the formatter).
+    pub(crate) fn replace_tool_input(&mut self, new_text: &str) {
+        let range = self.selection_range();
+        let start = match range {
+            Some((start, end)) => {
+                self.buf_mut().delete_range(start, end);
+                start
+            }
+            None => {
+                let last_line = self.buf().line_count().saturating_sub(1);
+                let last_col = self.buf().line(last_line).chars().count();
+                self.buf_mut()
+                    .delete_range(Pos::new(0, 0), Pos::new(last_line, last_col));
+                Pos::new(0, 0)
+            }
+        };
+        self.buf_mut().cursor = start;
+        self.buf_mut().insert_str(new_text);
+        self.buf_mut().modified = true;
+        self.scroll_to_cursor();
     }
 
     fn toggle_mark(&mut self) {
@@ -785,9 +855,31 @@ impl Editor {
     fn begin_insert(&mut self) {
         let new_buffer = self.options.multibuffer;
         self.mode = Mode::Prompt(Prompt {
-            kind: PromptKind::InsertFile { new_buffer },
+            kind: PromptKind::InsertFile {
+                new_buffer,
+                execute: false,
+            },
             menu: Menu::Insert,
-            label: insert_prompt_label(new_buffer),
+            label: insert_prompt_label(new_buffer, false),
+            input: String::new(),
+            cursor: 0,
+            history_pos: None,
+            saved_input: None,
+        });
+    }
+
+    /// `^T` Execute Command: the same prompt as `^R`, just starting in
+    /// "run a command" mode (nano's `do_execute` -> `insert_a_file_or(TRUE)`,
+    /// versus `do_insertfile` -> `insert_a_file_or(FALSE)`).
+    fn begin_execute(&mut self) {
+        let new_buffer = self.options.multibuffer;
+        self.mode = Mode::Prompt(Prompt {
+            kind: PromptKind::InsertFile {
+                new_buffer,
+                execute: true,
+            },
+            menu: Menu::Execute,
+            label: insert_prompt_label(new_buffer, true),
             input: String::new(),
             cursor: 0,
             history_pos: None,
@@ -1193,11 +1285,12 @@ pub fn search_prompt_label(base: &str, suffix: &str, search: &SearchState) -> St
 
 /// The `^R` Read File prompt's label, matching the installed nano's exact
 /// wording for both states (it toggles with `M-F`, no other wording change).
-pub fn insert_prompt_label(new_buffer: bool) -> String {
-    if new_buffer {
-        "File to read into new buffer [from ./]".to_string()
-    } else {
-        "File to insert [from ./]".to_string()
+pub fn insert_prompt_label(new_buffer: bool, execute: bool) -> String {
+    match (execute, new_buffer) {
+        (true, true) => "Command to execute in new buffer".to_string(),
+        (true, false) => "Command to execute".to_string(),
+        (false, true) => "File to read into new buffer [from ./]".to_string(),
+        (false, false) => "File to insert [from ./]".to_string(),
     }
 }
 

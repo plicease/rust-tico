@@ -954,6 +954,10 @@ impl KeyMap {
 
         self.bind(Menu::Execute, K::Ctrl('M'), Binding::Action(A::Execute));
         self.bind(Menu::Execute, K::Ctrl('G'), Binding::Action(A::Help));
+        // nano binds both ^S and ^T to the speller here (^S only when not
+        // `set preserve`, which tico doesn't implement, so unconditionally)
+        // — ^S sorts first and is what the shortcut bar shows.
+        self.bind(Menu::Execute, K::Ctrl('S'), Binding::Action(A::Speller));
         self.bind(Menu::Execute, K::Ctrl('T'), Binding::Action(A::Speller));
         self.bind(Menu::Execute, K::Ctrl('Y'), Binding::Action(A::Linter));
         self.bind(Menu::Execute, K::Ctrl('O'), Binding::Action(A::Formatter));

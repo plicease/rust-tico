@@ -255,6 +255,14 @@ fn handle_editing_key(editor: &mut Editor, key: KeyEvent) {
 
 fn apply_binding(editor: &mut Editor, binding: Binding) {
     match binding {
+        // These need to run an external process (and, for the alt-speller
+        // and formatter, hand the terminal over to it), which the
+        // UI-agnostic `Editor::execute` can't do, so intercept them here
+        // rather than dispatching through it (e.g. the default keymap's
+        // `F12` for Speller, matching nano's own direct Main-menu binding).
+        Binding::Action(Action::Speller) => run_speller(editor),
+        Binding::Action(Action::Formatter) => run_formatter(editor),
+        Binding::Action(Action::Linter) => run_linter(editor),
         Binding::Action(action) => editor.execute(action),
         Binding::Macro(text) => {
             // Literal-string bindings; `{function}` substitution is not yet
@@ -274,13 +282,21 @@ fn handle_prompt_key(editor: &mut Editor, mut prompt: Prompt, key: KeyEvent) {
         PromptKind::ExternalChangeConflict => return handle_conflict_choice(editor, prompt, key),
         PromptKind::LockConflict { .. } => return handle_lock_conflict_choice(editor, prompt, key),
         PromptKind::ReplaceConfirm(_) => return handle_replace_confirm_choice(editor, prompt, key),
+        PromptKind::Linter { .. } => return handle_linter_choice(editor, prompt, key),
         _ => {}
     }
 
     if let Some(tkey) = normalize_key(key) {
         if tkey == TKey::Ctrl('C') || matches!(key.code, KeyCode::Esc) {
             editor.mode = Mode::Editing;
-            editor.set_status("Cancelled");
+            // Canceling out of a spell-fix prompt stops the word-by-word
+            // loop, but (matching nano's `fix_spello`/`spell_check`) still
+            // reports success rather than "Cancelled".
+            if matches!(prompt.kind, PromptKind::SpellFix { .. }) {
+                editor.set_status("Finished checking spelling");
+            } else {
+                editor.set_status("Cancelled");
+            }
             return;
         }
         if tkey == TKey::Ctrl('M') {
@@ -458,11 +474,36 @@ fn apply_prompt_action(editor: &mut Editor, prompt: &mut Prompt, action: Action)
         // itself always just reads "New Buffer", not a toggle-state pair
         // like FlipReplace's "Replace"/"No Replace").
         Action::FlipNewBuffer => {
-            let PromptKind::InsertFile { new_buffer } = &mut prompt.kind else {
+            let PromptKind::InsertFile {
+                new_buffer,
+                execute,
+            } = &mut prompt.kind
+            else {
                 return false;
             };
             *new_buffer = !*new_buffer;
-            prompt.label = crate::app::insert_prompt_label(*new_buffer);
+            prompt.label = crate::app::insert_prompt_label(*new_buffer, *execute);
+            false
+        }
+        // `^X` flips the Insert-File/Execute-Command prompt between its two
+        // modes in place, keeping whatever was already typed (matches
+        // nano's `flip_execute`, bound to the same key in both MINSERTFILE
+        // and MEXECUTE).
+        Action::FlipExecute => {
+            let PromptKind::InsertFile {
+                new_buffer,
+                execute,
+            } = &mut prompt.kind
+            else {
+                return false;
+            };
+            *execute = !*execute;
+            prompt.menu = if *execute {
+                Menu::Execute
+            } else {
+                Menu::Insert
+            };
+            prompt.label = crate::app::insert_prompt_label(*new_buffer, *execute);
             false
         }
         // Recognized (bound, shown in the shortcut bar and ^G help) but not
@@ -476,14 +517,52 @@ fn apply_prompt_action(editor: &mut Editor, prompt: &mut Prompt, action: Action)
             editor.set_status("No Conversion: not yet implemented");
             true
         }
-        Action::FlipExecute => {
-            editor.mode = Mode::Editing;
-            editor.set_status("Execute Command: not yet implemented");
-            true
-        }
         Action::Browser => {
             editor.mode = Mode::Editing;
             editor.set_status("File Browser: not yet implemented");
+            true
+        }
+        // `^T`/`^Y`/`^O` from within the Insert-File/Execute-Command
+        // prompt run the tool immediately, ignoring whatever was typed —
+        // matches nano's `ran_a_tool` flag, which makes `insert_a_file_or`
+        // break out of its loop (closing the prompt) as soon as one of
+        // these fires.
+        Action::Speller => {
+            editor.mode = Mode::Editing;
+            run_speller(editor);
+            true
+        }
+        Action::Formatter => {
+            editor.mode = Mode::Editing;
+            run_formatter(editor);
+            true
+        }
+        Action::Linter => {
+            editor.mode = Mode::Editing;
+            run_linter(editor);
+            true
+        }
+        // Bound (matching nano's full MEXECUTE menu, so the shortcut bar
+        // and ^G help show them) but not actually implemented: same
+        // plain-report convention as FlipConvert/Browser above.
+        Action::FullJustify => {
+            editor.mode = Mode::Editing;
+            editor.set_status("Full Justify: not yet implemented");
+            true
+        }
+        Action::CutRestOfFile => {
+            editor.mode = Mode::Editing;
+            editor.set_status("Cut Till End: not yet implemented");
+            true
+        }
+        Action::FlipPipe => {
+            editor.mode = Mode::Editing;
+            editor.set_status("Pipe Text: not yet implemented");
+            true
+        }
+        Action::Suspend => {
+            editor.mode = Mode::Editing;
+            editor.set_status("suspend: not supported in this build");
             true
         }
         _ => false,
@@ -810,17 +889,25 @@ fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
                 editor.buf_mut().cursor = Pos::new(target_line as usize, col);
             }
         }
-        PromptKind::InsertFile { new_buffer } => {
+        PromptKind::InsertFile {
+            new_buffer,
+            execute,
+        } => {
             editor.mode = Mode::Editing;
             if text.is_empty() {
-                // Matches nano: an empty filename with New Buffer on opens
-                // a blank buffer instead of canceling; off, it cancels.
+                // Matches nano: an empty filename/command with New Buffer
+                // on opens a blank buffer instead of canceling; off, it
+                // cancels.
                 if new_buffer {
                     editor.buffers.push(crate::buffer::Buffer::empty());
                     editor.current = editor.buffers.len() - 1;
                 } else {
                     editor.set_status("Cancelled");
                 }
+                return;
+            }
+            if execute {
+                submit_execute_command(editor, &text, new_buffer);
                 return;
             }
             // `~`/`~/rest` expands to the current user's home directory;
@@ -879,6 +966,14 @@ fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
                 }
             }
         }
+        PromptKind::SpellFix { word, remaining } => {
+            editor.mode = Mode::Editing;
+            if text != word && !text.is_empty() {
+                replace_whole_word(editor.buf_mut(), &word, &text);
+                editor.buf_mut().modified = true;
+            }
+            advance_spell_fix(editor, remaining);
+        }
         PromptKind::WriteOut { exiting } => {
             editor.mode = Mode::Editing;
             let path = std::path::PathBuf::from(text);
@@ -896,6 +991,537 @@ fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
             editor.mode = Mode::Editing;
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// Execute Command / Speller / Formatter / Linter
+// ---------------------------------------------------------------------
+
+/// A whole-word (alphanumeric-or-underscore-bounded) match, case-sensitive.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// The position of the first whole-word occurrence of `word` in `buf`,
+/// scanning from the top — used to seed the spell-fix loop's spotlight,
+/// matching nano's own `fix_spello` (which likewise searches for the exact,
+/// case-sensitive word).
+fn find_whole_word(buf: &crate::buffer::Buffer, word: &str) -> Option<Pos> {
+    let wchars = word.chars().count();
+    if wchars == 0 {
+        return None;
+    }
+    for line_idx in 0..buf.line_count() {
+        let chars: Vec<char> = buf.line(line_idx).chars().collect();
+        let mut col = 0;
+        while col + wchars <= chars.len() {
+            if chars[col..col + wchars].iter().collect::<String>() == word {
+                let before_ok = col == 0 || !is_word_char(chars[col - 1]);
+                let after_ok = col + wchars == chars.len() || !is_word_char(chars[col + wchars]);
+                if before_ok && after_ok {
+                    return Some(Pos::new(line_idx, col));
+                }
+            }
+            col += 1;
+        }
+    }
+    None
+}
+
+/// Replace every whole-word, case-sensitive occurrence of `word` in `buf`
+/// with `replacement` — matches nano's `fix_spello`, which (via
+/// `do_replace_loop`) fixes every instance of a misspelling at once rather
+/// than asking per-occurrence. Returns whether anything changed.
+fn replace_whole_word(buf: &mut crate::buffer::Buffer, word: &str, replacement: &str) -> bool {
+    let wchars = word.chars().count();
+    if wchars == 0 {
+        return false;
+    }
+    let mut matches: Vec<Pos> = Vec::new();
+    for line_idx in 0..buf.line_count() {
+        let chars: Vec<char> = buf.line(line_idx).chars().collect();
+        let mut col = 0;
+        while col + wchars <= chars.len() {
+            if chars[col..col + wchars].iter().collect::<String>() == word {
+                let before_ok = col == 0 || !is_word_char(chars[col - 1]);
+                let after_ok = col + wchars == chars.len() || !is_word_char(chars[col + wchars]);
+                if before_ok && after_ok {
+                    matches.push(Pos::new(line_idx, col));
+                    col += wchars;
+                    continue;
+                }
+            }
+            col += 1;
+        }
+    }
+    if matches.is_empty() {
+        return false;
+    }
+    for start in matches.into_iter().rev() {
+        let end = Pos::new(start.line, start.col + wchars);
+        buf.delete_range(start, end);
+        buf.cursor = start;
+        buf.insert_str(replacement);
+    }
+    true
+}
+
+/// Split a configured command (`set speller`/`--speller`, or a syntax's
+/// built-in `linter`/`formatter`) into a program and its arguments on
+/// whitespace — matching nano's own `construct_argument_list`, which uses
+/// `strtok(..., " ")` and likewise has no quoting support.
+fn split_command(cmd: &str) -> Vec<String> {
+    cmd.split_whitespace().map(str::to_string).collect()
+}
+
+/// Write `text` to a fresh temp file, for handing to an external
+/// speller/formatter (matches nano's `safe_tempfile`).
+fn write_temp_file(text: &str) -> io::Result<std::path::PathBuf> {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = std::env::temp_dir().join(format!("tico.{}.{unique}.tmp", std::process::id()));
+    std::fs::write(&path, text)?;
+    Ok(path)
+}
+
+/// Hand the terminal over to `cmd` for the duration of its run — leaving
+/// the alternate screen and raw mode exactly like nano's `endwin()` before
+/// `treat()`/spawning a program, then restoring both (and forcing a full
+/// repaint, since the program may have written anything to the screen)
+/// once it exits.
+fn run_suspended(mut cmd: std::process::Command) -> io::Result<std::process::ExitStatus> {
+    execute!(io::stdout(), Show, LeaveAlternateScreen)?;
+    disable_raw_mode()?;
+    let result = cmd.status();
+    let _ = enable_raw_mode();
+    let _ = execute!(
+        io::stdout(),
+        EnterAlternateScreen,
+        Hide,
+        Clear(ClearType::All)
+    );
+    result
+}
+
+/// `^T` Execute Command's submit: run `text` in the shell, and insert its
+/// captured output into the buffer at the cursor (or, with New Buffer on,
+/// into a fresh blank buffer) — matches nano's `execute_command` (the
+/// plain, non-pipe case; nano's `|command` pipe-to-stdin form isn't
+/// implemented).
+fn submit_execute_command(editor: &mut Editor, command: &str, new_buffer: bool) {
+    if new_buffer {
+        editor.buffers.push(crate::buffer::Buffer::empty());
+        editor.current = editor.buffers.len() - 1;
+    }
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    editor.set_status("Executing...");
+    match std::process::Command::new(&shell)
+        .arg("-c")
+        .arg(command)
+        .output()
+    {
+        Ok(output) => {
+            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+            text.push_str(&String::from_utf8_lossy(&output.stderr));
+            if !text.is_empty() {
+                editor.buf_mut().insert_str(&text);
+                editor.buf_mut().modified = true;
+            }
+            editor.history.add_execute(command);
+            editor.set_status("Executing...");
+        }
+        Err(e) => editor.set_status_alert(format!("Could not fork: {e}")),
+    }
+}
+
+/// `F12` (Main menu) / `^T` from within the Execute-Command prompt: spell
+/// check the current buffer (or, if a region is marked, just that region).
+fn run_speller(editor: &mut Editor) {
+    match editor.options.speller.clone() {
+        Some(cmd) if !cmd.is_empty() => run_alt_speller(editor, &cmd),
+        _ => run_internal_speller(editor),
+    }
+}
+
+/// The configured `set speller`/`--speller` program: an interactive tool
+/// (aspell -c, ispell, ...) that edits a temp copy of the text directly,
+/// matching nano's `treat()` — the terminal is handed over to it, and the
+/// buffer is replaced with the temp file's contents if it changed.
+fn run_alt_speller(editor: &mut Editor, speller_cmd: &str) {
+    let text = editor.tool_input_text();
+    let tmp = match write_temp_file(&text) {
+        Ok(p) => p,
+        Err(e) => {
+            editor.set_status_alert(format!("Error writing temp file: {e}"));
+            return;
+        }
+    };
+    let before = std::fs::metadata(&tmp).and_then(|m| m.modified()).ok();
+    let mut argv = split_command(speller_cmd);
+    if argv.is_empty() {
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+    let program = argv.remove(0);
+    let mut cmd = std::process::Command::new(&program);
+    cmd.args(&argv).arg(&tmp);
+    match run_suspended(cmd) {
+        Ok(status) if status.code().is_some_and(|c| (0..=2).contains(&c)) => {
+            let after = std::fs::metadata(&tmp).and_then(|m| m.modified()).ok();
+            if after != before {
+                match std::fs::read_to_string(&tmp) {
+                    Ok(new_text) => {
+                        editor.replace_tool_input(&new_text);
+                        editor.set_status("Finished checking spelling");
+                    }
+                    Err(e) => editor.set_status_alert(format!("Error reading temp file: {e}")),
+                }
+            } else {
+                editor.set_status("Nothing changed");
+            }
+        }
+        Ok(_) => editor.set_status_alert(format!("Program '{speller_cmd}' complained")),
+        Err(e) => editor.set_status_alert(format!("Error invoking '{speller_cmd}': {e}")),
+    }
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// No `set speller`/`--speller` configured: nano's own default — run
+/// `hunspell -l` (falling back to `spell`) over the text, sort and dedupe
+/// the misspelled words it lists (`sort -f | uniq`), then offer each one
+/// in turn via the `SpellFix` prompt (see `advance_spell_fix`).
+fn run_internal_speller(editor: &mut Editor) {
+    let text = editor.tool_input_text();
+    let words = match run_word_lister("hunspell", &["-l"], &text)
+        .or_else(|| run_word_lister("spell", &[], &text))
+    {
+        Some(w) => w,
+        None => {
+            editor.set_status_alert("Error invoking spell checker");
+            return;
+        }
+    };
+    let mut sorted = words;
+    sorted.sort_by_key(|w| w.to_lowercase());
+    let mut deduped: Vec<String> = Vec::with_capacity(sorted.len());
+    for w in sorted {
+        if deduped.last() != Some(&w) {
+            deduped.push(w);
+        }
+    }
+    advance_spell_fix(editor, deduped);
+}
+
+/// Run `program args...` with `text` piped to its stdin, returning its
+/// stdout split into non-blank lines — `None` if the program couldn't be
+/// spawned (e.g. not installed), so the caller can fall back to the next
+/// one in nano's own preference order.
+fn run_word_lister(program: &str, args: &[&str], text: &str) -> Option<Vec<String>> {
+    use std::io::Write as _;
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(text.as_bytes());
+    }
+    let output = child.wait_with_output().ok()?;
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// Advance the internal spell-fix loop: pop words off the front of
+/// `remaining` until one is actually found in the buffer (a speller can
+/// report a word that doesn't literally occur, e.g. across a line
+/// boundary), open the `SpellFix` prompt spotlighting it, or, once the
+/// list is exhausted, report done — matches nano's `spell_check`.
+fn advance_spell_fix(editor: &mut Editor, mut remaining: Vec<String>) {
+    while !remaining.is_empty() {
+        let word = remaining.remove(0);
+        if let Some(pos) = find_whole_word(editor.buf(), &word) {
+            editor.buf_mut().cursor = pos;
+            editor.scroll_to_cursor();
+            editor.mode = Mode::Prompt(Prompt {
+                kind: PromptKind::SpellFix {
+                    word: word.clone(),
+                    remaining,
+                },
+                menu: Menu::Spell,
+                label: "Edit a replacement".to_string(),
+                cursor: word.chars().count(),
+                input: word,
+                history_pos: None,
+                saved_input: None,
+            });
+            return;
+        }
+    }
+    editor.mode = Mode::Editing;
+    editor.set_status("Finished checking spelling");
+}
+
+/// `^O` from the Execute-Command prompt (or a rebound Main-menu key): run
+/// the current buffer's configured formatter (a per-language default, e.g.
+/// `gofmt -w`, matching nano's shipped nanorc `formatter` directives).
+/// Same terminal-handoff/temp-file contract as `run_alt_speller` (nano
+/// implements both through the shared `treat()`).
+fn run_formatter(editor: &mut Editor) {
+    let Some(formatter_cmd) = editor.buf().language.and_then(|l| l.formatter) else {
+        editor.set_status_mild("No formatter is defined for this type of file");
+        return;
+    };
+    let text = editor.tool_input_text();
+    let tmp = match write_temp_file(&text) {
+        Ok(p) => p,
+        Err(e) => {
+            editor.set_status_alert(format!("Error writing temp file: {e}"));
+            return;
+        }
+    };
+    let before = std::fs::metadata(&tmp).and_then(|m| m.modified()).ok();
+    let mut argv = split_command(formatter_cmd);
+    if argv.is_empty() {
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+    let program = argv.remove(0);
+    let mut cmd = std::process::Command::new(&program);
+    cmd.args(&argv).arg(&tmp);
+    match run_suspended(cmd) {
+        Ok(status) if status.code().is_some_and(|c| (0..=2).contains(&c)) => {
+            let after = std::fs::metadata(&tmp).and_then(|m| m.modified()).ok();
+            if after != before {
+                match std::fs::read_to_string(&tmp) {
+                    Ok(new_text) => {
+                        editor.replace_tool_input(&new_text);
+                        editor.set_status("Buffer has been processed");
+                    }
+                    Err(e) => editor.set_status_alert(format!("Error reading temp file: {e}")),
+                }
+            } else {
+                editor.set_status("Nothing changed");
+            }
+        }
+        Ok(_) => editor.set_status_alert(format!("Program '{formatter_cmd}' complained")),
+        Err(e) => editor.set_status_alert(format!("Error invoking '{formatter_cmd}': {e}")),
+    }
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// `^Y` from the Execute-Command prompt (or a rebound Main-menu key): run
+/// the current buffer's configured linter and open the interactive result
+/// viewer (`PromptKind::Linter`) on whatever it reports — matches nano's
+/// `do_linter`, without the "jump to a different open buffer" case (tico's
+/// linter only ever targets the current buffer's own file).
+fn run_linter(editor: &mut Editor) {
+    let Some(linter_cmd) = editor.buf().language.and_then(|l| l.linter) else {
+        editor.set_status_mild("No linter is defined for this type of file");
+        return;
+    };
+    let Some(path) = editor.buf().path.clone() else {
+        editor.set_status_mild("No linter is defined for this type of file");
+        return;
+    };
+    let mut argv = split_command(linter_cmd);
+    if argv.is_empty() {
+        return;
+    }
+    let program = argv.remove(0);
+    editor.set_status("Invoking linter...");
+    let output = std::process::Command::new(&program)
+        .args(&argv)
+        .arg(&path)
+        .output();
+    let output = match output {
+        Ok(o) => o,
+        Err(e) => {
+            editor.set_status_alert(format!("Error invoking '{linter_cmd}': {e}"));
+            return;
+        }
+    };
+    let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+    let messages = parse_linter_output(&combined);
+    if messages.is_empty() {
+        editor.set_status(format!("Got 0 parsable lines from command: {linter_cmd}"));
+        return;
+    }
+    goto_lint_message(editor, &messages[0]);
+    editor.mode = Mode::Prompt(Prompt {
+        kind: PromptKind::Linter { messages, index: 0 },
+        menu: Menu::Linter,
+        label: String::new(),
+        input: String::new(),
+        cursor: 0,
+        history_pos: None,
+        saved_input: None,
+    });
+    if let Mode::Prompt(prompt) = &mut editor.mode
+        && let PromptKind::Linter { messages, index } = &prompt.kind
+    {
+        prompt.label = messages[*index].msg.clone();
+    }
+}
+
+/// Parse `filename:line:col: message` (or `filename:line,col: message`, or
+/// bare `filename:line: message` with the column defaulting to 1) lines —
+/// matches nano's own linter-output parser in `do_linter`.
+/// Parse a leading (optionally signed) decimal integer, ignoring any
+/// trailing non-digit text — matches C's `strtol(s, NULL, 10)`, which
+/// nano's linter parser relies on to tolerate e.g. `12,2` as a line number
+/// (reading `12` and leaving the rest for a separate comma-split).
+fn parse_leading_int(s: &str) -> Option<i64> {
+    let s = s.trim_start();
+    let neg = s.starts_with('-');
+    let digits_start = if neg || s.starts_with('+') { 1 } else { 0 };
+    let digit_len = s[digits_start..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .count();
+    if digit_len == 0 {
+        return None;
+    }
+    s[..digits_start + digit_len].parse().ok()
+}
+
+fn parse_linter_output(output: &str) -> Vec<crate::app::LintMessage> {
+    let mut messages = Vec::new();
+    for line in output.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        // The message is everything after the first space anywhere in the
+        // line, independent of how the fields before it are split — matches
+        // nano's `spacer = strstr(complaint, " ")`.
+        let Some(spacer) = line.find(' ') else {
+            continue;
+        };
+        let Some((filename, after_filename)) = line.split_once(':') else {
+            continue;
+        };
+        let Some((linestring, after_line)) = after_filename.split_once(':') else {
+            continue;
+        };
+        let Some(lineno) = parse_leading_int(linestring).filter(|&n| n > 0) else {
+            continue;
+        };
+        // `strtok(NULL, " ")` on the remainder: skips any leading spaces,
+        // then reads up to the next one.
+        let colstring = after_line.trim_start_matches(' ').split(' ').next();
+        let mut colno = colstring
+            .and_then(parse_leading_int)
+            .filter(|&c| c > 0)
+            .unwrap_or(0);
+        if colno <= 0 {
+            colno = 1;
+            // "line,column" form: the part after a comma in `linestring`.
+            if let Some((_, colpart)) = linestring.split_once(',')
+                && let Some(c) = parse_leading_int(colpart)
+            {
+                colno = c;
+            }
+        }
+        messages.push(crate::app::LintMessage {
+            filename: filename.to_string(),
+            line: lineno as usize,
+            col: colno as usize,
+            msg: line[spacer + 1..].to_string(),
+        });
+    }
+    messages
+}
+
+/// Move the cursor to a lint message's reported location, matching nano's
+/// `goto_line_posx` + `adjust_viewport(CENTERING)` in `do_linter`.
+fn goto_lint_message(editor: &mut Editor, msg: &crate::app::LintMessage) {
+    let line = msg
+        .line
+        .saturating_sub(1)
+        .min(editor.buf().line_count().saturating_sub(1));
+    let col = msg
+        .col
+        .saturating_sub(1)
+        .min(editor.buf().line(line).chars().count());
+    editor.buf_mut().cursor = Pos::new(line, col);
+    editor.scroll_to_cursor();
+}
+
+/// Step through linter results with PageUp/PageDown ("Previous/Next Linter
+/// message"), or close the viewer with Cancel/Enter — matches nano's
+/// `MLINTER` navigation loop in `do_linter`.
+fn handle_linter_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {
+    let PromptKind::Linter {
+        messages,
+        mut index,
+    } = prompt.kind
+    else {
+        unreachable!()
+    };
+    if matches!(key.code, KeyCode::Esc) {
+        editor.mode = Mode::Editing;
+        editor.status = None;
+        return;
+    }
+    let Some(tkey) = normalize_key(key) else {
+        editor.mode = Mode::Prompt(Prompt {
+            kind: PromptKind::Linter { messages, index },
+            ..prompt
+        });
+        return;
+    };
+    // "At first/last message" briefly replaces the current message when a
+    // boundary is hit (nano flashes it for ~600ms then restores the
+    // message; tico's synchronous input loop has no timed flash, so it
+    // just shows until the next keystroke instead).
+    let mut boundary_label = None;
+    match editor.keymap.lookup_menu_only(Menu::Linter, tkey) {
+        Some(Binding::Action(Action::Cancel)) => {
+            editor.mode = Mode::Editing;
+            editor.status = None;
+            return;
+        }
+        Some(Binding::Action(Action::PageUp)) => {
+            if index > 0 {
+                index -= 1;
+            } else {
+                boundary_label = Some("At first message");
+                editor.bell_pending = true;
+            }
+        }
+        Some(Binding::Action(Action::PageDown)) => {
+            if index + 1 < messages.len() {
+                index += 1;
+            } else {
+                boundary_label = Some("At last message");
+                editor.bell_pending = true;
+            }
+        }
+        _ => {}
+    }
+    goto_lint_message(editor, &messages[index]);
+    let label = boundary_label
+        .map(str::to_string)
+        .unwrap_or_else(|| messages[index].msg.clone());
+    editor.mode = Mode::Prompt(Prompt {
+        kind: PromptKind::Linter { messages, index },
+        menu: Menu::Linter,
+        label,
+        input: String::new(),
+        cursor: 0,
+        history_pos: None,
+        saved_input: None,
+    });
 }
 
 // ---------------------------------------------------------------------
@@ -1458,10 +2084,10 @@ const GOTOLINE_SHORTCUTS: &[(Action, &str)] = &[
 ];
 
 /// The `^R` Read File prompt's shortcut list, matching nano's full menu.
-/// Execute (`^X`), no-conversion (`M-N`), and the file browser (`^T`)
-/// aren't actually implemented yet — see apply_prompt_action's
-/// FlipConvert/FlipExecute/Browser arms — but are still listed rather than
-/// silently omitted, since pressing them does now give real feedback.
+/// No-conversion (`M-N`) and the file browser (`^T`) aren't actually
+/// implemented yet — see apply_prompt_action's FlipConvert/Browser arms —
+/// but are still listed rather than silently omitted, since pressing them
+/// does now give real feedback.
 const INSERT_SHORTCUTS: &[(Action, &str)] = &[
     (Action::Help, "Help"),
     (Action::Cancel, "Cancel"),
@@ -1469,6 +2095,34 @@ const INSERT_SHORTCUTS: &[(Action, &str)] = &[
     (Action::FlipConvert, "No Conversion"),
     (Action::Browser, "Browse"),
     (Action::FlipExecute, "Execute Command"),
+];
+
+/// The `^T` Execute Command prompt's shortcut list, matching nano's full
+/// MEXECUTE menu (confirmed against the installed nano's own bottom bar).
+/// Full Justify (`^J`), Cut Till End (`^V`), Pipe Text (`M-\`), and Suspend
+/// (`^Z`) aren't actually implemented yet — see apply_prompt_action's
+/// arms for them — but are still listed rather than silently omitted.
+const EXECUTE_SHORTCUTS: &[(Action, &str)] = &[
+    (Action::Help, "Help"),
+    (Action::Cancel, "Cancel"),
+    (Action::Older, "Older"),
+    (Action::Newer, "Newer"),
+    (Action::FlipNewBuffer, "New Buffer"),
+    (Action::FlipPipe, "Pipe Text"),
+    (Action::Speller, "Spell Check"),
+    (Action::Linter, "Linter"),
+    (Action::FullJustify, "Full Justify"),
+    (Action::Formatter, "Formatter"),
+    (Action::CutRestOfFile, "Cut Till End"),
+    (Action::Suspend, "Suspend"),
+];
+
+/// The linter's interactive result viewer (`MLINTER`): Cancel plus
+/// PageUp/PageDown to step to the previous/next reported message.
+const LINTER_SHORTCUTS: &[(Action, &str)] = &[
+    (Action::Cancel, "Cancel"),
+    (Action::PageUp, "Previous Linter message"),
+    (Action::PageDown, "Next Linter message"),
 ];
 
 /// The `^G` help viewer's own bottom bar (confirmed against the installed
@@ -1554,6 +2208,8 @@ fn shortcut_bar_entries(keymap: &KeyMap, prompt: Option<&Prompt>) -> Vec<(String
         Menu::GotoLine => GOTOLINE_SHORTCUTS,
         Menu::Help => HELP_SHORTCUTS,
         Menu::Insert => INSERT_SHORTCUTS,
+        Menu::Execute => EXECUTE_SHORTCUTS,
+        Menu::Linter => LINTER_SHORTCUTS,
         _ => return resolve_shortcuts(keymap, Menu::Main, SHORTCUT_PRIORITY),
     };
     resolve_shortcuts(keymap, p.menu, table)
@@ -2013,9 +2669,12 @@ mod tests {
 
     fn insert_prompt(new_buffer: bool, input: &str) -> Prompt {
         Prompt {
-            kind: PromptKind::InsertFile { new_buffer },
+            kind: PromptKind::InsertFile {
+                new_buffer,
+                execute: false,
+            },
             menu: Menu::Insert,
-            label: crate::app::insert_prompt_label(new_buffer),
+            label: crate::app::insert_prompt_label(new_buffer, false),
             input: input.to_string(),
             cursor: input.chars().count(),
             history_pos: None,
@@ -2109,7 +2768,13 @@ mod tests {
             &mut prompt,
             Action::FlipNewBuffer
         ));
-        assert_eq!(prompt.kind, PromptKind::InsertFile { new_buffer: true });
+        assert_eq!(
+            prompt.kind,
+            PromptKind::InsertFile {
+                new_buffer: true,
+                execute: false
+            }
+        );
         assert!(prompt.label.contains("new buffer"));
     }
 
@@ -2117,7 +2782,6 @@ mod tests {
     fn unimplemented_insert_actions_report_plainly_and_close_the_prompt() {
         for (action, expected) in [
             (Action::FlipConvert, "No Conversion: not yet implemented"),
-            (Action::FlipExecute, "Execute Command: not yet implemented"),
             (Action::Browser, "File Browser: not yet implemented"),
         ] {
             let mut ed = test_editor("x");
@@ -2132,6 +2796,116 @@ mod tests {
             );
             assert_eq!(ed.status.as_deref(), Some(expected), "{action:?}");
         }
+    }
+
+    #[test]
+    fn flip_execute_toggles_mode_menu_and_label() {
+        let mut ed = test_editor("x");
+        let mut prompt = insert_prompt(false, "");
+        assert!(!apply_prompt_action(
+            &mut ed,
+            &mut prompt,
+            Action::FlipExecute
+        ));
+        assert_eq!(
+            prompt.kind,
+            PromptKind::InsertFile {
+                new_buffer: false,
+                execute: true
+            }
+        );
+        assert_eq!(prompt.menu, Menu::Execute);
+        assert_eq!(prompt.label, "Command to execute");
+
+        // Flipping back restores the Insert-File prompt.
+        assert!(!apply_prompt_action(
+            &mut ed,
+            &mut prompt,
+            Action::FlipExecute
+        ));
+        assert_eq!(
+            prompt.kind,
+            PromptKind::InsertFile {
+                new_buffer: false,
+                execute: false
+            }
+        );
+        assert_eq!(prompt.menu, Menu::Insert);
+        assert_eq!(prompt.label, "File to insert [from ./]");
+    }
+
+    #[test]
+    fn execute_command_inserts_output_at_cursor() {
+        let mut ed = test_editor("ab");
+        ed.buf_mut().cursor = Pos::new(0, 1);
+        submit_execute_command(&mut ed, "echo -n hello", false);
+        assert_eq!(ed.buf().to_string(), "ahellob");
+        assert!(ed.buf().modified);
+        assert_eq!(ed.history.execute, vec!["echo -n hello".to_string()]);
+    }
+
+    #[test]
+    fn execute_command_new_buffer_opens_a_separate_buffer() {
+        let mut ed = test_editor("original");
+        submit_execute_command(&mut ed, "echo -n hi", true);
+        assert_eq!(ed.buffers.len(), 2);
+        assert_eq!(ed.current, 1);
+        assert_eq!(ed.buf().to_string(), "hi");
+        assert_eq!(ed.buffers[0].to_string(), "original");
+    }
+
+    #[test]
+    fn replace_whole_word_replaces_only_whole_word_matches() {
+        let mut buf = crate::buffer::Buffer::from_text("teh cat sat on teh mat, nateh", None);
+        assert!(replace_whole_word(&mut buf, "teh", "the"));
+        assert_eq!(
+            buf.to_string(),
+            "the cat sat on the mat, nateh",
+            "the trailing 'nateh' isn't a whole-word match and must be left alone"
+        );
+    }
+
+    #[test]
+    fn find_whole_word_finds_first_occurrence_only() {
+        let buf = crate::buffer::Buffer::from_text("one\nteh two\nteh three", None);
+        assert_eq!(find_whole_word(&buf, "teh"), Some(Pos::new(1, 0)));
+        assert_eq!(find_whole_word(&buf, "missing"), None);
+    }
+
+    #[test]
+    fn parse_linter_output_handles_colon_and_comma_column_forms() {
+        let out = "main.rs:3:5: unused variable\nmain.rs:9: missing semicolon\nmain.rs:12,2: bad indent\nnot a lint line\n";
+        let messages = parse_linter_output(out);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].line, 3);
+        assert_eq!(messages[0].col, 5);
+        assert_eq!(messages[0].msg, "unused variable");
+        assert_eq!(messages[1].line, 9);
+        assert_eq!(messages[1].col, 1);
+        assert_eq!(messages[1].msg, "missing semicolon");
+        assert_eq!(messages[2].line, 12);
+        assert_eq!(messages[2].col, 2);
+        assert_eq!(messages[2].msg, "bad indent");
+    }
+
+    #[test]
+    fn run_formatter_reports_when_none_configured() {
+        let mut ed = test_editor("x");
+        run_formatter(&mut ed);
+        assert_eq!(
+            ed.status.as_deref(),
+            Some("No formatter is defined for this type of file")
+        );
+    }
+
+    #[test]
+    fn run_linter_reports_when_none_configured() {
+        let mut ed = test_editor("x");
+        run_linter(&mut ed);
+        assert_eq!(
+            ed.status.as_deref(),
+            Some("No linter is defined for this type of file")
+        );
     }
 
     #[test]
