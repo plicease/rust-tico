@@ -7,7 +7,11 @@ use clap::Parser;
 #[command(
     name = "tico",
     version,
-    about = "Yet Another Text Editor (a nano-compatible TUI editor)"
+    about = "Yet Another Text Editor (a nano-compatible TUI editor)",
+    // clap's default (`args_override_self = false`) treats a repeated flag
+    // as a conflict-with-itself error; nano (like most CLI tools) just
+    // tolerates `-z -z`/`-v -v`/etc. as redundant, not an error.
+    args_override_self = true
 )]
 pub struct Cli {
     #[arg(short = 'A', long = "smarthome", help = "Enable smart home key")]
