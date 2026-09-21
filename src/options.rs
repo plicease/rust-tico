@@ -133,6 +133,15 @@ pub struct Options {
     pub modernbindings: bool,
     pub syntax_name: Option<String>,
     pub rcfile: Option<String>,
+
+    /// tico-only (no nano equivalent): buffers larger than this are never
+    /// syntax-highlighted, regardless of `syntax_highlighting` -- a full
+    /// tree-sitter parse plus query run isn't free, and without a cap a
+    /// large enough file (a big generated source file, a log file opened
+    /// by mistake, ...) would make every load/edit visibly stall.
+    /// Configured via `~/.ticorc`'s `[tico]` section
+    /// (`max_syntax_highlight_size = 4MB`); see `parse_byte_size`.
+    pub max_syntax_highlight_bytes: u64,
 }
 
 impl Default for Options {
@@ -225,8 +234,31 @@ impl Default for Options {
             modernbindings: false,
             syntax_name: None,
             rcfile: None,
+            // 4 MiB: generous enough that real-world source files
+            // essentially never hit it, while keeping worst-case
+            // highlight latency well under a second (see the perf work
+            // that made this cap meaningful to set at all).
+            max_syntax_highlight_bytes: 4 * 1024 * 1024,
         }
     }
+}
+
+/// Parse a byte-size setting: a bare integer (bytes), or one suffixed with
+/// `KB`/`MB`/`GB` (case-insensitive; 1024-based, so `1MB` == 1048576).
+/// `None` on anything that isn't a plain integer optionally followed by
+/// one of those three suffixes, or that overflows `u64` once multiplied.
+pub fn parse_byte_size(spec: &str) -> Option<u64> {
+    let lower = spec.trim().to_ascii_lowercase();
+    let (digits, multiplier): (&str, u64) = if let Some(n) = lower.strip_suffix("gb") {
+        (n, 1024 * 1024 * 1024)
+    } else if let Some(n) = lower.strip_suffix("mb") {
+        (n, 1024 * 1024)
+    } else if let Some(n) = lower.strip_suffix("kb") {
+        (n, 1024)
+    } else {
+        (lower.as_str(), 1)
+    };
+    digits.trim().parse::<u64>().ok()?.checked_mul(multiplier)
 }
 
 /// Parse a nanorc-style color spec: `[bold,][italic,]fgcolor[,bgcolor]`.
@@ -285,4 +317,45 @@ fn parse_color(name: &str) -> Option<NamedColor> {
         _ => return None,
     };
     Some(NamedColor { color, light })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_byte_size_plain_bytes() {
+        assert_eq!(parse_byte_size("4096"), Some(4096));
+        assert_eq!(parse_byte_size("0"), Some(0));
+    }
+
+    #[test]
+    fn parse_byte_size_kb_mb_gb_suffixes_are_1024_based_and_case_insensitive() {
+        assert_eq!(parse_byte_size("4KB"), Some(4 * 1024));
+        assert_eq!(parse_byte_size("4kb"), Some(4 * 1024));
+        assert_eq!(parse_byte_size("4Kb"), Some(4 * 1024));
+        assert_eq!(parse_byte_size("4MB"), Some(4 * 1024 * 1024));
+        assert_eq!(parse_byte_size("4mb"), Some(4 * 1024 * 1024));
+        assert_eq!(parse_byte_size("2GB"), Some(2 * 1024 * 1024 * 1024));
+        assert_eq!(parse_byte_size("2gb"), Some(2 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn parse_byte_size_tolerates_surrounding_and_inner_whitespace() {
+        assert_eq!(parse_byte_size("  4 MB  "), Some(4 * 1024 * 1024));
+    }
+
+    #[test]
+    fn parse_byte_size_rejects_garbage() {
+        assert_eq!(parse_byte_size(""), None);
+        assert_eq!(parse_byte_size("MB"), None);
+        assert_eq!(parse_byte_size("4TB"), None); // not a supported suffix
+        assert_eq!(parse_byte_size("four MB"), None);
+        assert_eq!(parse_byte_size("-4MB"), None);
+    }
+
+    #[test]
+    fn parse_byte_size_overflow_returns_none_instead_of_panicking() {
+        assert_eq!(parse_byte_size("99999999999999999999GB"), None);
+    }
 }

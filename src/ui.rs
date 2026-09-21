@@ -139,6 +139,7 @@ pub fn run(editor: &mut Editor) -> io::Result<()> {
 /// message was just posted (matching nano's beep() for ALERT-importance
 /// statusline() calls).
 fn render_and_ring(editor: &mut Editor) -> io::Result<()> {
+    maybe_warn_highlighting_disabled_for_size(editor);
     render(editor)?;
     if editor.bell_pending {
         editor.bell_pending = false;
@@ -146,6 +147,48 @@ fn render_and_ring(editor: &mut Editor) -> io::Result<()> {
         io::stdout().flush()?;
     }
     Ok(())
+}
+
+/// One-time "syntax highlighting disabled: file too large" notice for the
+/// current buffer, the first time it's found over
+/// `options.max_syntax_highlight_bytes` (checked on every render, but the
+/// check itself is just a length read, and `highlighting_size_warning_shown`
+/// keeps it from repeating). Runs before render() so the notice shows up
+/// in the very frame that would otherwise have silently skipped
+/// highlighting -- including the first frame right after opening a large
+/// file, or right after switching to one.
+fn maybe_warn_highlighting_disabled_for_size(editor: &mut Editor) {
+    if !editor.options.syntax_highlighting || editor.buf().language.is_none() {
+        return;
+    }
+    let max = editor.options.max_syntax_highlight_bytes;
+    if editor.buf().rope.len_bytes() as u64 <= max || editor.buf().highlighting_size_warning_shown {
+        return;
+    }
+    editor.buf_mut().highlighting_size_warning_shown = true;
+    editor.set_status_mild(format!(
+        "Syntax highlighting disabled: file is larger than {}",
+        format_byte_size(max)
+    ));
+}
+
+/// Render a byte count the way it was most likely configured -- whichever
+/// of B/KB/MB/GB divides it evenly (falling back to plain bytes), so a
+/// `max_syntax_highlight_size = 4MB` setting is echoed back as "4MB", not
+/// "4194304 bytes".
+fn format_byte_size(bytes: u64) -> String {
+    const GB: u64 = 1024 * 1024 * 1024;
+    const MB: u64 = 1024 * 1024;
+    const KB: u64 = 1024;
+    if bytes != 0 && bytes.is_multiple_of(GB) {
+        format!("{}GB", bytes / GB)
+    } else if bytes != 0 && bytes.is_multiple_of(MB) {
+        format!("{}MB", bytes / MB)
+    } else if bytes != 0 && bytes.is_multiple_of(KB) {
+        format!("{}KB", bytes / KB)
+    } else {
+        format!("{bytes} bytes")
+    }
 }
 
 /// Build the "file changed on disk, you have unsaved edits" choice prompt —
@@ -976,6 +1019,7 @@ fn handle_diff_key(
             KeyCode::Char('a') | KeyCode::Char('A') => {
                 let text = merged_text.clone();
                 editor.buf_mut().rope = ropey::Rope::from_str(&text);
+                editor.buf_mut().invalidate_highlight_cache();
                 editor.buf_mut().modified = true;
                 if let Some(path) = editor.buf().path.clone() {
                     editor.buf_mut().disk_state = crate::fileio::stat_disk_state(&path);
@@ -2668,17 +2712,24 @@ fn render_buffer(
     let cols = editor.screen_cols;
     let tabsize = editor.options.tabsize as usize;
 
-    // Recomputed on every render rather than cached/incrementally reparsed:
-    // tree-sitter is fast, and redraws are already limited to actual dirty
-    // events elsewhere, so a full-buffer reparse per redraw is an acceptable
-    // v1 cost.
-    let spans: Vec<crate::syntax::HighlightSpan> = if editor.options.syntax_highlighting {
-        buf.language
-            .map(|lang| crate::syntax::highlight(&buf.to_string(), lang))
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    // Memoized on the buffer itself, invalidated only by an actual edit or
+    // language change (see `Buffer::highlighted_spans_cached`) -- a full
+    // tree-sitter reparse plus query run is too expensive to redo on every
+    // render, which used to happen even for pure cursor movement. Buffers
+    // over `max_syntax_highlight_bytes` skip highlighting altogether
+    // (tico-only safety valve; see `maybe_warn_highlighting_disabled_for_size`
+    // for the one-time status notice) -- checking that is just a length
+    // read, no parsing attempted.
+    let too_large_to_highlight =
+        buf.rope.len_bytes() as u64 > editor.options.max_syntax_highlight_bytes;
+    let spans: Vec<crate::syntax::HighlightSpan> =
+        if editor.options.syntax_highlighting && !too_large_to_highlight {
+            buf.language
+                .map(|lang| buf.highlighted_spans_cached(lang))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
     let selection = editor.selection_range();
 
     for r in 0..rows {
@@ -3607,6 +3658,53 @@ mod tests {
         assert_eq!(messages[2].line, 12);
         assert_eq!(messages[2].col, 2);
         assert_eq!(messages[2].msg, "bad indent");
+    }
+
+    #[test]
+    fn format_byte_size_uses_the_largest_exact_unit() {
+        assert_eq!(format_byte_size(4 * 1024 * 1024), "4MB");
+        assert_eq!(format_byte_size(2 * 1024 * 1024 * 1024), "2GB");
+        assert_eq!(format_byte_size(4096), "4KB");
+        assert_eq!(format_byte_size(4097), "4097 bytes");
+        assert_eq!(format_byte_size(0), "0 bytes");
+    }
+
+    #[test]
+    fn warns_once_when_buffer_exceeds_the_size_limit() {
+        let mut ed = test_editor(&"x".repeat(100));
+        ed.options.max_syntax_highlight_bytes = 10;
+        let lang = crate::syntax::detect_with_override(None, "", Some("rust")).unwrap();
+        ed.buf_mut().language = Some(lang);
+
+        maybe_warn_highlighting_disabled_for_size(&mut ed);
+        assert_eq!(
+            ed.status.as_deref(),
+            Some("Syntax highlighting disabled: file is larger than 10 bytes")
+        );
+        assert!(ed.buf().highlighting_size_warning_shown);
+
+        // Doesn't repeat on a later check.
+        ed.status = None;
+        maybe_warn_highlighting_disabled_for_size(&mut ed);
+        assert_eq!(ed.status, None);
+    }
+
+    #[test]
+    fn no_size_warning_under_the_limit_or_without_a_detected_language() {
+        let mut ed = test_editor("small");
+        ed.options.max_syntax_highlight_bytes = 1_000_000;
+        let lang = crate::syntax::detect_with_override(None, "", Some("rust")).unwrap();
+        ed.buf_mut().language = Some(lang);
+        maybe_warn_highlighting_disabled_for_size(&mut ed);
+        assert_eq!(ed.status, None, "well under the limit: no warning");
+
+        let mut ed2 = test_editor(&"x".repeat(100));
+        ed2.options.max_syntax_highlight_bytes = 10;
+        maybe_warn_highlighting_disabled_for_size(&mut ed2);
+        assert_eq!(
+            ed2.status, None,
+            "over the limit but no detected language: nothing to warn about"
+        );
     }
 
     #[test]

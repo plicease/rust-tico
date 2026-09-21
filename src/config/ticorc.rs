@@ -1,4 +1,4 @@
-//! Parser for tico's own `~/.ticorc`: an INI-style file with three sections.
+//! Parser for tico's own `~/.ticorc`: an INI-style file with four sections.
 //!
 //! - `[main]`: the same `set`-style option vocabulary as `~/.nanorc` (see
 //!   `nanorc(5)`), one option per line, without the leading `set`/`unset`
@@ -11,12 +11,16 @@
 //! - `[syntax]`: tico's own syntax-highlighting configuration; not
 //!   required to resemble nano's `color`/`icolor` format at all.
 //!   (Reserved for future use.)
+//! - `[tico]`: settings with no nano equivalent at all, keyed by plain
+//!   `name = value` lines (not the `set`/`unset` vocabulary `[main]`
+//!   uses). Currently just `max_syntax_highlight_size` (see
+//!   `options::parse_byte_size` for the accepted `KB`/`MB`/`GB` forms).
 //!
 //! Settings here take precedence over `~/.nanorc`.
 
 use super::settings;
 use crate::keymap::{Action, Binding, Key, KeyMap, Menu};
-use crate::options::Options;
+use crate::options::{self, Options};
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Section {
@@ -24,6 +28,7 @@ enum Section {
     Main,
     KeyBindings,
     Syntax,
+    Tico,
 }
 
 pub fn parse(text: &str, options: &mut Options, keymap: &mut KeyMap, warnings: &mut Vec<String>) {
@@ -39,6 +44,7 @@ pub fn parse(text: &str, options: &mut Options, keymap: &mut KeyMap, warnings: &
                 "main" => Section::Main,
                 "keybindings" => Section::KeyBindings,
                 "syntax" => Section::Syntax,
+                "tico" => Section::Tico,
                 _ => {
                     warnings.push(format!("ticorc:{}: unknown section [{name}]", lineno + 1));
                     Section::None
@@ -53,6 +59,7 @@ pub fn parse(text: &str, options: &mut Options, keymap: &mut KeyMap, warnings: &
                 // Reserved: tico's own highlighting config, not yet
                 // implemented. Lines here are accepted but currently unused.
             }
+            Section::Tico => parse_tico_line(line, options, warnings, lineno),
             Section::None => {
                 warnings.push(format!(
                     "ticorc:{}: setting outside of a [section]: `{line}`",
@@ -60,6 +67,32 @@ pub fn parse(text: &str, options: &mut Options, keymap: &mut KeyMap, warnings: &
                 ));
             }
         }
+    }
+}
+
+fn parse_tico_line(line: &str, options: &mut Options, warnings: &mut Vec<String>, lineno: usize) {
+    let Some((key, value)) = line.split_once('=') else {
+        warnings.push(format!(
+            "ticorc:{}: expected `name = value` in [tico]: `{line}`",
+            lineno + 1
+        ));
+        return;
+    };
+    let key = key.trim();
+    let value = value.trim();
+    match key {
+        "max_syntax_highlight_size" => match options::parse_byte_size(value) {
+            Some(n) => options.max_syntax_highlight_bytes = n,
+            None => warnings.push(format!(
+                "ticorc:{}: invalid size `{value}` for max_syntax_highlight_size \
+                 (expected a byte count, optionally suffixed with KB/MB/GB)",
+                lineno + 1
+            )),
+        },
+        _ => warnings.push(format!(
+            "ticorc:{}: unknown [tico] setting `{key}`",
+            lineno + 1
+        )),
     }
 }
 
@@ -172,5 +205,76 @@ fn split_first(s: &str) -> (&str, &str) {
     match s.find(char::is_whitespace) {
         Some(i) => (&s[..i], s[i..].trim_start()),
         None => (s, ""),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keymap::KeyMap;
+
+    #[test]
+    fn tico_section_sets_max_syntax_highlight_size() {
+        let mut options = Options::default();
+        let mut keymap = KeyMap::new();
+        let mut warnings = Vec::new();
+        parse(
+            "[tico]\nmax_syntax_highlight_size = 8MB\n",
+            &mut options,
+            &mut keymap,
+            &mut warnings,
+        );
+        assert_eq!(options.max_syntax_highlight_bytes, 8 * 1024 * 1024);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+    }
+
+    #[test]
+    fn tico_section_accepts_a_plain_byte_count() {
+        let mut options = Options::default();
+        let mut keymap = KeyMap::new();
+        let mut warnings = Vec::new();
+        parse(
+            "[tico]\nmax_syntax_highlight_size = 12345\n",
+            &mut options,
+            &mut keymap,
+            &mut warnings,
+        );
+        assert_eq!(options.max_syntax_highlight_bytes, 12345);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn tico_section_warns_on_an_invalid_size() {
+        let mut options = Options::default();
+        let default_max = options.max_syntax_highlight_bytes;
+        let mut keymap = KeyMap::new();
+        let mut warnings = Vec::new();
+        parse(
+            "[tico]\nmax_syntax_highlight_size = not_a_size\n",
+            &mut options,
+            &mut keymap,
+            &mut warnings,
+        );
+        assert_eq!(
+            options.max_syntax_highlight_bytes, default_max,
+            "an invalid size must not silently change the setting"
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("max_syntax_highlight_size"));
+    }
+
+    #[test]
+    fn tico_section_warns_on_an_unknown_setting() {
+        let mut options = Options::default();
+        let mut keymap = KeyMap::new();
+        let mut warnings = Vec::new();
+        parse(
+            "[tico]\nnonexistent_setting = 1\n",
+            &mut options,
+            &mut keymap,
+            &mut warnings,
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("nonexistent_setting"));
     }
 }
