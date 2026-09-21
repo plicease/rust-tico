@@ -761,9 +761,19 @@ impl Editor {
             self.buf_mut().insert_str(&new_text);
             self.buf_mut().modified = true;
 
-            let final_line = start + new_count - 1;
-            let final_col = self.buf().line(final_line).chars().count();
-            self.buf_mut().cursor = Pos::new(final_line, final_col);
+            // Matches nano: the cursor ends up on whatever line follows
+            // the justified paragraph (often a blank separator line), not
+            // on the paragraph's own last line -- `justify_text` extends
+            // the cut region one line further before re-pasting it, which
+            // is where this comes from.
+            let next_line = start + new_count;
+            if next_line < self.buf().line_count() {
+                self.buf_mut().cursor = Pos::new(next_line, 0);
+            } else {
+                let last_line = self.buf().line_count().saturating_sub(1);
+                let last_col = self.buf().line(last_line).chars().count();
+                self.buf_mut().cursor = Pos::new(last_line, last_col);
+            }
             self.scroll_to_cursor();
             self.set_status("Justified paragraph");
         }
@@ -1619,6 +1629,24 @@ mod tests {
         let mut ed = test_editor("hello");
         ed.buffers.clear();
         ed.maybe_update_lock_modified_flag(); // must not panic
+    }
+
+    #[test]
+    fn justify_leaves_cursor_on_the_line_after_the_paragraph_not_its_last_line() {
+        // Confirmed against the installed nano: justify_text extends the
+        // cut region one line further than the paragraph itself before
+        // pasting the result back, so the cursor ends up on whatever
+        // follows (typically a blank separator line), not on the
+        // paragraph's own last line.
+        let mut ed = test_editor("one two three four five six seven eight\n\nSecond paragraph.\n");
+        ed.options.fill = -65; // wrap_at = 80 - 65 = 15: forces a rewrap into multiple lines
+        ed.execute(Action::Justify);
+        assert_eq!(ed.buf().cursor.col, 0);
+        assert_eq!(ed.buf().line(ed.buf().cursor.line), "");
+        assert!(
+            ed.buf().cursor.line > 1,
+            "the one-line paragraph should have been rewrapped into several lines first"
+        );
     }
 
     #[test]
