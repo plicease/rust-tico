@@ -101,6 +101,16 @@ pub fn check_external_change(buffer: &Buffer) -> ExternalChange {
     let Some(known) = &buffer.disk_state else {
         return ExternalChange::Unchanged;
     };
+    // Cheap pre-check: this runs on every idle poll (roughly every 600ms),
+    // so skip re-reading and re-hashing the whole file when the mtime and
+    // size we last saw still match — avoids a full read for anything but
+    // a tiny file when nothing has actually changed.
+    if let Ok(meta) = std::fs::metadata(path)
+        && meta.len() == known.len
+        && meta.modified().ok() == known.mtime
+    {
+        return ExternalChange::Unchanged;
+    }
     let Some(current) = stat_disk_state(path) else {
         return ExternalChange::Unchanged;
     };

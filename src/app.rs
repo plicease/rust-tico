@@ -31,7 +31,6 @@ pub enum PromptKind {
         lock_path: std::path::PathBuf,
         target: String,
     },
-    Help,
     /// `^R` Read File: `new_buffer` mirrors nano's `NEW_BUFFER` flag, toggled
     /// live by `M-F` within this one prompt (seeded from `set multibuffer`,
     /// reset back to that baseline the next time the prompt opens) — when
@@ -81,27 +80,6 @@ pub struct Prompt {
     /// What `input` was before history browsing started, restored when
     /// Newer is pressed past the most recent entry.
     pub saved_input: Option<String>,
-}
-
-impl Prompt {
-    pub fn new(
-        kind: PromptKind,
-        menu: Menu,
-        label: impl Into<String>,
-        input: impl Into<String>,
-    ) -> Prompt {
-        let input = input.into();
-        let cursor = input.chars().count();
-        Prompt {
-            kind,
-            menu,
-            label: label.into(),
-            input,
-            cursor,
-            history_pos: None,
-            saved_input: None,
-        }
-    }
 }
 
 pub enum Mode {
