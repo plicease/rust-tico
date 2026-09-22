@@ -327,6 +327,24 @@ pub struct Cli {
     )]
     pub modernbindings: bool,
 
+    // tico-only options (no nano equivalent): long-form only and prefixed
+    // `--tico-`, so they can never collide with a nano flag, present or
+    // future.
+    #[arg(
+        long = "tico-theme",
+        value_name = "[lang.]name",
+        action = clap::ArgAction::Append,
+        help = "Syntax-highlighting theme, overriding [syntax]'s `theme` (or, as `perl.NAME`, \
+                only that language's); a built-in (tico-builtin-*), a Helix theme name, or \
+                a .toml path. May be repeated."
+    )]
+    pub tico_theme: Vec<String>,
+    #[arg(
+        long = "tico-list-themes",
+        help = "List the built-in and on-disk themes, and which ones the current configuration uses"
+    )]
+    pub tico_list_themes: bool,
+
     /// Files to edit, optionally preceded by +LINE[,COLUMN]. A name of `-`
     /// reads from standard input.
     #[arg(trailing_var_arg = true)]
@@ -408,6 +426,17 @@ impl Cli {
         if let Some(v) = &self.syntax {
             options.syntax_name = Some(v.clone());
         }
+        // `NAME` overrides `[syntax]`'s global `theme` only (per-language
+        // overrides from the file still apply on top of it); `LANG.NAME`
+        // overrides just that language, replacing any `LANG.theme` line.
+        for v in &self.tico_theme {
+            match split_language_theme(v) {
+                Some((lang, name)) => options
+                    .language_themes
+                    .push((lang.to_ascii_lowercase(), name.to_string())),
+                None => options.theme = Some(v.clone()),
+            }
+        }
         if let Some(v) = &self.operatingdir {
             options.operatingdir = Some(v.clone());
         }
@@ -454,4 +483,93 @@ pub fn parse_file_args(files: &[String]) -> Vec<FileArg> {
         });
     }
     out
+}
+
+/// Split a `--tico-theme` value of the form `LANG.NAME` into its parts,
+/// only when `LANG` is a known language name -- so a theme path like
+/// `~/x.toml` or `./perl.toml`, whose first dot isn't a language, still
+/// reads as one whole name. (A bare `perl.toml` *is* taken as language
+/// `perl` + theme `toml`; write `./perl.toml` for the file.)
+fn split_language_theme(value: &str) -> Option<(&str, &str)> {
+    let (lang, name) = value.split_once('.')?;
+    if name.is_empty() || crate::syntax::find_by_name(&lang.to_ascii_lowercase()).is_none() {
+        return None;
+    }
+    Some((lang, name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn apply(args: &[&str]) -> crate::options::Options {
+        let mut argv = vec!["tico"];
+        argv.extend_from_slice(args);
+        let cli = Cli::try_parse_from(argv).expect("args parse");
+        let mut options = crate::options::Options {
+            theme: Some("from-rc".into()),
+            language_themes: vec![("perl".into(), "rc-perl".into())],
+            ..Default::default()
+        };
+        cli.apply(&mut options);
+        options
+    }
+
+    #[test]
+    fn tico_theme_plain_name_overrides_only_the_global_theme() {
+        let o = apply(&["--tico-theme", "tico-builtin-nord"]);
+        assert_eq!(o.theme.as_deref(), Some("tico-builtin-nord"));
+        assert_eq!(
+            o.language_themes,
+            vec![("perl".to_string(), "rc-perl".to_string())]
+        );
+    }
+
+    #[test]
+    fn tico_theme_language_prefix_overrides_only_that_language() {
+        let o = apply(&["--tico-theme", "perl.tico-builtin-catppuccin_mocha"]);
+        assert_eq!(o.theme.as_deref(), Some("from-rc"));
+        // Appended after the rc entry, so it wins under last-one-wins.
+        assert_eq!(
+            o.language_themes.last(),
+            Some(&(
+                "perl".to_string(),
+                "tico-builtin-catppuccin_mocha".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn tico_theme_may_be_repeated_and_mixed() {
+        let o = apply(&[
+            "--tico-theme",
+            "tico-builtin-gruvbox",
+            "--tico-theme",
+            "FORTRAN.tico-builtin-nord",
+            "--tico-theme",
+            "rust.~/mine.toml",
+        ]);
+        assert_eq!(o.theme.as_deref(), Some("tico-builtin-gruvbox"));
+        assert_eq!(
+            &o.language_themes[1..],
+            &[
+                ("fortran".to_string(), "tico-builtin-nord".to_string()),
+                ("rust".to_string(), "~/mine.toml".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn tico_theme_path_with_dots_is_not_mistaken_for_a_language() {
+        for v in [
+            "~/mine.toml",
+            "./perl.toml",
+            "/abs/x.y.toml",
+            "klingon.nord",
+        ] {
+            let o = apply(&["--tico-theme", v]);
+            assert_eq!(o.theme.as_deref(), Some(v), "{v}");
+            assert_eq!(o.language_themes.len(), 1, "{v}");
+        }
+    }
 }

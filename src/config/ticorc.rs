@@ -8,9 +8,14 @@
 //!   e.g. `^G = help` or `search.^Y = older`. A quoted value produces a
 //!   literal-string/macro binding, as in nano's `bind key "string" menu`.
 //!   `key = unbind` removes a binding.
-//! - `[syntax]`: tico's own syntax-highlighting configuration; not
-//!   required to resemble nano's `color`/`icolor` format at all.
-//!   (Reserved for future use.)
+//! - `[syntax]`: tico's own syntax-highlighting configuration, plain
+//!   `name = value` lines; nothing to do with nano's `color`/`icolor`
+//!   directives. `theme = NAME` sets the theme for every language and
+//!   `LANGUAGE.theme = NAME` overrides it for one (`perl.theme = ...`,
+//!   `fortran.theme = ...`; language names as listed by `--listsyntaxes`).
+//!   NAME is a built-in (`tico-builtin-gruvbox`; see `--tico-list-themes`), a
+//!   Helix theme name found on the search path, or a `.toml` path; see
+//!   `crate::theme`.
 //! - `[tico]`: settings with no nano equivalent at all, keyed by plain
 //!   `name = value` lines (not the `set`/`unset` vocabulary `[main]`
 //!   uses). Currently just `max_syntax_highlight_size` (see
@@ -55,10 +60,7 @@ pub fn parse(text: &str, options: &mut Options, keymap: &mut KeyMap, warnings: &
         match section {
             Section::Main => parse_main_line(line, options, warnings, lineno),
             Section::KeyBindings => parse_keybinding_line(line, keymap, warnings, lineno),
-            Section::Syntax => {
-                // Reserved: tico's own highlighting config, not yet
-                // implemented. Lines here are accepted but currently unused.
-            }
+            Section::Syntax => parse_syntax_line(line, options, warnings, lineno),
             Section::Tico => parse_tico_line(line, options, warnings, lineno),
             Section::None => {
                 warnings.push(format!(
@@ -67,6 +69,50 @@ pub fn parse(text: &str, options: &mut Options, keymap: &mut KeyMap, warnings: &
                 ));
             }
         }
+    }
+}
+
+fn parse_syntax_line(line: &str, options: &mut Options, warnings: &mut Vec<String>, lineno: usize) {
+    let Some((key, value)) = line.split_once('=') else {
+        warnings.push(format!(
+            "ticorc:{}: expected `name = value` in [syntax]: `{line}`",
+            lineno + 1
+        ));
+        return;
+    };
+    let key = key.trim();
+    let value = extract_value(value).unwrap_or_default();
+    // `theme` applies to everything; `LANGUAGE.theme` to one language,
+    // mirroring `[keybindings]`'s `menu.key` form.
+    let (language, setting) = match key.rsplit_once('.') {
+        Some((lang, setting)) => (Some(lang.trim().to_ascii_lowercase()), setting.trim()),
+        None => (None, key),
+    };
+    match setting {
+        "theme" => {
+            if value.is_empty() {
+                warnings.push(format!("ticorc:{}: theme needs a name", lineno + 1));
+                return;
+            }
+            match language {
+                None => options.theme = Some(value),
+                Some(lang) => {
+                    if crate::syntax::find_by_name(&lang).is_none() {
+                        warnings.push(format!(
+                            "ticorc:{}: unknown language `{lang}` in `{key}` \
+                             (see --listsyntaxes)",
+                            lineno + 1
+                        ));
+                        return;
+                    }
+                    options.language_themes.push((lang, value));
+                }
+            }
+        }
+        _ => warnings.push(format!(
+            "ticorc:{}: unknown [syntax] setting `{key}`",
+            lineno + 1
+        )),
     }
 }
 
@@ -226,6 +272,87 @@ mod tests {
         );
         assert_eq!(options.max_syntax_highlight_bytes, 8 * 1024 * 1024);
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+    }
+
+    #[test]
+    fn syntax_section_sets_the_theme() {
+        let mut options = Options::default();
+        let mut keymap = KeyMap::new();
+        let mut warnings = Vec::new();
+        parse(
+            "[syntax]\ntheme = gruvbox\n",
+            &mut options,
+            &mut keymap,
+            &mut warnings,
+        );
+        assert_eq!(options.theme.as_deref(), Some("gruvbox"));
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+
+        // Quoted form and a path both work too.
+        parse(
+            "[syntax]\ntheme = \"~/mine.toml\"\n",
+            &mut options,
+            &mut keymap,
+            &mut warnings,
+        );
+        assert_eq!(options.theme.as_deref(), Some("~/mine.toml"));
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+    }
+
+    #[test]
+    fn syntax_section_sets_per_language_themes() {
+        let mut options = Options::default();
+        let mut keymap = KeyMap::new();
+        let mut warnings = Vec::new();
+        parse(
+            "[syntax]\ntheme = tico-builtin-gruvbox\nperl.theme = tico-builtin-nord\n\
+             FORTRAN.theme = \"tico-builtin-dracula\"\n",
+            &mut options,
+            &mut keymap,
+            &mut warnings,
+        );
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(options.theme.as_deref(), Some("tico-builtin-gruvbox"));
+        assert_eq!(
+            options.language_themes,
+            vec![
+                ("perl".to_string(), "tico-builtin-nord".to_string()),
+                ("fortran".to_string(), "tico-builtin-dracula".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn syntax_section_rejects_unknown_language_override() {
+        let mut options = Options::default();
+        let mut keymap = KeyMap::new();
+        let mut warnings = Vec::new();
+        parse(
+            "[syntax]\nklingon.theme = tico-builtin-nord\n",
+            &mut options,
+            &mut keymap,
+            &mut warnings,
+        );
+        assert!(options.language_themes.is_empty());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("klingon"));
+    }
+
+    #[test]
+    fn syntax_section_warns_on_unknown_setting_and_missing_value() {
+        let mut options = Options::default();
+        let mut keymap = KeyMap::new();
+        let mut warnings = Vec::new();
+        parse(
+            "[syntax]\ncolor = red\ntheme =\n",
+            &mut options,
+            &mut keymap,
+            &mut warnings,
+        );
+        assert_eq!(options.theme, None);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("color"));
+        assert!(warnings[1].contains("theme"));
     }
 
     #[test]

@@ -1,0 +1,27 @@
+# Vendored tree-sitter highlight queries
+
+One `highlights.scm` per supported language, referenced from the
+`LanguageDef` table in `../languages.rs`. They're vendored rather than
+pulled from each `tree-sitter-*` crate at run time because the crates
+expose them inconsistently (differently named constants, sometimes not at
+all); see the module docs in `../mod.rs`.
+
+Capture names in these files are a mix of conventions (tree-sitter CLI,
+nvim-treesitter, grammar-specific); `normalize_capture()` in `../mod.rs`
+translates them all into Helix's scope vocabulary, which is what themes are
+written against. When adding a query, run the tests: any capture that
+doesn't land in a Helix top-level scope fails
+`all_captures_normalize_into_helix_scopes`.
+
+## Provenance and licensing
+
+| File | Source | License |
+|---|---|---|
+| `perl.scm` | Hand-written for tico | MIT (tico's own) |
+| `diff.scm` | [Helix](https://github.com/helix-editor/helix) `runtime/queries/diff/highlights.scm`, commit `737ab17` | **MPL-2.0** — see `LICENSE-MPL-2.0` in the repository root |
+| everything else | The corresponding `tree-sitter-<lang>` crate's `queries/highlights.scm`, unmodified except where noted in a file's header | That grammar's license (MIT for all current ones) |
+
+`diff.scm` is the one file here not under tico's MIT license. MPL-2.0 is a
+file-scoped copyleft: the file itself must stay under MPL-2.0 and carry its
+notice (it does, in its header comment), but that has no effect on the
+license of the rest of tico.

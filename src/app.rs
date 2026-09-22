@@ -187,6 +187,13 @@ pub struct Editor {
     pub current: usize,
     pub options: Options,
     pub keymap: crate::keymap::KeyMap,
+    /// The syntax-highlighting theme (see `crate::theme`). Starts as the
+    /// built-in default; `main` swaps in the configured one after loading.
+    pub theme: crate::theme::Theme,
+    /// Per-language overrides of `theme`, keyed by `LanguageDef::name`
+    /// (`[syntax]`'s `perl.theme = ...`). Use `theme_for()` rather than
+    /// reading either field directly.
+    pub language_themes: std::collections::HashMap<String, crate::theme::Theme>,
     pub cutbuffer: String,
     pub cut_was_consecutive: bool,
     pub search: SearchState,
@@ -228,6 +235,15 @@ pub struct Editor {
 }
 
 impl Editor {
+    /// The theme to paint text of language `language` (a `LanguageDef::name`)
+    /// with: its override from `[syntax]` if it has one, otherwise the
+    /// global theme. Resolved per highlight span, not per buffer, so a
+    /// heredoc body injected with another language gets that language's
+    /// theme.
+    pub fn theme_for(&self, language: &str) -> &crate::theme::Theme {
+        self.language_themes.get(language).unwrap_or(&self.theme)
+    }
+
     pub fn new(options: Options, keymap: crate::keymap::KeyMap) -> Editor {
         // `set casesensitive` / `set regexp` in nanorc/ticorc set the
         // default search mode, same as nano; there's no CLI flag for
@@ -247,6 +263,8 @@ impl Editor {
             current: 0,
             options,
             keymap,
+            theme: crate::theme::Theme::builtin_default(),
+            language_themes: std::collections::HashMap::new(),
             cutbuffer: String::new(),
             cut_was_consecutive: false,
             search,
