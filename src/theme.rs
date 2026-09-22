@@ -39,16 +39,62 @@ use std::path::PathBuf;
 
 use crate::syntax::Scope;
 
-/// tico's built-in default theme (the old hardcoded palette, plus a few
-/// extra scopes it had no way to express before), embedded so there is
-/// always a theme even with no config at all. Also what `inherits =
-/// "default"` refers to.
-const DEFAULT_THEME: &str = include_str!("../themes/default.toml");
+/// The name of the theme used when nothing is configured: tico's own
+/// 16-color palette (the pre-theme hardcoded colors, plus a few scopes
+/// that palette couldn't express), which takes its actual colors from the
+/// terminal's palette the way nano's highlighting does.
+pub const DEFAULT_THEME_NAME: &str = "tico-builtin-default";
 
-/// Every theme file shipped with tico, by name, so `theme = "x"` works
-/// without a runtime directory (Helix resolves `default` and
-/// `base16_default` the same way).
-const BUILTIN_THEMES: &[(&str, &str)] = &[("default", DEFAULT_THEME)];
+/// The name prefix reserved for themes compiled into the binary; a name
+/// starting with it is never looked for on disk.
+pub const BUILTIN_PREFIX: &str = "tico-builtin-";
+
+/// The themes compiled into the binary, so they need no runtime directory
+/// and `theme = "tico-builtin-gruvbox"` works on any install. All but the
+/// default are vendored unmodified from Helix (MPL-2.0; see
+/// `themes/README.md`), chosen as the most widely used ones while keeping
+/// each visibly distinct from the others: warm retro, pastel, purple,
+/// arctic, night-blue, classic Atom, high-contrast, and one light theme.
+/// Keys are the full `tico-builtin-*` name, identical to the file's stem
+/// under `themes/` (a test checks the two sets match).
+const BUILTIN_THEMES: &[(&str, &str)] = &[
+    (
+        DEFAULT_THEME_NAME,
+        include_str!("../themes/tico-builtin-default.toml"),
+    ),
+    (
+        "tico-builtin-catppuccin_mocha",
+        include_str!("../themes/tico-builtin-catppuccin_mocha.toml"),
+    ),
+    (
+        "tico-builtin-dracula",
+        include_str!("../themes/tico-builtin-dracula.toml"),
+    ),
+    (
+        "tico-builtin-gruvbox",
+        include_str!("../themes/tico-builtin-gruvbox.toml"),
+    ),
+    (
+        "tico-builtin-monokai",
+        include_str!("../themes/tico-builtin-monokai.toml"),
+    ),
+    (
+        "tico-builtin-nord",
+        include_str!("../themes/tico-builtin-nord.toml"),
+    ),
+    (
+        "tico-builtin-onedark",
+        include_str!("../themes/tico-builtin-onedark.toml"),
+    ),
+    (
+        "tico-builtin-solarized_light",
+        include_str!("../themes/tico-builtin-solarized_light.toml"),
+    ),
+    (
+        "tico-builtin-tokyonight",
+        include_str!("../themes/tico-builtin-tokyonight.toml"),
+    ),
+];
 
 /// Text attributes a style can carry (Helix's `modifiers` array plus its
 /// `underline.style` variants), as a bit set.
@@ -163,7 +209,7 @@ impl Style {
 /// because resolution happens lazily from the (read-only) render pass —
 /// scopes get interned as languages are first used, so the full set isn't
 /// known when the theme is loaded.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Theme {
     styles: HashMap<String, Style>,
     resolved: RefCell<HashMap<Scope, Option<Style>>>,
@@ -196,7 +242,7 @@ impl Theme {
     pub fn builtin_default() -> Theme {
         let mut warnings = Vec::new();
         let theme = Loader::new(Vec::new())
-            .load("default", &mut warnings)
+            .load(DEFAULT_THEME_NAME, &mut warnings)
             .expect("built-in default theme must parse");
         debug_assert!(warnings.is_empty(), "{warnings:?}");
         theme
@@ -332,6 +378,26 @@ impl Loader {
     }
 
     fn read(&self, name: &str, visited: &mut HashSet<PathBuf>) -> Result<String, String> {
+        // Built-ins are namespaced by prefix, so they can never be shadowed
+        // by (or confused with) a same-named file in a Helix directory.
+        if name.starts_with(BUILTIN_PREFIX) {
+            let Some((_, text)) = BUILTIN_THEMES.iter().find(|(n, _)| *n == name) else {
+                return Err(format!(
+                    "no built-in theme named {name:?} (built-ins: {})",
+                    BUILTIN_THEMES
+                        .iter()
+                        .map(|(n, _)| *n)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            };
+            let marker = PathBuf::from(format!("<builtin>/{name}"));
+            if !visited.insert(marker) {
+                return Err(format!("cycle in `inherits` chain at built-in {name}"));
+            }
+            return Ok((*text).to_string());
+        }
+
         // An explicit path (`theme = ~/x.toml`, `./x.toml`, `/x.toml`) is
         // used as-is; that's how a one-off theme file outside the search
         // path gets used. Anything else is a bare name.
@@ -364,13 +430,6 @@ impl Loader {
             visited.insert(path.clone());
             return std::fs::read_to_string(&path)
                 .map_err(|e| format!("cannot read {}: {e}", path.display()));
-        }
-        if let Some((_, text)) = BUILTIN_THEMES.iter().find(|(n, _)| *n == name) {
-            let marker = PathBuf::from(format!("<builtin>/{filename}"));
-            if !visited.insert(marker) {
-                return Err(format!("cycle in `inherits` chain at built-in {name}"));
-            }
-            return Ok((*text).to_string());
         }
         Err(if cycle {
             format!("cycle in `inherits` chain at {name}")
@@ -544,26 +603,35 @@ fn parse_hex(h: &str) -> Option<Color> {
     }
 }
 
-/// Names of every theme reachable by `theme = "..."`: built-ins plus every
-/// `*.toml` in the search path, sorted and deduplicated. For `--list-themes`.
-pub fn available_names(loader: &Loader) -> Vec<String> {
-    let mut names: Vec<String> = BUILTIN_THEMES.iter().map(|(n, _)| n.to_string()).collect();
-    for dir in &loader.dirs {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "toml")
-                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-            {
-                names.push(stem.to_string());
+/// The names of the themes compiled into the binary, in table order (the
+/// default first).
+pub fn builtin_names() -> impl Iterator<Item = &'static str> {
+    BUILTIN_THEMES.iter().map(|(n, _)| *n)
+}
+
+impl Loader {
+    /// Every theme file on the search path, as `(name, path)`, sorted by
+    /// name. A name found in more than one directory is listed once, at the
+    /// path `load()` would actually use (the first directory wins).
+    pub fn disk_themes(&self) -> Vec<(String, PathBuf)> {
+        let mut found: Vec<(String, PathBuf)> = Vec::new();
+        for dir in &self.dirs {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "toml")
+                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                    && !found.iter().any(|(n, _)| n == stem)
+                {
+                    found.push((stem.to_string(), path));
+                }
             }
         }
+        found.sort();
+        found
     }
-    names.sort_unstable();
-    names.dedup();
-    names
 }
 
 #[cfg(test)]
@@ -788,7 +856,7 @@ ty = "#000004"
         let dir = tempdir("inherits_builtin");
         std::fs::write(
             dir.join("mine.toml"),
-            "inherits = \"default\"\n\"comment\" = \"light-red\"\n",
+            "inherits = \"tico-builtin-default\"\n\"comment\" = \"light-red\"\n",
         )
         .unwrap();
         let loader = Loader::new(vec![dir.clone()]);
@@ -844,13 +912,25 @@ ty = "#000004"
     }
 
     #[test]
-    fn available_names_lists_builtins_and_files() {
-        let dir = tempdir("names");
-        std::fs::write(dir.join("zeta.toml"), "").unwrap();
-        std::fs::write(dir.join("notes.txt"), "").unwrap();
-        let names = available_names(&Loader::new(vec![dir.clone()]));
-        assert_eq!(names, vec!["default".to_string(), "zeta".to_string()]);
-        std::fs::remove_dir_all(&dir).ok();
+    fn disk_themes_lists_toml_files_first_directory_winning() {
+        let hi = tempdir("names-hi");
+        let lo = tempdir("names-lo");
+        std::fs::write(hi.join("zeta.toml"), "").unwrap();
+        std::fs::write(hi.join("notes.txt"), "").unwrap();
+        std::fs::write(lo.join("zeta.toml"), "").unwrap();
+        std::fs::write(lo.join("alpha.toml"), "").unwrap();
+        let found = Loader::new(vec![hi.clone(), lo.clone()]).disk_themes();
+        assert_eq!(
+            found,
+            vec![
+                ("alpha".to_string(), lo.join("alpha.toml")),
+                ("zeta".to_string(), hi.join("zeta.toml")),
+            ]
+        );
+        assert_eq!(builtin_names().next(), Some(DEFAULT_THEME_NAME));
+        assert_eq!(builtin_names().count(), BUILTIN_THEMES.len());
+        std::fs::remove_dir_all(&hi).ok();
+        std::fs::remove_dir_all(&lo).ok();
     }
 
     fn tempdir(tag: &str) -> PathBuf {
@@ -858,5 +938,49 @@ ty = "#000004"
             std::env::temp_dir().join(format!("tico-theme-test-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn every_builtin_theme_loads_without_warnings() {
+        let loader = Loader::new(Vec::new());
+        for (name, _) in BUILTIN_THEMES {
+            assert!(name.starts_with(BUILTIN_PREFIX), "{name}");
+            let mut w = Vec::new();
+            let t = loader
+                .load(name, &mut w)
+                .unwrap_or_else(|| panic!("{name}: {w:?}"));
+            assert!(w.is_empty(), "{name}: {w:?}");
+            for scope in ["comment", "keyword", "string", "function", "type"] {
+                assert!(t.style_for_name(scope).is_some(), "{name} lacks {scope}");
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_names_match_their_files_on_disk() {
+        // `include_str!` keeps the *contents* in sync; this keeps the table's
+        // keys honest against the file names, and catches a file added to
+        // themes/ without a table entry.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("themes");
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                (p.extension()? == "toml").then(|| p.file_stem()?.to_str().map(String::from))?
+            })
+            .collect();
+        on_disk.sort();
+        let mut in_table: Vec<String> = BUILTIN_THEMES.iter().map(|(n, _)| n.to_string()).collect();
+        in_table.sort();
+        assert_eq!(on_disk, in_table);
+    }
+
+    #[test]
+    fn unknown_builtin_name_is_reported_without_touching_disk() {
+        let loader = Loader::new(vec![PathBuf::from("/nonexistent")]);
+        let mut w = Vec::new();
+        assert!(loader.load("tico-builtin-nope", &mut w).is_none());
+        assert!(w[0].contains("no built-in theme"), "{w:?}");
     }
 }

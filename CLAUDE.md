@@ -55,12 +55,18 @@ highlighting is a deliberate exception:
 - Syntax colors come from a **theme in Helix's theme format**
   (`src/theme.rs`): TOML keyed by dotted scope names (`keyword.control.import`,
   `constant.numeric`, ...) resolved by longest prefix, with `inherits` and
-  `[palette]` support, so any Helix theme file works unmodified. The
-  built-in default is `themes/default.toml` (embedded via `include_str!`);
-  a theme is selected with `theme = NAME` in `~/.ticorc`'s `[syntax]`
-  section or `--theme NAME`, and looked up in `~/.config/tico/themes/`,
-  then an installed Helix's theme directories, then the built-ins
-  (`--listthemes` shows what's available). Only syntax scopes are honored;
+  `[palette]` support, so any Helix theme file works unmodified. Nine
+  themes are compiled into the binary from `themes/*.toml` (`BUILTIN_THEMES`
+  in `src/theme.rs`), all named with the reserved `tico-builtin-` prefix:
+  tico's own 16-color `tico-builtin-default` plus eight vendored from
+  Helix (MPL-2.0 — keep their headers, and record any addition in
+  `themes/README.md`, `README.md` and the `Cargo.toml` license comment).
+  Any other name is looked up on disk: `~/.config/tico/themes/`, then an
+  installed Helix's theme directories. Selection is in `~/.ticorc`'s
+  `[syntax]` section — `theme = NAME` globally, `LANGUAGE.theme = NAME`
+  per language (`perl.theme = tico-builtin-nord`) — or `--tico-theme NAME`;
+  `Editor::theme_for(lang)` is the one place that resolves which applies.
+  `--tico-list-themes` lists what's available and summarizes the active configuration. Only syntax scopes are honored;
   a theme's `ui.*` entries are parsed but ignored, since bars/line
   numbers/selection follow nano's `set titlecolor` & co.
 - Consequently the highlighter's output is Helix's scope vocabulary, not

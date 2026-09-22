@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "Yet Another Text Editor"
 repository = "https://github.com/plicease/tico"
-# MIT, except src/syntax/queries/diff.scm (copied from Helix, MPL-2.0);
-# see README.md and src/syntax/queries/README.md.
+# MIT, except the files copied from Helix (MPL-2.0): src/syntax/queries/diff.scm
+# and the built-in themes under themes/; see README.md.
 license = "MIT AND MPL-2.0"
 
 [dependencies]

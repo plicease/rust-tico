@@ -190,6 +190,10 @@ pub struct Editor {
     /// The syntax-highlighting theme (see `crate::theme`). Starts as the
     /// built-in default; `main` swaps in the configured one after loading.
     pub theme: crate::theme::Theme,
+    /// Per-language overrides of `theme`, keyed by `LanguageDef::name`
+    /// (`[syntax]`'s `perl.theme = ...`). Use `theme_for()` rather than
+    /// reading either field directly.
+    pub language_themes: std::collections::HashMap<String, crate::theme::Theme>,
     pub cutbuffer: String,
     pub cut_was_consecutive: bool,
     pub search: SearchState,
@@ -231,6 +235,15 @@ pub struct Editor {
 }
 
 impl Editor {
+    /// The theme to paint a buffer of language `lang` with: its override
+    /// from `[syntax]` if it has one, otherwise the global theme. A buffer
+    /// with no language has nothing to highlight, so which theme comes
+    /// back for `None` doesn't matter.
+    pub fn theme_for(&self, lang: Option<&crate::syntax::LanguageDef>) -> &crate::theme::Theme {
+        lang.and_then(|l| self.language_themes.get(l.name))
+            .unwrap_or(&self.theme)
+    }
+
     pub fn new(options: Options, keymap: crate::keymap::KeyMap) -> Editor {
         // `set casesensitive` / `set regexp` in nanorc/ticorc set the
         // default search mode, same as nano; there's no CLI flag for
@@ -251,6 +264,7 @@ impl Editor {
             options,
             keymap,
             theme: crate::theme::Theme::builtin_default(),
+            language_themes: std::collections::HashMap::new(),
             cutbuffer: String::new(),
             cut_was_consecutive: false,
             search,

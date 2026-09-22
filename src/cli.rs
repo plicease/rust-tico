@@ -327,16 +327,21 @@ pub struct Cli {
     )]
     pub modernbindings: bool,
 
-    // tico-only options (no nano equivalent); long-form only, so they can
-    // never collide with a nano short flag.
+    // tico-only options (no nano equivalent): long-form only and prefixed
+    // `--tico-`, so they can never collide with a nano flag, present or
+    // future.
     #[arg(
-        long = "theme",
+        long = "tico-theme",
         value_name = "name",
-        help = "Syntax-highlighting theme (a Helix-format theme name or .toml path)"
+        help = "Syntax-highlighting theme, overriding [syntax]'s `theme`: a built-in \
+                (tico-builtin-*), a Helix theme name, or a .toml path"
     )]
-    pub theme: Option<String>,
-    #[arg(long = "listthemes", help = "List the names of available themes")]
-    pub listthemes: bool,
+    pub tico_theme: Option<String>,
+    #[arg(
+        long = "tico-list-themes",
+        help = "List the built-in and on-disk themes, and which ones the current configuration uses"
+    )]
+    pub tico_list_themes: bool,
 
     /// Files to edit, optionally preceded by +LINE[,COLUMN]. A name of `-`
     /// reads from standard input.
@@ -419,7 +424,9 @@ impl Cli {
         if let Some(v) = &self.syntax {
             options.syntax_name = Some(v.clone());
         }
-        if let Some(v) = &self.theme {
+        // Overrides `[syntax]`'s global `theme` only; per-language
+        // overrides from the file still apply on top of it.
+        if let Some(v) = &self.tico_theme {
             options.theme = Some(v.clone());
         }
         if let Some(v) = &self.operatingdir {

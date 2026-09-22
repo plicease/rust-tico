@@ -2052,7 +2052,7 @@ fn render_diff_screen(
     )?;
     let body = &lines[1.min(lines.len())..];
     let styles = if editor.options.syntax_highlighting {
-        diff_line_styles(body, &editor.theme)
+        diff_line_styles(body, editor.theme_for(crate::syntax::find_by_name("diff")))
     } else {
         None
     };
@@ -2721,6 +2721,7 @@ fn render_buffer(
             Vec::new()
         };
     let selection = editor.selection_range();
+    let theme = editor.theme_for(buf.language);
 
     for r in 0..rows {
         queue!(out, MoveTo(0, start_row + r as u16))?;
@@ -2750,7 +2751,7 @@ fn render_buffer(
             gutter_chars = rendered.chars().count();
 
             let line_start = buf.line_start_byte(line_idx);
-            let char_styles = map_spans_to_line(&raw, line_start, &spans, &editor.theme);
+            let char_styles = map_spans_to_line(&raw, line_start, &spans, theme);
 
             let (expanded, expanded_styles) = expand_tabs_with_styles(&raw, &char_styles, tabsize);
             rendered.push_str(&expanded);

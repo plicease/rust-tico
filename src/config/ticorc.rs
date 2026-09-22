@@ -10,8 +10,12 @@
 //!   `key = unbind` removes a binding.
 //! - `[syntax]`: tico's own syntax-highlighting configuration, plain
 //!   `name = value` lines; nothing to do with nano's `color`/`icolor`
-//!   directives. Currently just `theme = NAME` (a Helix-format theme name
-//!   or `.toml` path; see `crate::theme`).
+//!   directives. `theme = NAME` sets the theme for every language and
+//!   `LANGUAGE.theme = NAME` overrides it for one (`perl.theme = ...`,
+//!   `fortran.theme = ...`; language names as listed by `--listsyntaxes`).
+//!   NAME is a built-in (`tico-builtin-gruvbox`; see `--tico-list-themes`), a
+//!   Helix theme name found on the search path, or a `.toml` path; see
+//!   `crate::theme`.
 //! - `[tico]`: settings with no nano equivalent at all, keyed by plain
 //!   `name = value` lines (not the `set`/`unset` vocabulary `[main]`
 //!   uses). Currently just `max_syntax_highlight_size` (see
@@ -78,12 +82,31 @@ fn parse_syntax_line(line: &str, options: &mut Options, warnings: &mut Vec<Strin
     };
     let key = key.trim();
     let value = extract_value(value).unwrap_or_default();
-    match key {
+    // `theme` applies to everything; `LANGUAGE.theme` to one language,
+    // mirroring `[keybindings]`'s `menu.key` form.
+    let (language, setting) = match key.rsplit_once('.') {
+        Some((lang, setting)) => (Some(lang.trim().to_ascii_lowercase()), setting.trim()),
+        None => (None, key),
+    };
+    match setting {
         "theme" => {
             if value.is_empty() {
                 warnings.push(format!("ticorc:{}: theme needs a name", lineno + 1));
-            } else {
-                options.theme = Some(value);
+                return;
+            }
+            match language {
+                None => options.theme = Some(value),
+                Some(lang) => {
+                    if crate::syntax::find_by_name(&lang).is_none() {
+                        warnings.push(format!(
+                            "ticorc:{}: unknown language `{lang}` in `{key}` \
+                             (see --listsyntaxes)",
+                            lineno + 1
+                        ));
+                        return;
+                    }
+                    options.language_themes.push((lang, value));
+                }
             }
         }
         _ => warnings.push(format!(
@@ -274,6 +297,45 @@ mod tests {
         );
         assert_eq!(options.theme.as_deref(), Some("~/mine.toml"));
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+    }
+
+    #[test]
+    fn syntax_section_sets_per_language_themes() {
+        let mut options = Options::default();
+        let mut keymap = KeyMap::new();
+        let mut warnings = Vec::new();
+        parse(
+            "[syntax]\ntheme = tico-builtin-gruvbox\nperl.theme = tico-builtin-nord\n\
+             FORTRAN.theme = \"tico-builtin-dracula\"\n",
+            &mut options,
+            &mut keymap,
+            &mut warnings,
+        );
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(options.theme.as_deref(), Some("tico-builtin-gruvbox"));
+        assert_eq!(
+            options.language_themes,
+            vec![
+                ("perl".to_string(), "tico-builtin-nord".to_string()),
+                ("fortran".to_string(), "tico-builtin-dracula".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn syntax_section_rejects_unknown_language_override() {
+        let mut options = Options::default();
+        let mut keymap = KeyMap::new();
+        let mut warnings = Vec::new();
+        parse(
+            "[syntax]\nklingon.theme = tico-builtin-nord\n",
+            &mut options,
+            &mut keymap,
+            &mut warnings,
+        );
+        assert!(options.language_themes.is_empty());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("klingon"));
     }
 
     #[test]

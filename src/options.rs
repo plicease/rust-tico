@@ -145,8 +145,13 @@ pub struct Options {
     /// tico-only: the syntax-highlighting theme to load (a Helix-format
     /// theme; see `crate::theme`), by name or file path. `None` means the
     /// built-in default. Configured via `~/.ticorc`'s `[syntax]` section
-    /// (`theme = gruvbox`) or `--theme`.
+    /// (`theme = tico-builtin-gruvbox`) or `--tico-theme`.
     pub theme: Option<String>,
+    /// tico-only: per-language theme overrides, `(language name, theme
+    /// name)`, from `[syntax]` lines like `perl.theme = tico-builtin-nord`.
+    /// A language not listed here uses `theme`. Kept in file order; a
+    /// later entry for the same language wins.
+    pub language_themes: Vec<(String, String)>,
 }
 
 impl Default for Options {
@@ -245,6 +250,7 @@ impl Default for Options {
             // that made this cap meaningful to set at all).
             max_syntax_highlight_bytes: 4 * 1024 * 1024,
             theme: None,
+            language_themes: Vec::new(),
         }
     }
 }

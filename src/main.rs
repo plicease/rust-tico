@@ -23,28 +23,48 @@ fn main() -> anyhow::Result<()> {
         print_syntax_names();
         return Ok(());
     }
-    if cli.listthemes {
-        for name in theme::available_names(&theme::Loader::with_default_dirs()) {
-            println!("{name}");
-        }
-        return Ok(());
-    }
-
     let ignore_rcfiles = cli.ignorercfiles;
     let explicit_rcfile = cli.rcfile.as_deref();
     let loaded = config::load(explicit_rcfile, ignore_rcfiles, cli.modernbindings);
     let mut options = loaded.options;
     cli.apply(&mut options);
 
+    // After config + CLI, so the summary reflects what an editing session
+    // started with these same flags would actually use.
+    if cli.tico_list_themes {
+        print_themes(&options);
+        return Ok(());
+    }
+
     let mut warnings = loaded.warnings;
-    // A theme that can't be loaded falls back to the built-in default with
-    // a warning, like any other bad config item -- never a refusal to start.
+    // A theme that can't be loaded falls back to the built-in default (or,
+    // for a per-language override, to the global theme) with a warning,
+    // like any other bad config item -- never a refusal to start.
+    let loader = theme::Loader::with_default_dirs();
     let theme = match options.theme.as_deref() {
-        Some(name) => theme::Loader::with_default_dirs()
+        Some(name) => loader
             .load(name, &mut warnings)
             .unwrap_or_else(theme::Theme::builtin_default),
         None => theme::Theme::builtin_default(),
     };
+    let mut language_themes = std::collections::HashMap::new();
+    let mut loaded_themes: std::collections::HashMap<&str, Option<theme::Theme>> =
+        std::collections::HashMap::new();
+    for (lang, name) in &options.language_themes {
+        // Two languages sharing one theme parse it once; a theme that
+        // failed to load is only reported once, too.
+        let t = loaded_themes
+            .entry(name.as_str())
+            .or_insert_with(|| loader.load(name, &mut warnings));
+        match t {
+            Some(t) => {
+                language_themes.insert(lang.clone(), t.clone());
+            }
+            None => {
+                language_themes.remove(lang);
+            }
+        }
+    }
     for w in &warnings {
         eprintln!("tico: {w}");
     }
@@ -52,6 +72,7 @@ fn main() -> anyhow::Result<()> {
     let file_args = cli::parse_file_args(&cli.files);
     let mut editor = app::Editor::new(options, loaded.keymap);
     editor.theme = theme;
+    editor.language_themes = language_themes;
     editor.buffers.clear();
 
     let syntax_override = editor.options.syntax_name.clone();
@@ -112,6 +133,70 @@ fn main() -> anyhow::Result<()> {
 /// definitions (tico intentionally ignores those; see the syntax module),
 /// so this lists the fixed, compiled-in language registry instead, wrapped
 /// to the real terminal width rather than nano's hardcoded 45 columns.
+/// `--tico-list-themes`: the built-in themes, any found on the search
+/// path, and a summary of the active `[syntax]` configuration with each
+/// configured theme test-loaded so a typo shows up here rather than as a
+/// warning flashing past at editor startup.
+fn print_themes(options: &options::Options) {
+    let loader = theme::Loader::with_default_dirs();
+
+    println!("Built-in themes:");
+    for name in theme::builtin_names() {
+        println!("  {name}");
+    }
+
+    let on_disk = loader.disk_themes();
+    if !on_disk.is_empty() {
+        println!("\nThemes found on disk:");
+        let width = on_disk.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+        for (name, path) in &on_disk {
+            println!("  {name:width$}  {}", path.display());
+        }
+    }
+
+    println!("\nActive configuration:");
+    let status = |name: &str| -> String {
+        let mut warnings = Vec::new();
+        match loader.load(name, &mut warnings) {
+            Some(_) if warnings.is_empty() => String::new(),
+            Some(_) => format!("  (loads with {} warning(s))", warnings.len()),
+            None => "  (ERROR: cannot be loaded; the default will be used instead)".to_string(),
+        }
+    };
+    let width = options
+        .language_themes
+        .iter()
+        .map(|(l, _)| l.len())
+        .max()
+        .unwrap_or(0)
+        .max("default".len());
+    match options.theme.as_deref() {
+        Some(name) => println!("  {:width$}  {name}{}", "default", status(name)),
+        None => println!(
+            "  {:width$}  {}  (nothing configured)",
+            "default",
+            theme::DEFAULT_THEME_NAME
+        ),
+    }
+    // Later lines for the same language override earlier ones, so show
+    // only the effective entry for each, in the order first mentioned.
+    let mut seen: Vec<&str> = Vec::new();
+    for (lang, _) in &options.language_themes {
+        if seen.contains(&lang.as_str()) {
+            continue;
+        }
+        seen.push(lang);
+        let name = options
+            .language_themes
+            .iter()
+            .rev()
+            .find(|(l, _)| l == lang)
+            .map(|(_, n)| n.as_str())
+            .unwrap_or_default();
+        println!("  {lang:width$}  {name}{}", status(name));
+    }
+}
+
 fn print_syntax_names() {
     println!("Available syntaxes:");
     // nano wraps this listing at a hardcoded 45 columns regardless of the
