@@ -145,7 +145,7 @@ pub struct Options {
     /// tico-only: the syntax-highlighting theme to load (a Helix-format
     /// theme; see `crate::theme`), by name or file path. `None` means the
     /// built-in default. Configured via `~/.ticorc`'s `[syntax]` section
-    /// (`theme = tico-builtin-gruvbox`) or `--tico-theme`.
+    /// (`theme = tico-builtin-gruvbox`) or `--tico-theme NAME`.
     pub theme: Option<String>,
     /// tico-only: per-language theme overrides, `(language name, theme
     /// name)`, from `[syntax]` lines like `perl.theme = tico-builtin-nord`.

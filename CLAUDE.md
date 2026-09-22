@@ -64,7 +64,7 @@ highlighting is a deliberate exception:
   Any other name is looked up on disk: `~/.config/tico/themes/`, then an
   installed Helix's theme directories. Selection is in `~/.ticorc`'s
   `[syntax]` section — `theme = NAME` globally, `LANGUAGE.theme = NAME`
-  per language (`perl.theme = tico-builtin-nord`) — or `--tico-theme NAME`;
+  per language (`perl.theme = tico-builtin-nord`) — or `--tico-theme NAME` / `--tico-theme LANG.NAME` (repeatable);
   `Editor::theme_for(lang)` is the one place that resolves which applies.
   `--tico-list-themes` lists what's available and summarizes the active configuration. Only syntax scopes are honored;
   a theme's `ui.*` entries are parsed but ignored, since bars/line
