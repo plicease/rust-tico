@@ -187,6 +187,9 @@ pub struct Editor {
     pub current: usize,
     pub options: Options,
     pub keymap: crate::keymap::KeyMap,
+    /// The syntax-highlighting theme (see `crate::theme`). Starts as the
+    /// built-in default; `main` swaps in the configured one after loading.
+    pub theme: crate::theme::Theme,
     pub cutbuffer: String,
     pub cut_was_consecutive: bool,
     pub search: SearchState,
@@ -247,6 +250,7 @@ impl Editor {
             current: 0,
             options,
             keymap,
+            theme: crate::theme::Theme::builtin_default(),
             cutbuffer: String::new(),
             cut_was_consecutive: false,
             search,

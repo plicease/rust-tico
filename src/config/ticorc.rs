@@ -8,9 +8,10 @@
 //!   e.g. `^G = help` or `search.^Y = older`. A quoted value produces a
 //!   literal-string/macro binding, as in nano's `bind key "string" menu`.
 //!   `key = unbind` removes a binding.
-//! - `[syntax]`: tico's own syntax-highlighting configuration; not
-//!   required to resemble nano's `color`/`icolor` format at all.
-//!   (Reserved for future use.)
+//! - `[syntax]`: tico's own syntax-highlighting configuration, plain
+//!   `name = value` lines; nothing to do with nano's `color`/`icolor`
+//!   directives. Currently just `theme = NAME` (a Helix-format theme name
+//!   or `.toml` path; see `crate::theme`).
 //! - `[tico]`: settings with no nano equivalent at all, keyed by plain
 //!   `name = value` lines (not the `set`/`unset` vocabulary `[main]`
 //!   uses). Currently just `max_syntax_highlight_size` (see
@@ -55,10 +56,7 @@ pub fn parse(text: &str, options: &mut Options, keymap: &mut KeyMap, warnings: &
         match section {
             Section::Main => parse_main_line(line, options, warnings, lineno),
             Section::KeyBindings => parse_keybinding_line(line, keymap, warnings, lineno),
-            Section::Syntax => {
-                // Reserved: tico's own highlighting config, not yet
-                // implemented. Lines here are accepted but currently unused.
-            }
+            Section::Syntax => parse_syntax_line(line, options, warnings, lineno),
             Section::Tico => parse_tico_line(line, options, warnings, lineno),
             Section::None => {
                 warnings.push(format!(
@@ -67,6 +65,31 @@ pub fn parse(text: &str, options: &mut Options, keymap: &mut KeyMap, warnings: &
                 ));
             }
         }
+    }
+}
+
+fn parse_syntax_line(line: &str, options: &mut Options, warnings: &mut Vec<String>, lineno: usize) {
+    let Some((key, value)) = line.split_once('=') else {
+        warnings.push(format!(
+            "ticorc:{}: expected `name = value` in [syntax]: `{line}`",
+            lineno + 1
+        ));
+        return;
+    };
+    let key = key.trim();
+    let value = extract_value(value).unwrap_or_default();
+    match key {
+        "theme" => {
+            if value.is_empty() {
+                warnings.push(format!("ticorc:{}: theme needs a name", lineno + 1));
+            } else {
+                options.theme = Some(value);
+            }
+        }
+        _ => warnings.push(format!(
+            "ticorc:{}: unknown [syntax] setting `{key}`",
+            lineno + 1
+        )),
     }
 }
 
@@ -226,6 +249,48 @@ mod tests {
         );
         assert_eq!(options.max_syntax_highlight_bytes, 8 * 1024 * 1024);
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+    }
+
+    #[test]
+    fn syntax_section_sets_the_theme() {
+        let mut options = Options::default();
+        let mut keymap = KeyMap::new();
+        let mut warnings = Vec::new();
+        parse(
+            "[syntax]\ntheme = gruvbox\n",
+            &mut options,
+            &mut keymap,
+            &mut warnings,
+        );
+        assert_eq!(options.theme.as_deref(), Some("gruvbox"));
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+
+        // Quoted form and a path both work too.
+        parse(
+            "[syntax]\ntheme = \"~/mine.toml\"\n",
+            &mut options,
+            &mut keymap,
+            &mut warnings,
+        );
+        assert_eq!(options.theme.as_deref(), Some("~/mine.toml"));
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+    }
+
+    #[test]
+    fn syntax_section_warns_on_unknown_setting_and_missing_value() {
+        let mut options = Options::default();
+        let mut keymap = KeyMap::new();
+        let mut warnings = Vec::new();
+        parse(
+            "[syntax]\ncolor = red\ntheme =\n",
+            &mut options,
+            &mut keymap,
+            &mut warnings,
+        );
+        assert_eq!(options.theme, None);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("color"));
+        assert!(warnings[1].contains("theme"));
     }
 
     #[test]

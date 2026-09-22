@@ -52,9 +52,22 @@ highlighting is a deliberate exception:
   Linter-Execute` work). Adding support for a new language means adding an
   entry there and a corresponding `.scm` highlight query under
   `src/syntax/queries/`, not adding nanorc color-directive support.
-- Syntax colors themselves are currently a single hardcoded palette
-  (`syntax_color()` in `src/ui.rs`, keyed by `HighlightKind`) — there is no
-  theme system and no nanorc-driven override. If a theming mechanism is
-  ever wanted, it should be a tico-specific mechanism (e.g. a small set of
-  named built-in palettes, or a tico-specific config key), not a
-  reimplementation of nano's `color`/`icolor` directives.
+- Syntax colors come from a **theme in Helix's theme format**
+  (`src/theme.rs`): TOML keyed by dotted scope names (`keyword.control.import`,
+  `constant.numeric`, ...) resolved by longest prefix, with `inherits` and
+  `[palette]` support, so any Helix theme file works unmodified. The
+  built-in default is `themes/default.toml` (embedded via `include_str!`);
+  a theme is selected with `theme = NAME` in `~/.ticorc`'s `[syntax]`
+  section or `--theme NAME`, and looked up in `~/.config/tico/themes/`,
+  then an installed Helix's theme directories, then the built-ins
+  (`--listthemes` shows what's available). Only syntax scopes are honored;
+  a theme's `ui.*` entries are parsed but ignored, since bars/line
+  numbers/selection follow nano's `set titlecolor` & co.
+- Consequently the highlighter's output is Helix's scope vocabulary, not
+  an internal enum: `syntax::HighlightSpan` carries an interned `Scope`,
+  and `normalize_capture()` in `src/syntax/mod.rs` translates each
+  vendored query's capture names (a mix of tree-sitter-CLI and
+  nvim-treesitter conventions) into Helix scope names. When adding a
+  language, run the tests: `all_captures_normalize_into_helix_scopes`
+  fails on any capture name that doesn't land in a Helix top-level scope,
+  and the fix is a new alias in `normalize_capture()`, not a new color.

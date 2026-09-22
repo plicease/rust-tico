@@ -10,6 +10,7 @@ mod keymap;
 mod lockfile;
 mod options;
 mod syntax;
+mod theme;
 mod ui;
 mod watch;
 
@@ -22,6 +23,12 @@ fn main() -> anyhow::Result<()> {
         print_syntax_names();
         return Ok(());
     }
+    if cli.listthemes {
+        for name in theme::available_names(&theme::Loader::with_default_dirs()) {
+            println!("{name}");
+        }
+        return Ok(());
+    }
 
     let ignore_rcfiles = cli.ignorercfiles;
     let explicit_rcfile = cli.rcfile.as_deref();
@@ -29,12 +36,22 @@ fn main() -> anyhow::Result<()> {
     let mut options = loaded.options;
     cli.apply(&mut options);
 
-    for w in &loaded.warnings {
+    let mut warnings = loaded.warnings;
+    // A theme that can't be loaded falls back to the built-in default with
+    // a warning, like any other bad config item -- never a refusal to start.
+    let theme = match options.theme.as_deref() {
+        Some(name) => theme::Loader::with_default_dirs()
+            .load(name, &mut warnings)
+            .unwrap_or_else(theme::Theme::builtin_default),
+        None => theme::Theme::builtin_default(),
+    };
+    for w in &warnings {
         eprintln!("tico: {w}");
     }
 
     let file_args = cli::parse_file_args(&cli.files);
     let mut editor = app::Editor::new(options, loaded.keymap);
+    editor.theme = theme;
     editor.buffers.clear();
 
     let syntax_override = editor.options.syntax_name.clone();

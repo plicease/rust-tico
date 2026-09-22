@@ -327,6 +327,17 @@ pub struct Cli {
     )]
     pub modernbindings: bool,
 
+    // tico-only options (no nano equivalent); long-form only, so they can
+    // never collide with a nano short flag.
+    #[arg(
+        long = "theme",
+        value_name = "name",
+        help = "Syntax-highlighting theme (a Helix-format theme name or .toml path)"
+    )]
+    pub theme: Option<String>,
+    #[arg(long = "listthemes", help = "List the names of available themes")]
+    pub listthemes: bool,
+
     /// Files to edit, optionally preceded by +LINE[,COLUMN]. A name of `-`
     /// reads from standard input.
     #[arg(trailing_var_arg = true)]
@@ -407,6 +418,9 @@ impl Cli {
         }
         if let Some(v) = &self.syntax {
             options.syntax_name = Some(v.clone());
+        }
+        if let Some(v) = &self.theme {
+            options.theme = Some(v.clone());
         }
         if let Some(v) = &self.operatingdir {
             options.operatingdir = Some(v.clone());

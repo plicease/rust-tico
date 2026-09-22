@@ -6,10 +6,12 @@
 use crate::app::{DiffOutcome, Editor, Mode, Prompt, PromptKind};
 use crate::buffer::Pos;
 use crate::keymap::{Action, Binding, Key as TKey, KeyMap, Menu};
+use crate::theme::{Style, Theme};
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::style::{
     Attribute, Color, Print, SetAttribute, SetBackgroundColor, SetForegroundColor,
+    SetUnderlineColor,
 };
 use crossterm::terminal::{
     Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
@@ -2024,7 +2026,6 @@ fn render_help_screen(
         top,
         help_body_rows(editor),
         None,
-        syntax_color,
     )?;
     let entries = resolve_shortcuts(&editor.keymap, Menu::Help, HELP_SHORTCUTS);
     render_shortcut_bar(out, rows.saturating_sub(2) as u16, cols, &entries)
@@ -2050,8 +2051,8 @@ fn render_diff_screen(
         lines.first().map(|s| s.as_str()).unwrap_or("Diff"),
     )?;
     let body = &lines[1.min(lines.len())..];
-    let kinds = if editor.options.syntax_highlighting {
-        diff_line_kinds(body)
+    let styles = if editor.options.syntax_highlighting {
+        diff_line_styles(body, &editor.theme)
     } else {
         None
     };
@@ -2061,8 +2062,7 @@ fn render_diff_screen(
         body,
         top,
         help_body_rows(editor),
-        kinds.as_deref(),
-        diff_color,
+        styles.as_deref(),
     )?;
 
     let shortcuts: &[(&str, &str)] = match outcome {
@@ -2108,36 +2108,26 @@ fn render_scrollable_body(
     body: &[String],
     top: usize,
     body_rows: usize,
-    kinds: Option<&[Vec<Option<crate::syntax::HighlightKind>>]>,
-    color: fn(crate::syntax::HighlightKind) -> Color,
+    styles: Option<&[Vec<Option<Style>>]>,
 ) -> io::Result<()> {
     for r in 0..body_rows {
         queue!(out, MoveTo(0, 1 + r as u16))?;
         let idx = top + r;
         let text = body.get(idx).map(|s| s.as_str()).unwrap_or("");
         let chars: Vec<char> = text.chars().take(cols).collect();
-        let line_kinds = kinds.and_then(|k| k.get(idx));
+        let line_styles = styles.and_then(|k| k.get(idx));
         let len = chars.len();
 
-        if let Some(line_kinds) = line_kinds.filter(|k| k.iter().any(Option::is_some)) {
+        if let Some(line_styles) = line_styles.filter(|k| k.iter().any(Option::is_some)) {
             let mut i = 0;
             while i < len {
-                let kind = line_kinds.get(i).copied().flatten();
+                let style = line_styles.get(i).copied().flatten();
                 let mut j = i + 1;
-                while j < len && line_kinds.get(j).copied().flatten() == kind {
+                while j < len && line_styles.get(j).copied().flatten() == style {
                     j += 1;
                 }
                 let segment: String = chars[i..j].iter().collect();
-                if let Some(kind) = kind {
-                    queue!(
-                        out,
-                        SetForegroundColor(color(kind)),
-                        Print(segment),
-                        SetAttribute(Attribute::Reset)
-                    )?;
-                } else {
-                    queue!(out, Print(segment))?;
-                }
+                print_styled(out, &segment, style)?;
                 i = j;
             }
             if len < cols {
@@ -2736,8 +2726,8 @@ fn render_buffer(
         queue!(out, MoveTo(0, start_row + r as u16))?;
         let line_idx = buf.top_line + r;
         let mut rendered = String::new();
-        // Syntax-highlight classification, one entry per char of `rendered`.
-        let mut kinds: Vec<Option<crate::syntax::HighlightKind>> = Vec::new();
+        // Syntax-highlight style, one entry per char of `rendered`.
+        let mut styles: Vec<Option<Style>> = Vec::new();
         // Character range within `rendered` (post-gutter, post-tab-expansion,
         // pre-horizontal-scroll) to paint with spotlightcolor, taking
         // precedence over syntax colors, if the active search/replace match
@@ -2753,18 +2743,18 @@ fn render_buffer(
         if is_real_line {
             if gutter > 0 {
                 let prefix = format!("{:>width$} ", line_idx + 1, width = gutter - 1);
-                kinds.extend(prefix.chars().map(|_| None));
+                styles.extend(prefix.chars().map(|_| None));
                 rendered.push_str(&prefix);
             }
             let raw = buf.line(line_idx);
             gutter_chars = rendered.chars().count();
 
             let line_start = buf.line_start_byte(line_idx);
-            let char_kinds = map_spans_to_line(&raw, line_start, &spans);
+            let char_styles = map_spans_to_line(&raw, line_start, &spans, &editor.theme);
 
-            let (expanded, expanded_kinds) = expand_tabs_with_kinds(&raw, &char_kinds, tabsize);
+            let (expanded, expanded_styles) = expand_tabs_with_styles(&raw, &char_styles, tabsize);
             rendered.push_str(&expanded);
-            kinds.extend(expanded_kinds);
+            styles.extend(expanded_styles);
 
             if let Some((pos, len)) = editor.spotlight
                 && pos.line == line_idx
@@ -2798,7 +2788,7 @@ fn render_buffer(
             }
         } else if gutter > 0 {
             rendered.push('~');
-            kinds.push(None);
+            styles.push(None);
         }
 
         // Horizontal scroll: only the cursor's own line ever gets a nonzero
@@ -2831,16 +2821,15 @@ fn render_buffer(
         if show_right {
             chars.push('>');
         }
-        let mut windowed_kinds: Vec<Option<crate::syntax::HighlightKind>> =
-            kinds[..gutter_chars].to_vec();
+        let mut windowed_styles: Vec<Option<Style>> = styles[..gutter_chars].to_vec();
         if show_left {
-            windowed_kinds.push(None);
+            windowed_styles.push(None);
         }
-        windowed_kinds.extend_from_slice(&kinds[vis_start..vis_end]);
+        windowed_styles.extend_from_slice(&styles[vis_start..vis_end]);
         if show_right {
-            windowed_kinds.push(None);
+            windowed_styles.push(None);
         }
-        let kinds = windowed_kinds;
+        let styles = windowed_styles;
         let marker_shift = gutter_chars + if show_left { 1 } else { 0 };
         let clamp_to_view = |(s, e): (usize, usize)| {
             let clamp = |x: usize| marker_shift + x.clamp(vis_start, vis_end) - vis_start;
@@ -2863,10 +2852,10 @@ fn render_buffer(
         while i < len {
             let in_spot = spot.is_some_and(|(s, e)| i >= s && i < e);
             let in_sel = !in_spot && sel.is_some_and(|(s, e)| i >= s && i < e);
-            let kind = if in_spot || in_sel {
+            let style = if in_spot || in_sel {
                 None
             } else {
-                kinds.get(i).copied().flatten()
+                styles.get(i).copied().flatten()
             };
             let mut j = i + 1;
             while j < len {
@@ -2875,12 +2864,12 @@ fn render_buffer(
                 if j_in_spot != in_spot || j_in_sel != in_sel {
                     break;
                 }
-                let j_kind = if j_in_spot || j_in_sel {
+                let j_style = if j_in_spot || j_in_sel {
                     None
                 } else {
-                    kinds.get(j).copied().flatten()
+                    styles.get(j).copied().flatten()
                 };
-                if j_kind != kind {
+                if j_style != style {
                     break;
                 }
                 j += 1;
@@ -2914,15 +2903,8 @@ fn render_buffer(
                         )?;
                     }
                 }
-            } else if let Some(kind) = kind {
-                queue!(
-                    out,
-                    SetForegroundColor(syntax_color(kind)),
-                    Print(segment),
-                    SetAttribute(Attribute::Reset)
-                )?;
             } else {
-                queue!(out, Print(segment))?;
+                print_styled(out, &segment, style)?;
             }
             i = j;
         }
@@ -2931,6 +2913,28 @@ fn render_buffer(
         }
     }
     Ok(())
+}
+
+/// Print one run of text in a theme style (or plain, for `None`), resetting
+/// all attributes afterwards so nothing leaks into the next segment. Colors
+/// and underline color are commands; everything else is an attribute.
+fn print_styled(out: &mut impl Write, segment: &str, style: Option<Style>) -> io::Result<()> {
+    let Some(style) = style else {
+        return queue!(out, Print(segment));
+    };
+    if let Some(fg) = style.fg {
+        queue!(out, SetForegroundColor(fg))?;
+    }
+    if let Some(bg) = style.bg {
+        queue!(out, SetBackgroundColor(bg))?;
+    }
+    if let Some(uc) = style.underline_color {
+        queue!(out, SetUnderlineColor(uc))?;
+    }
+    for attr in style.attributes() {
+        queue!(out, SetAttribute(attr))?;
+    }
+    queue!(out, Print(segment), SetAttribute(Attribute::Reset))
 }
 
 /// Map a nanorc color spec to the crossterm colors that produce the same
@@ -3027,118 +3031,90 @@ fn map_named_color(nc: crate::options::NamedColor) -> Color {
     }
 }
 
-/// Map whole-buffer byte-offset highlight spans onto one line's characters:
-/// `raw` is that line's text, `line_start` its byte offset in the text
-/// `spans` were computed from. Shared by the main editor buffer and the
-/// merge-diff viewer, which both highlight a block of text line-by-line.
+/// Map whole-buffer byte-offset highlight spans onto one line's characters
+/// as resolved theme styles: `raw` is that line's text, `line_start` its
+/// byte offset in the text `spans` were computed from. Shared by the main
+/// editor buffer and the merge-diff viewer, which both highlight a block of
+/// text line-by-line.
+///
+/// Spans whose scope the theme says nothing about are skipped rather than
+/// painted as "no style", so an inner capture a theme doesn't cover (say
+/// `punctuation.bracket` inside a string) leaves the enclosing span's style
+/// showing through — the same layering Helix produces.
 fn map_spans_to_line(
     raw: &str,
     line_start: usize,
     spans: &[crate::syntax::HighlightSpan],
-) -> Vec<Option<crate::syntax::HighlightKind>> {
-    let mut char_kinds = vec![None; raw.chars().count()];
+    theme: &Theme,
+) -> Vec<Option<Style>> {
+    let mut char_styles = vec![None; raw.chars().count()];
     if spans.is_empty() {
-        return char_kinds;
+        return char_styles;
     }
     let line_end = line_start + raw.len();
     for span in spans {
         if span.end <= line_start || span.start >= line_end {
             continue;
         }
+        let Some(style) = theme.style(span.scope) else {
+            continue;
+        };
         let rel_start = span.start.max(line_start) - line_start;
         let rel_end = span.end.min(line_end) - line_start;
         let cs = raw[..rel_start].chars().count();
         let ce = raw[..rel_end].chars().count();
-        for k in &mut char_kinds[cs..ce] {
-            *k = Some(span.kind);
+        for k in &mut char_styles[cs..ce] {
+            *k = Some(style);
         }
     }
-    char_kinds
+    char_styles
 }
 
 /// Like tab expansion alone, but carries each source character's syntax
-/// classification along to every column it expands to, so a tab adjacent to
-/// a highlighted token doesn't break the highlighting.
-fn expand_tabs_with_kinds(
+/// style along to every column it expands to, so a tab adjacent to a
+/// highlighted token doesn't break the highlighting.
+fn expand_tabs_with_styles(
     line: &str,
-    kinds: &[Option<crate::syntax::HighlightKind>],
+    styles: &[Option<Style>],
     tabsize: usize,
-) -> (String, Vec<Option<crate::syntax::HighlightKind>>) {
+) -> (String, Vec<Option<Style>>) {
     let mut out = String::new();
-    let mut out_kinds = Vec::new();
+    let mut out_styles = Vec::new();
     let mut w = 0;
-    for (c, k) in line.chars().zip(kinds.iter().copied()) {
+    for (c, k) in line.chars().zip(styles.iter().copied()) {
         if c == '\t' {
             let n = tabsize - (w % tabsize);
             for _ in 0..n {
                 out.push(' ');
-                out_kinds.push(k);
+                out_styles.push(k);
             }
             w += n;
         } else {
             out.push(c);
-            out_kinds.push(k);
+            out_styles.push(k);
             w += unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
         }
     }
-    (out, out_kinds)
-}
-
-/// Map a `HighlightKind` to a terminal color. Not derived from any nanorc
-/// syntax file (tico's own syntax highlighting is independent of nano's
-/// per-language color files) but loosely follows the same conventions found
-/// there: green comments, yellow strings, magenta-ish numbers/constants,
-/// blue keywords.
-fn syntax_color(kind: crate::syntax::HighlightKind) -> Color {
-    use crate::syntax::HighlightKind as HK;
-    match kind {
-        HK::Comment => Color::DarkGreen,
-        HK::String => Color::Yellow,
-        HK::Number => Color::Magenta,
-        HK::Keyword => Color::Blue,
-        HK::Function => Color::Cyan,
-        HK::Type => Color::DarkYellow,
-        HK::Constant => Color::DarkMagenta,
-        HK::Variable => Color::DarkCyan,
-        HK::Module => Color::DarkBlue,
-        HK::Attribute => Color::Green,
-        HK::Tag => Color::Red,
-    }
-}
-
-/// Color mapping for the merge-diff viewer, using the conventional
-/// green-for-added/red-for-removed scheme instead of `syntax_color`'s
-/// generic per-language palette (which would otherwise show additions as
-/// plain string-yellow and deletions as keyword-blue, per `diff.scm`'s
-/// arbitrary bucket choices — fine for general syntax highlighting, but not
-/// what anyone expects from a diff).
-fn diff_color(kind: crate::syntax::HighlightKind) -> Color {
-    use crate::syntax::HighlightKind as HK;
-    match kind {
-        HK::String => Color::Green,    // (addition) / (new_file)
-        HK::Keyword => Color::Red,     // (deletion) / (old_file)
-        HK::Constant => Color::Yellow, // (commit)
-        HK::Attribute => Color::Cyan,  // (location), e.g. an "@@" hunk header
-        HK::Variable => Color::Blue,   // (command)
-        _ => syntax_color(kind),
-    }
+    (out, out_styles)
 }
 
 /// Highlight `body` (already-split lines of a unified diff) with the
-/// vendored "diff" tree-sitter grammar, one classification array per line
-/// — mirrors how `render_buffer` highlights the main editor buffer, just
-/// without a gutter, tabs, or horizontal scroll to account for. Returns
-/// `None` if the "diff" language somehow isn't registered (never happens
-/// in practice; guards against a future registry change more than
+/// vendored "diff" tree-sitter grammar, one style array per line — mirrors
+/// how `render_buffer` highlights the main editor buffer, just without a
+/// gutter, tabs, or horizontal scroll to account for. The grammar's query
+/// uses Helix's `diff.plus`/`diff.minus` scopes, so the theme decides the
+/// colors (green/red in every sane theme, including the built-in one).
+/// Returns `None` if the "diff" language somehow isn't registered (never
+/// happens in practice; guards against a future registry change more than
 /// anything).
-fn diff_line_kinds(body: &[String]) -> Option<Vec<Vec<Option<crate::syntax::HighlightKind>>>> {
+fn diff_line_styles(body: &[String], theme: &Theme) -> Option<Vec<Vec<Option<Style>>>> {
     let lang = crate::syntax::find_by_name("diff")?;
     let text = body.join("\n");
     let spans = crate::syntax::highlight(&text, lang);
     let mut line_start = 0usize;
     let mut out = Vec::with_capacity(body.len());
     for line in body {
-        out.push(map_spans_to_line(line, line_start, &spans));
+        out.push(map_spans_to_line(line, line_start, &spans, theme));
         line_start += line.len() + 1; // +1 for the '\n' joiner
     }
     Some(out)

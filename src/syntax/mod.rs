@@ -37,24 +37,56 @@ pub fn detect_with_override(
     }
 }
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use tree_sitter::StreamingIterator;
 
-/// A simplified highlight category that every language's much richer set of
-/// tree-sitter capture names (`@function.method`, `@string.special`, ...)
-/// gets bucketed into, each mapped to one terminal color in the UI layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HighlightKind {
-    Comment,
-    String,
-    Number,
-    Keyword,
-    Function,
-    Type,
-    Constant,
-    Variable,
-    Module,
-    Attribute,
-    Tag,
+/// An interned highlight scope name in Helix's vocabulary
+/// (`keyword.control.import`, `constant.numeric`, `markup.heading`, ...).
+/// The theme (`crate::theme`) maps scopes to styles by longest dotted
+/// prefix, so the full capture name is kept — a theme may well style
+/// `keyword.control.import` differently from plain `keyword`.
+///
+/// Interning keeps `HighlightSpan` small and `Copy` (a `u16` rather than a
+/// heap string per span, of which a big buffer has tens of thousands) and
+/// gives the theme a cheap key to memoize resolution on. The set of
+/// distinct names is bounded by what the vendored queries contain, a few
+/// hundred at most, so leaking them is fine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Scope(u16);
+
+struct Interner {
+    names: Vec<&'static str>,
+    ids: HashMap<&'static str, u16>,
+}
+
+fn interner() -> &'static Mutex<Interner> {
+    static INTERNER: OnceLock<Mutex<Interner>> = OnceLock::new();
+    INTERNER.get_or_init(|| {
+        Mutex::new(Interner {
+            names: Vec::new(),
+            ids: HashMap::new(),
+        })
+    })
+}
+
+impl Scope {
+    /// The scope for a (Helix-vocabulary) name, interning it if new.
+    pub fn intern(name: &str) -> Scope {
+        let mut it = interner().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&id) = it.ids.get(name) {
+            return Scope(id);
+        }
+        let id = u16::try_from(it.names.len()).expect("more than 65535 distinct highlight scopes");
+        let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+        it.names.push(leaked);
+        it.ids.insert(leaked, id);
+        Scope(id)
+    }
+
+    pub fn name(self) -> &'static str {
+        interner().lock().unwrap_or_else(|e| e.into_inner()).names[self.0 as usize]
+    }
 }
 
 /// One highlighted span of the buffer, as byte offsets into its text.
@@ -62,14 +94,14 @@ pub enum HighlightKind {
 pub struct HighlightSpan {
     pub start: usize,
     pub end: usize,
-    pub kind: HighlightKind,
+    pub scope: Scope,
 }
 
-/// Parse `text` with `lang`'s grammar and run its highlight query, bucketing
-/// each capture into a `HighlightKind`. Spans are returned in the query's
-/// natural (mostly outer-to-inner) order, so painting them in that order —
-/// later spans overwriting earlier ones where they overlap — gives the
-/// expected "innermost/most-specific wins" result (e.g. an interpolated
+/// Parse `text` with `lang`'s grammar and run its highlight query, tagging
+/// each capture with its (normalized) scope. Spans are returned in the
+/// query's natural (mostly outer-to-inner) order, so painting them in that
+/// order — later spans overwriting earlier ones where they overlap — gives
+/// the expected "innermost/most-specific wins" result (e.g. an interpolated
 /// variable inside a string shows as a variable, the rest of the string
 /// still shows as a string). Returns an empty vec if parsing or compiling
 /// the query fails (should not normally happen for a vendored, tested
@@ -87,17 +119,24 @@ pub fn highlight(text: &str, lang: &LanguageDef) -> Vec<HighlightSpan> {
         return Vec::new();
     };
 
+    // Capture index -> scope, resolved once per query rather than once per
+    // captured node (there are as many of those as tokens in the file).
+    let scopes: Vec<Option<Scope>> = query
+        .capture_names()
+        .iter()
+        .map(|name| normalize_capture(name).map(|n| Scope::intern(&n)))
+        .collect();
+
     let mut spans = Vec::new();
     let mut cursor = tree_sitter::QueryCursor::new();
     let mut captures = cursor.captures(&query, tree.root_node(), text.as_bytes());
     while let Some((m, capture_ix)) = captures.next() {
         let capture = m.captures[*capture_ix];
-        let name = query.capture_names()[capture.index as usize];
-        if let Some(kind) = bucket_capture(name) {
+        if let Some(scope) = scopes[capture.index as usize] {
             spans.push(HighlightSpan {
                 start: capture.node.start_byte(),
                 end: capture.node.end_byte(),
-                kind,
+                scope,
             });
         }
     }
@@ -167,7 +206,7 @@ fn inject_heredocs(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<Highlig
         spans.extend(inner_spans.into_iter().map(|s| HighlightSpan {
             start: s.start + body_start,
             end: s.end + body_start,
-            kind: s.kind,
+            scope: s.scope,
         }));
     }
 }
@@ -260,7 +299,7 @@ fn add_numeric_fallback(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<Hi
             spans.push(HighlightSpan {
                 start,
                 end,
-                kind: HighlightKind::Number,
+                scope: Scope::intern("constant.numeric"),
             });
         }
     }
@@ -312,36 +351,105 @@ fn looks_numeric(text: &str) -> bool {
     seen_digit
 }
 
-/// Bucket a tree-sitter capture name (its first dot-separated segment, e.g.
-/// "function" from "function.method") into a `HighlightKind`. Rare/
-/// grammar-specific captures with no good general bucket (punctuation,
-/// plain "text", spell-check hints, ...) are left uncolored (`None`) rather
-/// than guessed at.
-fn bucket_capture(name: &str) -> Option<HighlightKind> {
-    // A couple of grammars (markdown's block query among them) use
-    // "text.*"-prefixed names for things that don't fit the generic
-    // buckets below; special-case the ones worth coloring before falling
-    // back to the first-segment match.
-    match name {
-        "text.title" => return Some(HighlightKind::Keyword),
-        "text.uri" | "text.reference" => return Some(HighlightKind::String),
-        _ => {}
+/// Translate a raw tree-sitter capture name into Helix's scope vocabulary
+/// (the one themes are written against), or `None` for captures that
+/// shouldn't produce a highlight at all.
+///
+/// The vendored queries come from each grammar's own upstream repo, so they
+/// are a mix of conventions: the tree-sitter CLI's (`function.method`,
+/// `variable.builtin` — already Helix-compatible), nvim-treesitter's
+/// (`conditional`, `repeat`, `include`, `number`, `property`, `text.title`
+/// ...), and the odd grammar-specific one (elm suffixes everything with
+/// `.elm`). Everything here is a *renaming*; the actual choice of color is
+/// entirely the theme's, via longest-prefix lookup, so a name that has no
+/// alias is passed through unchanged and still falls back sensibly
+/// (`constant.macro` -> a theme's `constant`).
+///
+/// Captures dropped outright: `_`-prefixed helper captures (used only for
+/// predicates), `spell`/`nospell`, `none`, `error`, `embedded`, and the
+/// nvim `text.{note,warning,danger}` TODO markers, which have no Helix
+/// equivalent — leaving them out means the enclosing comment's style shows
+/// through, which is what a theme user would expect.
+fn normalize_capture(raw: &str) -> Option<String> {
+    let name = raw.strip_suffix(".elm").unwrap_or(raw);
+    // `_foo`: predicate-only helper captures; `source.*`: injection markers.
+    if name.starts_with('_') || name.starts_with("source.") {
+        return None;
     }
-    let head = name.split('.').next().unwrap_or(name);
-    Some(match head {
-        "comment" => HighlightKind::Comment,
-        "string" | "character" | "char" | "escape" => HighlightKind::String,
-        "number" | "float" => HighlightKind::Number,
-        "boolean" | "constant" => HighlightKind::Constant,
-        "keyword" | "conditional" | "repeat" | "storageclass" | "storage" | "include"
-        | "exception" | "label" | "preproc" => HighlightKind::Keyword,
-        "function" | "_function" | "method" | "constructor" => HighlightKind::Function,
-        "type" | "_type" | "interface" => HighlightKind::Type,
-        "variable" | "parameter" | "property" | "field" | "_name" => HighlightKind::Variable,
-        "module" | "namespace" => HighlightKind::Module,
-        "attribute" => HighlightKind::Attribute,
-        "tag" => HighlightKind::Tag,
-        _ => return None,
+    // Exact renames first: these change more than the leading segment.
+    let exact = match name {
+        "spell" | "nospell" | "none" | "error" | "embedded" | "clean" | "text.note"
+        | "text.warning" | "text.danger" => return None,
+        "number" => "constant.numeric",
+        "number.float" | "float" => "constant.numeric.float",
+        "boolean" => "constant.builtin.boolean",
+        "character" | "char" | "character.special" => "constant.character",
+        "escape" | "string.escape" | "character.escape" => "constant.character.escape",
+        "string.regex" | "string.special.regex" => "string.regexp",
+        "string.special.uri" => "string.special.url",
+        "string.documentation" => "string",
+        "conditional" | "keyword.conditional" | "keyword.conditional.ternary" => {
+            "keyword.control.conditional"
+        }
+        "repeat" | "keyword.repeat" => "keyword.control.repeat",
+        "include" | "import" | "keyword.import" | "meta.import" => "keyword.control.import",
+        "exception" | "keyword.exception" => "keyword.control.exception",
+        "keyword.return" => "keyword.control.return",
+        "keyword.control" => "keyword.control",
+        "keyword.coroutine" | "keyword.debug" | "keyword.other" | "keyword.other.port" => "keyword",
+        "keyword.type" | "storage.type" => "keyword.storage.type",
+        "keyword.modifier" | "storageclass" | "type.qualifier" => "keyword.storage.modifier",
+        "preproc" | "define" | "macro" | "custom_directive" => "keyword.directive",
+        "method" | "method.call" | "function.method.call" | "function.method.builtin" => {
+            "function.method"
+        }
+        "function.call" | "local.function" => "function",
+        "function.macro.builtin" => "function.macro",
+        "parameter" | "parameter.builtin" => "variable.parameter",
+        "property" | "property.definition" | "field" | "variable.member" => "variable.other.member",
+        "module" | "module.builtin" => "namespace",
+        "type.definition" | "interface" | "union" => "type",
+        "tag.attribute" => "attribute",
+        "delimiter" => "punctuation.delimiter",
+        "comment.doc" | "comment.doc.__attribute__" | "comment.documentation" => {
+            "comment.block.documentation"
+        }
+        "text.title" => "markup.heading",
+        "text.uri" => "markup.link.url",
+        "text.reference" => "markup.link.label",
+        "text.literal" => "markup.raw",
+        "text.emphasis" => "markup.italic",
+        "text.strong" => "markup.bold",
+        _ => "",
+    };
+    if !exact.is_empty() {
+        return Some(exact.to_string());
+    }
+    // Otherwise rename just the leading segment where nvim's differs from
+    // Helix's, keeping any more specific tail (`property.foo` ->
+    // `variable.other.member.foo`).
+    let (head, tail) = match name.split_once('.') {
+        Some((h, t)) => (h, Some(t)),
+        None => (name, None),
+    };
+    let head = match head {
+        "number" => "constant.numeric",
+        "character" => "constant.character",
+        "conditional" => "keyword.control.conditional",
+        "repeat" => "keyword.control.repeat",
+        "include" => "keyword.control.import",
+        "exception" => "keyword.control.exception",
+        "preproc" => "keyword.directive",
+        "method" => "function.method",
+        "parameter" => "variable.parameter",
+        "property" | "field" => "variable.other.member",
+        "module" => "namespace",
+        "text" => "markup",
+        other => other,
+    };
+    Some(match tail {
+        Some(t) => format!("{head}.{t}"),
+        None => head.to_string(),
     })
 }
 
@@ -394,10 +502,10 @@ mod tests {
             let start = src.find(needle).unwrap();
             let end = start + needle.len();
             assert!(
-                spans
-                    .iter()
-                    .any(|s| s.kind == HighlightKind::Number && s.start == start && s.end == end),
-                "expected a Number span for {needle:?} at {start}..{end}, got: {spans:?}"
+                spans.iter().any(|s| s.scope.name() == "constant.numeric"
+                    && s.start == start
+                    && s.end == end),
+                "expected a constant.numeric span for {needle:?} at {start}..{end}, got: {spans:?}"
             );
         }
     }
@@ -413,16 +521,16 @@ mod tests {
         let select_start = src.find("SELECT").unwrap();
         let from_start = src.find("FROM").unwrap();
         assert!(
-            spans.iter().any(|s| s.kind == HighlightKind::Keyword
+            spans.iter().any(|s| s.scope.name().starts_with("keyword")
                 && s.start == select_start
                 && s.end == select_start + 6),
-            "expected a Keyword span for SELECT at {select_start}, got {spans:?}"
+            "expected a keyword span for SELECT at {select_start}, got {spans:?}"
         );
         assert!(
-            spans.iter().any(|s| s.kind == HighlightKind::Keyword
+            spans.iter().any(|s| s.scope.name().starts_with("keyword")
                 && s.start == from_start
                 && s.end == from_start + 4),
-            "expected a Keyword span for FROM at {from_start}, got {spans:?}"
+            "expected a keyword span for FROM at {from_start}, got {spans:?}"
         );
     }
 
@@ -435,10 +543,10 @@ mod tests {
         // be covered by the outer Perl query's plain @string capture.
         let body_start = src.find("some text").unwrap();
         assert!(
-            spans.iter().any(|s| s.kind == HighlightKind::String
+            spans.iter().any(|s| s.scope.name().starts_with("string")
                 && s.start <= body_start
                 && s.end >= body_start + 9),
-            "expected the heredoc body to remain a String span, got {spans:?}"
+            "expected the heredoc body to remain a string span, got {spans:?}"
         );
     }
 
@@ -573,5 +681,103 @@ mod tests {
         for (name, path, source) in cases {
             check(name, path, source, true);
         }
+    }
+
+    /// Every capture name every vendored query produces must, after
+    /// `normalize_capture`, start with one of the top-level scope names
+    /// Helix themes are written against -- otherwise no theme could ever
+    /// style it, and a new query (or a new upstream revision of one) that
+    /// brings a novel nvim-ism would silently render uncolored.
+    #[test]
+    fn all_captures_normalize_into_helix_scopes() {
+        const HELIX_TOP_LEVEL: &[&str] = &[
+            "attribute",
+            "type",
+            "constructor",
+            "constant",
+            "string",
+            "comment",
+            "variable",
+            "label",
+            "punctuation",
+            "keyword",
+            "operator",
+            "function",
+            "tag",
+            "namespace",
+            "special",
+            "markup",
+            "diff",
+        ];
+        let mut bad = Vec::new();
+        for name in names() {
+            let lang = find_by_name(name).unwrap();
+            let query = tree_sitter::Query::new(&(lang.language)(), lang.highlights_query)
+                .unwrap_or_else(|e| panic!("{name}: query failed to compile: {e}"));
+            for raw in query.capture_names() {
+                let Some(scope) = normalize_capture(raw) else {
+                    continue;
+                };
+                let head = scope.split('.').next().unwrap();
+                if !HELIX_TOP_LEVEL.contains(&head) {
+                    bad.push(format!("{name}: @{raw} -> {scope}"));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "captures outside Helix's scope vocabulary:\n{}",
+            bad.join("\n")
+        );
+    }
+
+    #[test]
+    fn normalize_capture_renames_nvim_conventions() {
+        let n = |s: &str| normalize_capture(s);
+        assert_eq!(n("number").as_deref(), Some("constant.numeric"));
+        assert_eq!(n("float").as_deref(), Some("constant.numeric.float"));
+        assert_eq!(
+            n("conditional").as_deref(),
+            Some("keyword.control.conditional")
+        );
+        assert_eq!(
+            n("keyword.import").as_deref(),
+            Some("keyword.control.import")
+        );
+        assert_eq!(n("property").as_deref(), Some("variable.other.member"));
+        assert_eq!(n("text.title").as_deref(), Some("markup.heading"));
+        assert_eq!(n("string.elm").as_deref(), Some("string"));
+        assert_eq!(n("function.elm").as_deref(), Some("function"));
+        // Already-Helix names pass through untouched, tail included.
+        assert_eq!(
+            n("keyword.control.import").as_deref(),
+            Some("keyword.control.import")
+        );
+        assert_eq!(n("variable.builtin").as_deref(), Some("variable.builtin"));
+        assert_eq!(
+            n("punctuation.section.braces").as_deref(),
+            Some("punctuation.section.braces")
+        );
+        // Head-only renames keep their tail.
+        assert_eq!(
+            n("property.foo").as_deref(),
+            Some("variable.other.member.foo")
+        );
+        // Dropped outright.
+        assert_eq!(n("_name"), None);
+        assert_eq!(n("spell"), None);
+        assert_eq!(n("source.glsl"), None);
+        assert_eq!(n("text.warning"), None);
+    }
+
+    #[test]
+    fn scopes_intern_to_stable_ids() {
+        let a = Scope::intern("keyword.control");
+        let b = Scope::intern("keyword.control");
+        let c = Scope::intern("keyword");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(a.name(), "keyword.control");
+        assert_eq!(c.name(), "keyword");
     }
 }
