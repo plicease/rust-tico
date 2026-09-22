@@ -6,7 +6,7 @@
 use crate::app::{DiffOutcome, Editor, Mode, Prompt, PromptKind};
 use crate::buffer::Pos;
 use crate::keymap::{Action, Binding, Key as TKey, KeyMap, Menu};
-use crate::theme::{Style, Theme};
+use crate::theme::Style;
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::style::{
@@ -2052,7 +2052,7 @@ fn render_diff_screen(
     )?;
     let body = &lines[1.min(lines.len())..];
     let styles = if editor.options.syntax_highlighting {
-        diff_line_styles(body, editor.theme_for(crate::syntax::find_by_name("diff")))
+        diff_line_styles(body, editor)
     } else {
         None
     };
@@ -2721,7 +2721,6 @@ fn render_buffer(
             Vec::new()
         };
     let selection = editor.selection_range();
-    let theme = editor.theme_for(buf.language);
 
     for r in 0..rows {
         queue!(out, MoveTo(0, start_row + r as u16))?;
@@ -2751,7 +2750,7 @@ fn render_buffer(
             gutter_chars = rendered.chars().count();
 
             let line_start = buf.line_start_byte(line_idx);
-            let char_styles = map_spans_to_line(&raw, line_start, &spans, theme);
+            let char_styles = map_spans_to_line(&raw, line_start, &spans, editor);
 
             let (expanded, expanded_styles) = expand_tabs_with_styles(&raw, &char_styles, tabsize);
             rendered.push_str(&expanded);
@@ -3042,11 +3041,15 @@ fn map_named_color(nc: crate::options::NamedColor) -> Color {
 /// painted as "no style", so an inner capture a theme doesn't cover (say
 /// `punctuation.bracket` inside a string) leaves the enclosing span's style
 /// showing through — the same layering Helix produces.
+///
+/// The theme is chosen per span from the language that produced it
+/// (`editor.theme_for`), so an injected heredoc body follows its own
+/// language's `[syntax]` override rather than the enclosing buffer's.
 fn map_spans_to_line(
     raw: &str,
     line_start: usize,
     spans: &[crate::syntax::HighlightSpan],
-    theme: &Theme,
+    editor: &Editor,
 ) -> Vec<Option<Style>> {
     let mut char_styles = vec![None; raw.chars().count()];
     if spans.is_empty() {
@@ -3057,7 +3060,7 @@ fn map_spans_to_line(
         if span.end <= line_start || span.start >= line_end {
             continue;
         }
-        let Some(style) = theme.style(span.scope) else {
+        let Some(style) = editor.theme_for(span.language).style(span.scope) else {
             continue;
         };
         let rel_start = span.start.max(line_start) - line_start;
@@ -3108,14 +3111,14 @@ fn expand_tabs_with_styles(
 /// Returns `None` if the "diff" language somehow isn't registered (never
 /// happens in practice; guards against a future registry change more than
 /// anything).
-fn diff_line_styles(body: &[String], theme: &Theme) -> Option<Vec<Vec<Option<Style>>>> {
+fn diff_line_styles(body: &[String], editor: &Editor) -> Option<Vec<Vec<Option<Style>>>> {
     let lang = crate::syntax::find_by_name("diff")?;
     let text = body.join("\n");
     let spans = crate::syntax::highlight(&text, lang);
     let mut line_start = 0usize;
     let mut out = Vec::with_capacity(body.len());
     for line in body {
-        out.push(map_spans_to_line(line, line_start, &spans, theme));
+        out.push(map_spans_to_line(line, line_start, &spans, editor));
         line_start += line.len() + 1; // +1 for the '\n' joiner
     }
     Some(out)
@@ -3644,6 +3647,44 @@ mod tests {
         assert_eq!(format_byte_size(4096), "4KB");
         assert_eq!(format_byte_size(4097), "4097 bytes");
         assert_eq!(format_byte_size(0), "0 bytes");
+    }
+
+    #[test]
+    fn heredoc_body_uses_the_injected_languages_theme() {
+        // Perl buffer with an SQL heredoc; Perl keeps the default theme
+        // while SQL gets an override whose keyword color is unmistakable.
+        let mut ed = test_editor("print <<SQL;\nSELECT 1\nSQL\n");
+        ed.buf_mut().language = crate::syntax::find_by_name("perl");
+        let dir = std::env::temp_dir().join(format!("tico-ui-theme-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("loud.toml"), "\"keyword\" = \"#123456\"\n").unwrap();
+        let mut w = Vec::new();
+        let loud_theme = crate::theme::Loader::new(vec![dir.clone()])
+            .load("loud", &mut w)
+            .unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(w.is_empty(), "{w:?}");
+        ed.language_themes.insert("sql".to_string(), loud_theme);
+
+        let spans = ed
+            .buf()
+            .highlighted_spans_cached(ed.buf().language.unwrap());
+        let text = ed.buf().to_string();
+        let line1_start = ed.buf().line_start_byte(1);
+        let styles = map_spans_to_line(&ed.buf().line(1), line1_start, &spans, &ed);
+        let loud = Color::Rgb {
+            r: 0x12,
+            g: 0x34,
+            b: 0x56,
+        };
+        assert_eq!(
+            styles[0].and_then(|s| s.fg),
+            Some(loud),
+            "SELECT in the SQL heredoc must use sql's theme: {styles:?} (text {text:?})"
+        );
+        // And Perl's own `print` on line 0 does not.
+        let styles0 = map_spans_to_line(&ed.buf().line(0), 0, &spans, &ed);
+        assert_ne!(styles0[0].and_then(|s| s.fg), Some(loud), "{styles0:?}");
     }
 
     #[test]

@@ -235,13 +235,13 @@ pub struct Editor {
 }
 
 impl Editor {
-    /// The theme to paint a buffer of language `lang` with: its override
-    /// from `[syntax]` if it has one, otherwise the global theme. A buffer
-    /// with no language has nothing to highlight, so which theme comes
-    /// back for `None` doesn't matter.
-    pub fn theme_for(&self, lang: Option<&crate::syntax::LanguageDef>) -> &crate::theme::Theme {
-        lang.and_then(|l| self.language_themes.get(l.name))
-            .unwrap_or(&self.theme)
+    /// The theme to paint text of language `language` (a `LanguageDef::name`)
+    /// with: its override from `[syntax]` if it has one, otherwise the
+    /// global theme. Resolved per highlight span, not per buffer, so a
+    /// heredoc body injected with another language gets that language's
+    /// theme.
+    pub fn theme_for(&self, language: &str) -> &crate::theme::Theme {
+        self.language_themes.get(language).unwrap_or(&self.theme)
     }
 
     pub fn new(options: Options, keymap: crate::keymap::KeyMap) -> Editor {

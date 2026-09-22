@@ -95,6 +95,11 @@ pub struct HighlightSpan {
     pub start: usize,
     pub end: usize,
     pub scope: Scope,
+    /// `LanguageDef::name` of the grammar whose query produced this span.
+    /// Usually the buffer's own language, but a heredoc body injected with
+    /// another language (`<<SQL` in Perl) carries that language, so the
+    /// renderer can paint it with *its* theme rather than the buffer's.
+    pub language: &'static str,
 }
 
 /// Parse `text` with `lang`'s grammar and run its highlight query, tagging
@@ -106,7 +111,7 @@ pub struct HighlightSpan {
 /// still shows as a string). Returns an empty vec if parsing or compiling
 /// the query fails (should not normally happen for a vendored, tested
 /// query, but a corrupt/huge buffer shouldn't be able to crash the editor).
-pub fn highlight(text: &str, lang: &LanguageDef) -> Vec<HighlightSpan> {
+pub fn highlight(text: &str, lang: &'static LanguageDef) -> Vec<HighlightSpan> {
     let language = (lang.language)();
     let mut parser = tree_sitter::Parser::new();
     if parser.set_language(&language).is_err() {
@@ -137,6 +142,7 @@ pub fn highlight(text: &str, lang: &LanguageDef) -> Vec<HighlightSpan> {
                 start: capture.node.start_byte(),
                 end: capture.node.end_byte(),
                 scope,
+                language: lang.name,
             });
         }
     }
@@ -145,7 +151,7 @@ pub fn highlight(text: &str, lang: &LanguageDef) -> Vec<HighlightSpan> {
     // literals their own named node, so a query can't capture them at all.
     // Catch any leaf token that looks like a number and isn't already
     // covered by a real capture.
-    add_numeric_fallback(&tree, text, &mut spans);
+    add_numeric_fallback(&tree, text, lang.name, &mut spans);
 
     // Heredoc language injection: when a heredoc's terminator names a known
     // language (e.g. `<<SQL`, `<<'HTML'`), re-highlight its body with that
@@ -206,7 +212,7 @@ fn inject_heredocs(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<Highlig
         spans.extend(inner_spans.into_iter().map(|s| HighlightSpan {
             start: s.start + body_start,
             end: s.end + body_start,
-            scope: s.scope,
+            ..s
         }));
     }
 }
@@ -241,7 +247,12 @@ fn collect_by_kind<'a>(
     }
 }
 
-fn add_numeric_fallback(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<HighlightSpan>) {
+fn add_numeric_fallback(
+    tree: &tree_sitter::Tree,
+    text: &str,
+    language: &'static str,
+    spans: &mut Vec<HighlightSpan>,
+) {
     let bytes = text.as_bytes();
     let mut cursor = tree.walk();
     let mut nodes = Vec::new();
@@ -300,6 +311,7 @@ fn add_numeric_fallback(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<Hi
                 start,
                 end,
                 scope: Scope::intern("constant.numeric"),
+                language,
             });
         }
     }
@@ -531,6 +543,33 @@ mod tests {
                 && s.start == from_start
                 && s.end == from_start + 4),
             "expected a keyword span for FROM at {from_start}, got {spans:?}"
+        );
+    }
+
+    #[test]
+    fn heredoc_spans_carry_the_injected_language() {
+        let lang = languages::detect(Some(std::path::Path::new("a.pl")), "").unwrap();
+        let src = "my $x = 1;\nprint <<SQL;\n   SELECT 1\nSQL\n";
+        let spans = highlight(src, lang);
+        let select = src.find("SELECT").unwrap();
+        let sql_span = spans
+            .iter()
+            .find(|s| s.start == select)
+            .expect("SELECT should be highlighted");
+        assert_eq!(sql_span.language, "sql", "{sql_span:?}");
+        // Everything outside the heredoc body is still Perl's, including
+        // the numeric-fallback span for `1`.
+        let one = src.find('1').unwrap();
+        assert!(
+            spans.iter().any(|s| s.start == one && s.language == "perl"),
+            "{spans:?}"
+        );
+        assert!(
+            spans
+                .iter()
+                .filter(|s| s.language == "sql")
+                .all(|s| s.start >= src.find("   SELECT").unwrap()),
+            "no sql-tagged span may leak outside the heredoc body: {spans:?}"
         );
     }
 
