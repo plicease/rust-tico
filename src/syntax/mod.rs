@@ -687,6 +687,29 @@ mod tests {
         );
     }
 
+    /// An ordinary rule with no standard target name must still get color:
+    /// the crate's make query left `foo: bar` blank (only the `:` was
+    /// captured), which read as "highlighting is off" in a two-line Makefile.
+    #[test]
+    fn make_plain_rule_is_colored() {
+        let src = "foo: bar baz.o\n\tcc -o foo bar\n\nall: foo\n";
+        let lang = languages::detect(Some(std::path::Path::new("Makefile")), src).unwrap();
+        let spans = highlight(src, lang);
+        let at = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| s.scope.name().to_string())
+                .next_back()
+        };
+        assert_eq!(at("foo").as_deref(), Some("function"));
+        assert_eq!(at("bar").as_deref(), Some("string.special.path"));
+        assert_eq!(at("baz.o").as_deref(), Some("string.special.path"));
+        // A standard target keeps the crate's more specific capture.
+        assert_eq!(at("all").as_deref(), Some("constant.macro"));
+    }
+
     #[test]
     fn numeric_fallback_finds_disjoint_and_nested_numbers() {
         // Perl doesn't give numeric literals their own captured node, so

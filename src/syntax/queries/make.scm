@@ -1,3 +1,7 @@
+;; From the tree-sitter-make crate (MIT), with one tico addition: the block
+;; marked "tico addition" below, which colors the targets and prerequisites
+;; of an ordinary rule.
+
 [
  "("
  ")"
@@ -46,6 +50,15 @@
 ] @string
 
 (variable_assignment (word) @string)
+
+;; tico addition: ordinary targets and prerequisites. The crate's query
+;; only names the standard (`all`, `clean`, ...) and special (`.PHONY`,
+;; ...) targets, which left a plain `foo: bar` rule entirely uncolored;
+;; nano's makefile syntax colors every target line. Kept ahead of the
+;; wildcard, standard-target and built-in-variable patterns so those
+;; still win for the words they name.
+(targets (word) @function)
+(prerequisites (word) @string.special.path)
 
 [
  "ifeq"
