@@ -1,7 +1,8 @@
 //! Loading/saving files, detecting when the on-disk file has changed
 //! underneath us, and three-way merging local edits with external changes.
 
-use crate::buffer::{Buffer, DiskState};
+use crate::buffer::{Buffer, DiskState, LineFormat};
+use crate::options::Options;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
@@ -143,16 +144,91 @@ pub fn stat_disk_state(path: &Path) -> Option<DiskState> {
 }
 
 /// A human-readable summary of a freshly loaded file's size, matching
-/// nano's post-load status message (`Read %zu line(s)` in src/files.c).
+/// nano's post-load status message (`Read %zu line(s)` in src/files.c),
+/// with nano's "(converted from DOS format)" / "(converted from Mac
+/// format)" suffix per the format `convert_line_endings` detected.
 /// nano counts actual lines of content, not ropey's `len_lines()` (which
 /// counts a trailing empty line after a final newline).
-pub fn describe_read(text: &str) -> String {
+pub fn describe_read(text: &str, detected: LineFormat) -> String {
     let n = nano_style_line_count(text);
+    let suffix = match detected {
+        LineFormat::Dos => " (converted from DOS format)",
+        LineFormat::Mac => " (converted from Mac format)",
+        LineFormat::Unix | LineFormat::Unspecified => "",
+    };
     if n == 1 {
-        "Read 1 line".to_string()
+        format!("Read 1 line{suffix}")
     } else {
-        format!("Read {n} lines")
+        format!("Read {n} lines{suffix}")
     }
+}
+
+/// nano 8.7's line-ending conversion on read (the byte loop of its
+/// `read_file`), returning the converted text and the format it found.
+/// Unless `noconvert` (`-N`/`set noconvert`, which returns the text
+/// untouched and reports Unix):
+///
+/// - a CR directly before an LF is always dropped, and the file is DOS
+///   format when its *first* line break was such a CR LF;
+/// - a bare CR followed by another byte is a line break -- but only on
+///   the first line, or once the file is already known to be Mac format
+///   (so a stray CR later in a Unix or DOS file is ordinary content);
+/// - a CR ending the file is a line break too, and makes an otherwise
+///   unterminated last line terminated (nano's `mac_line_needs_newline`).
+pub fn convert_line_endings(raw: &str, noconvert: bool) -> (String, LineFormat) {
+    if noconvert {
+        return (raw.to_string(), LineFormat::Unix);
+    }
+    let mut out = String::with_capacity(raw.len());
+    let mut line = String::new();
+    let mut num_lines = 0usize;
+    let mut format = LineFormat::Unix;
+    for c in raw.chars() {
+        if c == '\n' {
+            if line.ends_with('\r') {
+                if num_lines == 0 {
+                    format = LineFormat::Dos;
+                }
+                line.pop();
+            }
+        } else if (num_lines == 0 || format == LineFormat::Mac) && line.ends_with('\r') {
+            format = LineFormat::Mac;
+            line.pop();
+        } else {
+            line.push(c);
+            continue;
+        }
+        out.push_str(&line);
+        out.push('\n');
+        num_lines += 1;
+        line.clear();
+        // After a Mac line break, the byte that revealed it starts the
+        // next line.
+        if c != '\n' {
+            line.push(c);
+        }
+    }
+    if !line.is_empty() {
+        if line.ends_with('\r') {
+            if num_lines == 0 {
+                format = LineFormat::Mac;
+            }
+            line.pop();
+            out.push_str(&line);
+            out.push('\n');
+        } else {
+            out.push_str(&line);
+        }
+    }
+    (out, format)
+}
+
+/// What `load_file` hands back: the buffer, plus the format the file was
+/// read in (for the "converted from ... format" blurb -- reported even
+/// under `set unix`, which forces the buffer's own format to Unix).
+pub struct LoadedFile {
+    pub buffer: Buffer,
+    pub detected: LineFormat,
 }
 
 fn nano_style_line_count(text: &str) -> usize {
@@ -167,15 +243,33 @@ fn nano_style_line_count(text: &str) -> usize {
     }
 }
 
-pub fn load_file(path: &Path) -> std::io::Result<Buffer> {
-    let text = std::fs::read_to_string(path)?;
-    let mut buf = Buffer::from_text(&text, Some(path.to_path_buf()));
-    buf.disk_state = stat_disk_state(path);
-    Ok(buf)
+/// Read `path` into a fresh buffer, converting line endings per
+/// `convert_line_endings` and settling the buffer's format per
+/// `Buffer::adopt_format`.
+pub fn load_file(path: &Path, opts: &Options) -> std::io::Result<LoadedFile> {
+    let raw = std::fs::read_to_string(path)?;
+    let (text, detected) = convert_line_endings(&raw, opts.noconvert);
+    let mut buffer = Buffer::from_text(&text, Some(path.to_path_buf()));
+    buffer.adopt_format(detected, opts.unix);
+    buffer.disk_state = stat_disk_state(path);
+    Ok(LoadedFile { buffer, detected })
+}
+
+/// The bytes `save_file` writes for `buffer`: its text, with every line
+/// break written as CR LF for a DOS-format buffer or a bare CR for a Mac
+/// one (nano 8.7's `write_file`: a CR before each `'\n'` for both, and
+/// the `'\n'` itself only when not Mac).
+pub fn serialized(buffer: &Buffer) -> String {
+    let text = buffer.to_string();
+    match buffer.format {
+        LineFormat::Dos => text.replace('\n', "\r\n"),
+        LineFormat::Mac => text.replace('\n', "\r"),
+        LineFormat::Unix | LineFormat::Unspecified => text,
+    }
 }
 
 pub fn save_file(buffer: &mut Buffer, path: &Path) -> std::io::Result<()> {
-    std::fs::write(path, buffer.to_string())?;
+    std::fs::write(path, serialized(buffer))?;
     buffer.path = Some(path.to_path_buf());
     buffer.modified = false;
     buffer.disk_state = stat_disk_state(path);
@@ -226,11 +320,13 @@ pub fn check_external_change(buffer: &Buffer) -> ExternalChange {
 /// Reload a buffer from disk in place, discarding any (already-established
 /// to be nonexistent-or-ignorable) local state. Preserves cursor position
 /// where possible by clamping.
-pub fn reload(buffer: &mut Buffer) -> std::io::Result<()> {
+pub fn reload(buffer: &mut Buffer, noconvert: bool, unix: bool) -> std::io::Result<()> {
     let Some(path) = buffer.path.clone() else {
         return Ok(());
     };
-    let text = std::fs::read_to_string(&path)?;
+    let raw = std::fs::read_to_string(&path)?;
+    let (text, detected) = convert_line_endings(&raw, noconvert);
+    buffer.adopt_format(detected, unix);
     let cursor = buffer.cursor;
     buffer.rope = ropey::Rope::from_str(&text);
     buffer.invalidate_highlight_cache();
@@ -408,11 +504,136 @@ mod tests {
 
     #[test]
     fn read_line_count_matches_nano() {
-        assert_eq!(describe_read("a\nb\n"), "Read 2 lines");
-        assert_eq!(describe_read("a\nb"), "Read 2 lines");
-        assert_eq!(describe_read("a\nb\nc\n"), "Read 3 lines");
-        assert_eq!(describe_read("onlyline"), "Read 1 line");
-        assert_eq!(describe_read(""), "Read 0 lines");
+        use LineFormat::*;
+        assert_eq!(describe_read("a\nb\n", Unix), "Read 2 lines");
+        assert_eq!(describe_read("a\nb", Unix), "Read 2 lines");
+        assert_eq!(describe_read("a\nb\nc\n", Unix), "Read 3 lines");
+        assert_eq!(describe_read("onlyline", Unix), "Read 1 line");
+        assert_eq!(describe_read("", Unix), "Read 0 lines");
+        assert_eq!(
+            describe_read("a\nb\n", Dos),
+            "Read 2 lines (converted from DOS format)"
+        );
+        assert_eq!(
+            describe_read("a", Mac),
+            "Read 1 line (converted from Mac format)"
+        );
+    }
+
+    fn conv(raw: &str) -> (String, LineFormat) {
+        convert_line_endings(raw, false)
+    }
+
+    #[test]
+    fn crlf_is_stripped_and_the_first_line_break_decides_dos_format() {
+        use LineFormat::*;
+        assert_eq!(conv("a\r\nb\r\n"), ("a\nb\n".to_string(), Dos));
+        // Every CR-before-LF goes, but a file whose first break is a bare
+        // LF isn't DOS format to nano.
+        assert_eq!(conv("a\nb\r\n"), ("a\nb\n".to_string(), Unix));
+        // A doubled CR on the first line: nano sees the first CR as a Mac
+        // line break (the byte after it isn't an LF), so the file is Mac
+        // format with an empty second line.
+        assert_eq!(conv("a\r\r\n"), ("a\n\n".to_string(), Mac));
+        // ...but later in a DOS file exactly one CR is dropped per break.
+        assert_eq!(conv("a\r\nb\r\r\n"), ("a\nb\r\n".to_string(), Dos));
+        assert_eq!(conv(""), (String::new(), Unix));
+        assert_eq!(conv("no newline"), ("no newline".to_string(), Unix));
+        assert_eq!(conv("\r\n"), ("\n".to_string(), Dos));
+    }
+
+    #[test]
+    fn bare_cr_line_breaks_make_mac_format_only_from_the_first_line() {
+        use LineFormat::*;
+        assert_eq!(conv("a\rb\r"), ("a\nb\n".to_string(), Mac));
+        assert_eq!(conv("a\rb\rc"), ("a\nb\nc".to_string(), Mac));
+        // Once Mac, a CR LF still counts as one line break.
+        assert_eq!(conv("a\rb\r\nc"), ("a\nb\nc".to_string(), Mac));
+        // A stray CR after a Unix or DOS first line is content.
+        assert_eq!(conv("a\nb\rc\n"), ("a\nb\rc\n".to_string(), Unix));
+        assert_eq!(conv("a\r\nb\rc\r\n"), ("a\nb\rc\n".to_string(), Dos));
+        // A lone trailing CR terminates the last line (nano adds the
+        // blank line after it) and, on the first line, means Mac.
+        assert_eq!(conv("a\r"), ("a\n".to_string(), Mac));
+        assert_eq!(conv("\r"), ("\n".to_string(), Mac));
+        assert_eq!(conv("a\nb\r"), ("a\nb\n".to_string(), Unix));
+    }
+
+    #[test]
+    fn noconvert_keeps_the_bytes_and_never_reports_a_format() {
+        assert_eq!(
+            convert_line_endings("a\r\nb\rc", true),
+            ("a\r\nb\rc".to_string(), LineFormat::Unix)
+        );
+    }
+
+    #[test]
+    fn buffers_serialize_with_their_formats_line_endings() {
+        let mut buf = Buffer::from_text("a\nb\n", None);
+        assert_eq!(serialized(&buf), "a\nb\n", "Unspecified writes as Unix");
+        buf.format = LineFormat::Dos;
+        assert_eq!(serialized(&buf), "a\r\nb\r\n");
+        buf.format = LineFormat::Mac;
+        assert_eq!(serialized(&buf), "a\rb\r");
+        buf.format = LineFormat::Unix;
+        assert_eq!(serialized(&buf), "a\nb\n");
+    }
+
+    #[test]
+    fn adopt_format_follows_nano() {
+        use LineFormat::*;
+        let mut buf = Buffer::empty();
+        buf.adopt_format(Dos, false);
+        assert_eq!(buf.format, Dos, "a fresh buffer takes the file's");
+        buf.adopt_format(Mac, false);
+        assert_eq!(buf.format, Dos, "an existing format sticks");
+        buf.adopt_format(Dos, true);
+        assert_eq!(buf.format, Unix, "`set unix` overrides");
+        let mut buf = Buffer::empty();
+        buf.adopt_format(Unix, false);
+        assert_eq!(buf.format, Unix);
+    }
+
+    #[test]
+    fn dos_file_round_trips_through_load_and_save() {
+        let path = std::env::temp_dir().join("tico_test_dos_roundtrip.txt");
+        std::fs::write(&path, "one\r\ntwo\r\n").unwrap();
+        let opts = Options::default();
+        let loaded = load_file(&path, &opts).unwrap();
+        assert_eq!(loaded.detected, LineFormat::Dos);
+        let mut buf = loaded.buffer;
+        assert_eq!(buf.format, LineFormat::Dos);
+        assert_eq!(buf.to_string(), "one\ntwo\n", "CRs never reach the buffer");
+        buf.cursor = crate::buffer::Pos::new(1, 3);
+        buf.insert_str("!");
+        save_file(&mut buf, &path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"one\r\ntwo!\r\n");
+
+        let unix = Options {
+            unix: true,
+            ..Default::default()
+        };
+        let loaded = load_file(&path, &unix).unwrap();
+        assert_eq!(
+            loaded.detected,
+            LineFormat::Dos,
+            "still reported as converted"
+        );
+        assert_eq!(loaded.buffer.format, LineFormat::Unix, "but saved as Unix");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn mac_file_round_trips_through_load_and_save() {
+        let path = std::env::temp_dir().join("tico_test_mac_roundtrip.txt");
+        std::fs::write(&path, "one\rtwo\r").unwrap();
+        let loaded = load_file(&path, &Options::default()).unwrap();
+        assert_eq!(loaded.detected, LineFormat::Mac);
+        let mut buf = loaded.buffer;
+        assert_eq!(buf.to_string(), "one\ntwo\n");
+        save_file(&mut buf, &path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"one\rtwo\r");
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

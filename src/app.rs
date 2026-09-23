@@ -1318,7 +1318,7 @@ impl Editor {
                 execute: false,
             },
             menu: Menu::Insert,
-            label: insert_prompt_label(new_buffer, false),
+            label: insert_prompt_label(new_buffer, false, self.options.noconvert),
             input: String::new(),
             cursor: 0,
             history_pos: None,
@@ -1337,7 +1337,7 @@ impl Editor {
                 execute: true,
             },
             menu: Menu::Execute,
-            label: insert_prompt_label(new_buffer, true),
+            label: insert_prompt_label(new_buffer, true, self.options.noconvert),
             input: String::new(),
             cursor: 0,
             history_pos: None,
@@ -1373,11 +1373,7 @@ impl Editor {
                 .map(|p| p.display().to_string())
                 .unwrap_or_default()
         };
-        let label = if selecting {
-            "Write Selection to File".to_string()
-        } else {
-            "File Name to Write".to_string()
-        };
+        let label = self.writeout_prompt_label(exiting);
         self.mode = Mode::Prompt(Prompt {
             kind: PromptKind::WriteOut { exiting },
             menu: Menu::WriteOut,
@@ -1433,6 +1429,25 @@ impl Editor {
         self.run_search(&pattern, backwards);
     }
 
+    /// The Write Out prompt's label (nano 8.7's `do_writeout`), rebuilt
+    /// whenever `M-D`/`M-M` toggles the buffer's format: " [DOS Format]"
+    /// or " [Mac Format]" is appended for those formats (and " [Backup]"
+    /// under `set backup`, which tico doesn't have).
+    pub(crate) fn writeout_prompt_label(&self, exiting: bool) -> String {
+        use crate::buffer::LineFormat;
+        let selecting = !exiting && self.buf().mark.is_some();
+        let base = if selecting {
+            "Write Selection to File"
+        } else {
+            "Write to File"
+        };
+        match self.buf().format {
+            LineFormat::Dos => format!("{base} [DOS Format]"),
+            LineFormat::Mac => format!("{base} [Mac Format]"),
+            LineFormat::Unix | LineFormat::Unspecified => base.to_string(),
+        }
+    }
+
     pub fn begin_writeout_for_exit(&mut self) {
         self.begin_writeout(true);
     }
@@ -1450,6 +1465,8 @@ impl Editor {
             self.mode = Mode::Editing;
             return;
         };
+        // Compare like with like: the buffer holds converted text.
+        let (theirs, _) = crate::fileio::convert_line_endings(&theirs, self.options.noconvert);
         let base = self.buf().original_content.clone();
         let ours = self.buf().to_string();
         match crate::fileio::three_way_merge(&base, &ours, &theirs) {
@@ -1779,12 +1796,14 @@ pub fn search_prompt_label(base: &str, suffix: &str, search: &SearchState) -> St
 
 /// The `^R` Read File prompt's label, matching the installed nano's exact
 /// wording for both states (it toggles with `M-F`, no other wording change).
-pub fn insert_prompt_label(new_buffer: bool, execute: bool) -> String {
-    match (execute, new_buffer) {
-        (true, true) => "Command to execute in new buffer".to_string(),
-        (true, false) => "Command to execute".to_string(),
-        (false, true) => "File to read into new buffer [from ./]".to_string(),
-        (false, false) => "File to insert [from ./]".to_string(),
+pub fn insert_prompt_label(new_buffer: bool, execute: bool, noconvert: bool) -> String {
+    match (execute, new_buffer, noconvert) {
+        (true, true, _) => "Command to execute in new buffer".to_string(),
+        (true, false, _) => "Command to execute".to_string(),
+        (false, true, false) => "File to read into new buffer [from ./]".to_string(),
+        (false, true, true) => "File to read unconverted into new buffer [from ./]".to_string(),
+        (false, false, false) => "File to insert [from ./]".to_string(),
+        (false, false, true) => "File to insert unconverted [from ./]".to_string(),
     }
 }
 

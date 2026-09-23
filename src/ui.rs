@@ -221,7 +221,8 @@ fn maybe_check_external_change(editor: &mut Editor) -> bool {
     match crate::fileio::check_external_change(editor.buf()) {
         ExternalChange::Unchanged => return false,
         ExternalChange::ChangedNoLocalEdits => {
-            let _ = crate::fileio::reload(editor.buf_mut());
+            let (noconvert, unix) = (editor.options.noconvert, editor.options.unix);
+            let _ = crate::fileio::reload(editor.buf_mut(), noconvert, unix);
             editor.set_status("File reloaded (changed on disk)");
         }
         ExternalChange::ChangedWithLocalEdits => {
@@ -653,7 +654,8 @@ fn apply_prompt_action(editor: &mut Editor, prompt: &mut Prompt, action: Action)
                 return false;
             };
             *new_buffer = !*new_buffer;
-            prompt.label = crate::app::insert_prompt_label(*new_buffer, *execute);
+            prompt.label =
+                crate::app::insert_prompt_label(*new_buffer, *execute, editor.options.noconvert);
             false
         }
         // `^X` flips the Insert-File/Execute-Command prompt between its two
@@ -674,7 +676,48 @@ fn apply_prompt_action(editor: &mut Editor, prompt: &mut Prompt, action: Action)
             } else {
                 Menu::Insert
             };
-            prompt.label = crate::app::insert_prompt_label(*new_buffer, *execute);
+            prompt.label =
+                crate::app::insert_prompt_label(*new_buffer, *execute, editor.options.noconvert);
+            false
+        }
+        // `M-N` No Conversion: nano's `flip_convert` toggles the *global*
+        // NO_CONVERT flag (it persists for later reads too, not just this
+        // one), and the prompt's label says "unconverted" while it's on.
+        Action::FlipConvert => {
+            let PromptKind::InsertFile {
+                new_buffer,
+                execute,
+            } = &prompt.kind
+            else {
+                return false;
+            };
+            editor.options.noconvert = !editor.options.noconvert;
+            prompt.label =
+                crate::app::insert_prompt_label(*new_buffer, *execute, editor.options.noconvert);
+            false
+        }
+        // `M-D` DOS Format / `M-M` Mac Format at the Write Out prompt:
+        // nano's `dos_format`/`mac_format` flip the buffer's own format
+        // (so it sticks for later saves too) -- to that format, or back
+        // to Unix if it already was that -- and re-show the prompt with
+        // its " [DOS Format]"/" [Mac Format]" tag updated.
+        Action::DosFormat | Action::MacFormat => {
+            let PromptKind::WriteOut { exiting } = prompt.kind else {
+                return false;
+            };
+            use crate::buffer::LineFormat;
+            let wanted = if action == Action::DosFormat {
+                LineFormat::Dos
+            } else {
+                LineFormat::Mac
+            };
+            let buf = editor.buf_mut();
+            buf.format = if buf.format == wanted {
+                LineFormat::Unix
+            } else {
+                wanted
+            };
+            prompt.label = editor.writeout_prompt_label(exiting);
             false
         }
         // Recognized (bound, shown in the shortcut bar and ^G help) but not
@@ -683,11 +726,6 @@ fn apply_prompt_action(editor: &mut Editor, prompt: &mut Prompt, action: Action)
         // messages don't show while a prompt is up (the status line is the
         // prompt itself), so this closes the prompt to make the message
         // visible, same as a real result would.
-        Action::FlipConvert => {
-            editor.mode = Mode::Editing;
-            editor.set_status("No Conversion: not yet implemented");
-            true
-        }
         Action::Browser => {
             editor.mode = Mode::Editing;
             editor.set_status("File Browser: not yet implemented");
@@ -961,7 +999,8 @@ fn handle_conflict_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {
     }
     match key.code {
         KeyCode::Char('r') | KeyCode::Char('R') => {
-            let _ = crate::fileio::reload(editor.buf_mut());
+            let (noconvert, unix) = (editor.options.noconvert, editor.options.unix);
+            let _ = crate::fileio::reload(editor.buf_mut(), noconvert, unix);
             editor.mode = Mode::Editing;
             editor.set_status("Reloaded from disk; local edits discarded");
         }
@@ -1231,9 +1270,12 @@ fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
                     editor.current = editor.buffers.len() - 1;
                     editor.set_status("New File");
                 } else {
-                    match crate::fileio::load_file(&path) {
-                        Ok(mut buf) => {
-                            let msg = crate::fileio::describe_read(&buf.to_string());
+                    match crate::fileio::load_file(&path, &editor.options) {
+                        Ok(crate::fileio::LoadedFile {
+                            buffer: mut buf,
+                            detected,
+                        }) => {
+                            let msg = crate::fileio::describe_read(&buf.to_string(), detected);
                             buf.language = crate::syntax::detect_with_override(
                                 buf.path.as_deref(),
                                 &buf.to_string(),
@@ -1249,9 +1291,13 @@ fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
                 }
             } else {
                 match std::fs::read_to_string(&path) {
-                    Ok(content) => {
-                        let msg = crate::fileio::describe_read(&content);
+                    Ok(raw) => {
+                        let (content, detected) =
+                            crate::fileio::convert_line_endings(&raw, editor.options.noconvert);
+                        let msg = crate::fileio::describe_read(&content, detected);
+                        let unix = editor.options.unix;
                         editor.buf_mut().insert_str(&content);
+                        editor.buf_mut().adopt_format(detected, unix);
                         editor.set_status(msg);
                     }
                     Err(e) => {
@@ -2468,17 +2514,32 @@ const GOTOLINE_SHORTCUTS: &[(Action, &str)] = &[
 ];
 
 /// The `^R` Read File prompt's shortcut list, matching nano's full menu.
-/// No-conversion (`M-N`) and the file browser (`^T`) aren't actually
-/// implemented yet — see apply_prompt_action's FlipConvert/Browser arms —
-/// but are still listed rather than silently omitted, since pressing them
-/// does now give real feedback.
+/// The file browser (`^T`) isn't actually implemented yet — see
+/// apply_prompt_action's Browser arm — but is still listed rather than
+/// silently omitted, since pressing it does give real feedback.
 const INSERT_SHORTCUTS: &[(Action, &str)] = &[
     (Action::Help, "Help"),
     (Action::Cancel, "Cancel"),
     (Action::FlipNewBuffer, "New Buffer"),
     (Action::FlipConvert, "No Conversion"),
-    (Action::Browser, "Browse"),
     (Action::FlipExecute, "Execute Command"),
+    (Action::Browser, "Browse"),
+];
+
+/// The `^O` Write Out prompt's shortcut list, matching nano 8.7's
+/// MWRITEFILE bar (confirmed against the installed nano). Append,
+/// Prepend, Backup File and Browse aren't implemented yet but are listed
+/// rather than silently omitted.
+const WRITEOUT_SHORTCUTS: &[(Action, &str)] = &[
+    (Action::Help, "Help"),
+    (Action::Cancel, "Cancel"),
+    (Action::DosFormat, "DOS Format"),
+    (Action::MacFormat, "Mac Format"),
+    (Action::Append, "Append"),
+    (Action::Prepend, "Prepend"),
+    (Action::Backup, "Backup File"),
+    (Action::DiscardBuffer, "Discard buffer"),
+    (Action::Browser, "Browse"),
 ];
 
 /// The `^T` Execute Command prompt's shortcut list, matching nano's full
@@ -2592,6 +2653,7 @@ fn shortcut_bar_entries(keymap: &KeyMap, prompt: Option<&Prompt>) -> Vec<(String
         Menu::GotoLine => GOTOLINE_SHORTCUTS,
         Menu::Help => HELP_SHORTCUTS,
         Menu::Insert => INSERT_SHORTCUTS,
+        Menu::WriteOut => WRITEOUT_SHORTCUTS,
         Menu::Execute => EXECUTE_SHORTCUTS,
         Menu::Linter => LINTER_SHORTCUTS,
         _ => return resolve_shortcuts(keymap, Menu::Main, SHORTCUT_PRIORITY),
@@ -3289,7 +3351,7 @@ mod tests {
                 execute: false,
             },
             menu: Menu::Insert,
-            label: crate::app::insert_prompt_label(new_buffer, false),
+            label: crate::app::insert_prompt_label(new_buffer, false, false),
             input: input.to_string(),
             cursor: input.chars().count(),
             history_pos: None,
@@ -3581,10 +3643,8 @@ mod tests {
 
     #[test]
     fn unimplemented_insert_actions_report_plainly_and_close_the_prompt() {
-        for (action, expected) in [
-            (Action::FlipConvert, "No Conversion: not yet implemented"),
-            (Action::Browser, "File Browser: not yet implemented"),
-        ] {
+        let (action, expected) = (Action::Browser, "File Browser: not yet implemented");
+        {
             let mut ed = test_editor("x");
             let mut prompt = insert_prompt(false, "");
             assert!(
@@ -3863,5 +3923,115 @@ mod tests {
         // A plain movement afterwards still drops it as usual.
         handle_editing_key(&mut ed, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         assert_eq!(ed.buf().mark, None);
+    }
+
+    #[test]
+    fn dos_and_mac_toggles_at_the_write_out_prompt_flip_label_and_format() {
+        use crate::buffer::LineFormat;
+        let mut ed = test_editor("x\n");
+        let mut prompt = Prompt {
+            kind: PromptKind::WriteOut { exiting: false },
+            menu: Menu::WriteOut,
+            label: ed.writeout_prompt_label(false),
+            input: String::new(),
+            cursor: 0,
+            history_pos: None,
+            saved_input: None,
+        };
+        assert_eq!(prompt.label, "Write to File");
+        assert!(
+            !apply_prompt_action(&mut ed, &mut prompt, Action::DosFormat),
+            "the prompt stays open"
+        );
+        assert_eq!(ed.buf().format, LineFormat::Dos);
+        assert_eq!(prompt.label, "Write to File [DOS Format]");
+        assert!(!apply_prompt_action(
+            &mut ed,
+            &mut prompt,
+            Action::MacFormat
+        ));
+        assert_eq!(ed.buf().format, LineFormat::Mac);
+        assert_eq!(prompt.label, "Write to File [Mac Format]");
+        assert!(!apply_prompt_action(
+            &mut ed,
+            &mut prompt,
+            Action::MacFormat
+        ));
+        assert_eq!(
+            ed.buf().format,
+            LineFormat::Unix,
+            "toggling the current format off means Unix"
+        );
+        assert_eq!(prompt.label, "Write to File");
+        assert!(
+            !ed.buf().modified,
+            "a format flip alone doesn't dirty the buffer"
+        );
+    }
+
+    #[test]
+    fn no_conversion_flips_the_global_option_and_the_prompt_label() {
+        let mut ed = test_editor("x");
+        let mut prompt = insert_prompt(false, "");
+        assert!(!apply_prompt_action(
+            &mut ed,
+            &mut prompt,
+            Action::FlipConvert
+        ));
+        assert!(
+            ed.options.noconvert,
+            "nano's flip_convert toggles the global flag"
+        );
+        assert_eq!(prompt.label, "File to insert unconverted [from ./]");
+        assert!(!apply_prompt_action(
+            &mut ed,
+            &mut prompt,
+            Action::FlipNewBuffer
+        ));
+        assert_eq!(
+            prompt.label,
+            "File to read unconverted into new buffer [from ./]"
+        );
+        assert!(!apply_prompt_action(
+            &mut ed,
+            &mut prompt,
+            Action::FlipConvert
+        ));
+        assert!(!ed.options.noconvert);
+        assert_eq!(prompt.label, "File to read into new buffer [from ./]");
+    }
+
+    #[test]
+    fn inserting_a_file_converts_it_and_a_fresh_buffer_adopts_its_format() {
+        use crate::buffer::LineFormat;
+        let path = std::env::temp_dir().join("tico_test_insert_dos.txt");
+        std::fs::write(&path, "in\r\n").unwrap();
+        let mut ed = test_editor("");
+        submit_prompt(&mut ed, insert_prompt(false, path.to_str().unwrap()));
+        assert_eq!(ed.buf().to_string(), "in\n");
+        assert_eq!(ed.buf().format, LineFormat::Dos);
+        assert_eq!(
+            ed.status.as_deref(),
+            Some("Read 1 line (converted from DOS format)")
+        );
+
+        let unix_path = std::env::temp_dir().join("tico_test_insert_unix.txt");
+        std::fs::write(&unix_path, "more\n").unwrap();
+        submit_prompt(&mut ed, insert_prompt(false, unix_path.to_str().unwrap()));
+        assert_eq!(
+            ed.buf().format,
+            LineFormat::Dos,
+            "an existing format sticks"
+        );
+        assert_eq!(ed.status.as_deref(), Some("Read 1 line"));
+
+        ed.options.noconvert = true;
+        submit_prompt(&mut ed, insert_prompt(false, path.to_str().unwrap()));
+        assert!(
+            ed.buf().to_string().contains("in\r\n"),
+            "unconverted bytes are inserted as-is"
+        );
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&unix_path).ok();
     }
 }

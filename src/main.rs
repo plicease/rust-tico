@@ -85,10 +85,10 @@ fn main() -> anyhow::Result<()> {
             // A bare `-` reads standard input into an unnamed buffer,
             // matching nano: `echo foo | nano -`.
             let (mut buf, message, level) = if fa.path == "-" {
-                open_stdin(syntax_override.as_deref())
+                open_stdin(&editor.options, syntax_override.as_deref())
             } else {
                 let path = std::path::PathBuf::from(&fa.path);
-                open_one(&path, editor.options.locking, syntax_override.as_deref())
+                open_one(&path, &editor.options, syntax_override.as_deref())
             };
             if let Some(line) = fa.line {
                 let target = (line.max(1) as usize) - 1;
@@ -278,7 +278,10 @@ fn acquire_lock(
 /// out needs a filename, same as any other new buffer), and the buffer is
 /// marked modified whenever it got any content — read-but-unsaved input
 /// isn't "clean" the way a file freshly loaded from disk is.
-fn open_stdin(syntax_override: Option<&str>) -> (buffer::Buffer, String, app::StatusLevel) {
+fn open_stdin(
+    opts: &options::Options,
+    syntax_override: Option<&str>,
+) -> (buffer::Buffer, String, app::StatusLevel) {
     use std::io::{IsTerminal, Read};
     if std::io::stdin().is_terminal() {
         eprintln!("Reading data from keyboard; type ^D or ^D^D to finish.");
@@ -286,8 +289,12 @@ fn open_stdin(syntax_override: Option<&str>) -> (buffer::Buffer, String, app::St
     let mut content = String::new();
     let (mut buf, msg, level) = match std::io::stdin().read_to_string(&mut content) {
         Ok(_) => {
-            let msg = fileio::describe_read(&content);
+            // Same line-ending conversion as a file (nano's scoop_stdin
+            // feeds read_file too).
+            let (content, detected) = fileio::convert_line_endings(&content, opts.noconvert);
+            let msg = fileio::describe_read(&content, detected);
             let mut buf = buffer::Buffer::from_text(&content, None);
+            buf.adopt_format(detected, opts.unix);
             if !content.is_empty() {
                 buf.modified = true;
             }
@@ -311,10 +318,10 @@ fn open_stdin(syntax_override: Option<&str>) -> (buffer::Buffer, String, app::St
 /// status message, message severity).
 fn open_one(
     path: &std::path::Path,
-    locking: bool,
+    opts: &options::Options,
     syntax_override: Option<&str>,
 ) -> (buffer::Buffer, String, app::StatusLevel) {
-    let (mut buf, msg, level) = open_one_inner(path, locking);
+    let (mut buf, msg, level) = open_one_inner(path, opts);
     // Detected once at load time (extension/filename -> shebang -> modeline,
     // all on by default, or forced by -Y/--syntax); the on/off toggle (M-Y)
     // only controls whether rendering actually uses it, so toggling back on
@@ -326,8 +333,9 @@ fn open_one(
 
 fn open_one_inner(
     path: &std::path::Path,
-    locking: bool,
+    opts: &options::Options,
 ) -> (buffer::Buffer, String, app::StatusLevel) {
+    let locking = opts.locking;
     if path.is_dir() {
         return (
             buffer::Buffer::empty(),
@@ -355,8 +363,11 @@ fn open_one_inner(
             app::StatusLevel::Normal,
         );
     }
-    match fileio::load_file(path) {
-        Ok(buf) => {
+    match fileio::load_file(path, opts) {
+        Ok(fileio::LoadedFile {
+            buffer: buf,
+            detected,
+        }) => {
             if !fileio::path_writable(path) {
                 (
                     buf,
@@ -364,7 +375,7 @@ fn open_one_inner(
                     app::StatusLevel::Alert,
                 )
             } else {
-                let msg = fileio::describe_read(&buf.to_string());
+                let msg = fileio::describe_read(&buf.to_string(), detected);
                 (buf, msg, app::StatusLevel::Normal)
             }
         }

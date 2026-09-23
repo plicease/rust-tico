@@ -75,3 +75,24 @@ For a bracketing comment sequence such as HTML's `<!--|-->`, uncommenting
 a line with the cursor near its end can leave the cursor past the new
 line end once the postfix is gone. nano leaves that stale column in
 place; tico clamps the cursor (and mark) to the end of the line.
+
+## Mac (bare-CR) line endings are kept on purpose
+
+nano removed Mac format -- reading and writing files whose lines end in
+a bare CR, the `M-M Mac Format` toggle at the Write Out prompt, and the
+"converted from Mac format" message -- from its master branch in April
+2026, so nano releases after 8.7.1 have only Unix and DOS. tico keeps
+it: vintage machines still produce and consume such files, and tico is
+used with them. Do not remove Mac format to track newer nano; when the
+installed nano no longer has it, this becomes an intentional difference
+rather than a bug.
+
+## `set noconvert`: how kept carriage returns display
+
+With conversion off, nano keeps a DOS or Mac file's CRs as content and
+shows each one as `^M`. tico keeps the bytes too, and writes them back
+unchanged, but its text store treats a CR as a line break: a CRLF file's
+CRs are invisible at the ends of their lines rather than shown as `^M`,
+and an old Mac file (bare CRs) displays as separate lines instead of one
+long line with `^M` markers. The default, converting on read, behaves as
+nano does.

@@ -19,7 +19,6 @@ here.
 - [ ] Macros: record and replay (`M-:` / `M-;`)
 - [ ] File browser (`^T` from the Read File / Write Out prompts), including
       its Go To Directory, First File and Last File actions
-- [ ] No Conversion (`M-N`) at the Insert prompt
 - [ ] Pipe Text (`M-\`) at the Execute prompt
 - [ ] Cut Till End (`^V`) from the Execute menu
 - [ ] Full Justify (`^J`) from the Execute menu — main-menu `M-J` already
@@ -31,15 +30,9 @@ here.
 - [ ] Center (`^L`) / Cycle (`M-%`)
 - [ ] Whitespace display toggle (`M-P`)
 - [ ] Scroll left / right (`M-<` / `M->`)
-- [ ] Write Out prompt toggles: DOS format (`M-D`), Mac format (`M-M`),
-      Append (`M-A`), Prepend (`M-P`), Backup (`M-B`) — bound but no
-      handler in `apply_prompt_action`
-
-## Line endings
-
-- [ ] Detect CR / CRLF on read and preserve on write (currently Unix-only
-      end to end in `src/fileio.rs`); needed by the DOS/Mac toggles above
-      and by `set unix` / `set noconvert`
+- [ ] Write Out prompt toggles: Append (`M-A`), Prepend (`M-P`), Backup
+      (`M-B`) — bound and shown in the bar but no handler in
+      `apply_prompt_action`
 
 ## Options parsed but never consulted
 
@@ -84,8 +77,6 @@ Only `selectedcolor`, `spotlightcolor` and `promptcolor` are honored.
 - [ ] `saveonexit`
 - [ ] `restricted`
 - [ ] `operatingdir`
-- [ ] `unix`
-- [ ] `noconvert`
 - [ ] `nonewlines`
 
 ### Editing

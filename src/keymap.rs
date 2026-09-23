@@ -943,6 +943,9 @@ impl KeyMap {
         );
         self.bind(Menu::WriteOut, K::Meta('D'), Binding::Action(A::DosFormat));
         self.bind(Menu::WriteOut, K::Meta('M'), Binding::Action(A::MacFormat));
+        // nano's `to_files` (Browse) is bound in both the Write Out and
+        // Read File menus.
+        self.bind(Menu::WriteOut, K::Ctrl('T'), Binding::Action(A::Browser));
         self.bind(Menu::WriteOut, K::Meta('A'), Binding::Action(A::Append));
         self.bind(Menu::WriteOut, K::Meta('P'), Binding::Action(A::Prepend));
         self.bind(Menu::WriteOut, K::Meta('B'), Binding::Action(A::Backup));

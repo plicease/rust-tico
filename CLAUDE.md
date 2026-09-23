@@ -31,6 +31,17 @@ user needs to merge it themselves. This one holds even with a direct,
 explicit instruction to merge; it isn't a "confirm once" situation like
 commit/push above.
 
+## Keep Mac (bare-CR) line-ending support
+
+nano dropped Mac format (bare-CR line endings, the `M-M Mac Format`
+toggle, "converted from Mac format") after 8.7.1. tico deliberately keeps
+it because the user works with vintage computers that still use it. Do
+not remove it to match a newer nano, and don't treat its presence as a
+nano-compatibility bug; see `DIFFERENCES.md`. Note that the nano source
+checkout under `~/dev/nano` is git master, which is newer than the
+installed 8.7.1 binary -- when they disagree, the installed binary is the
+reference, and `git show v8.7.1:src/...` gives the matching source.
+
 ## Syntax highlighting: an intentional exception to nano-compatibility
 
 Everywhere else, the goal is to match nano's real behavior. Syntax
