@@ -158,6 +158,10 @@ pub fn highlight(text: &str, lang: &'static LanguageDef) -> Vec<HighlightSpan> {
     // language's own grammar instead of leaving it as one flat string.
     inject_heredocs(&tree, text, &mut spans);
 
+    // Varnish inline C: highlight the body of a `C{ ... }C` block with the C
+    // grammar instead of leaving it one flat string.
+    inject_inline_c(&tree, text, &mut spans);
+
     spans
 }
 
@@ -209,6 +213,46 @@ fn inject_heredocs(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<Highlig
             continue;
         }
         spans.retain(|s| !(s.start < body_end && s.end > body_start));
+        spans.extend(inner_spans.into_iter().map(|s| HighlightSpan {
+            start: s.start + body_start,
+            end: s.end + body_start,
+            ..s
+        }));
+    }
+}
+
+/// VCL-specific: the vendored VCL grammar lexes a Varnish `C{ ... }C` block
+/// as a single `inline_c` token (its query colors it as a string as a
+/// fallback). Re-highlight the body with the C grammar and color the two
+/// delimiters, so the block reads as the C it is. No other grammar produces
+/// `inline_c` nodes, so this is a no-op elsewhere.
+fn inject_inline_c(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<HighlightSpan>) {
+    let mut blocks = Vec::new();
+    collect_by_kind(tree.root_node(), "inline_c", &mut blocks);
+    if blocks.is_empty() {
+        return;
+    }
+    let Some(c) = languages::find_by_name("c") else {
+        return;
+    };
+    let delimiter = Scope::intern("punctuation.special");
+    for block in blocks {
+        let (start, end) = (block.start_byte(), block.end_byte());
+        // `C{` and `}C` are two bytes each; the token can't be shorter.
+        if end < start + 4 || end > text.len() {
+            continue;
+        }
+        let (body_start, body_end) = (start + 2, end - 2);
+        let inner_spans = highlight(&text[body_start..body_end], c);
+        spans.retain(|s| !(s.start < end && s.end > start));
+        for (a, b) in [(start, body_start), (body_end, end)] {
+            spans.push(HighlightSpan {
+                start: a,
+                end: b,
+                scope: delimiter,
+                language: "vcl",
+            });
+        }
         spans.extend(inner_spans.into_iter().map(|s| HighlightSpan {
             start: s.start + body_start,
             end: s.end + body_start,
@@ -498,6 +542,174 @@ mod tests {
         );
     }
 
+    /// The vendored VCL grammar is a fork of ntsk/tree-sitter-vcl extended
+    /// for Fastly's dialect (see `grammars/tree-sitter-vcl/README.md`).
+    /// Every Fastly-only construct here must parse without an ERROR node,
+    /// and the query must color the ones with dedicated captures.
+    #[test]
+    fn vcl_fastly_dialect_parses_and_highlights() {
+        let source = concat!(
+            "pragma optional_param geoip_opt_in true;\n",
+            "backend F_origin {\n",
+            "  .host = \"origin.example.com\";\n",
+            "  .ssl = true;\n",
+            "  .probe = { .request = \"HEAD / HTTP/1.1\" \"Connection: close\"; .timeout = 2s; }\n",
+            "}\n",
+            "table redirects { \"/old\": \"/new\", }\n",
+            "table limits INTEGER { \"max\": 100 }\n",
+            "director pool random { .quorum = 20%; { .backend = F_origin; .weight = 1; } }\n",
+            "penaltybox pb {}\n",
+            "ratecounter rc {}\n",
+            "sub is_admin BOOL { return req.http.Cookie:admin == \"1\"; }\n",
+            "sub vcl_recv {\n",
+            "#FASTLY recv\n",
+            "  declare local var.x STRING;\n",
+            "  set var.x = std.tolower(req.http.Host) \"/\" req.url;\n",
+            "  set req.hash += req.url;\n",
+            "  set req.http.X = if(req.url ~ \"^/x\", \"yes\", \"no\");\n",
+            "  if ((req.url ~ \"^/y\") && !req.http.Z) { error 601 var.x; }\n",
+            "  add req.http.Vary = \"Accept\";\n",
+            "  remove req.http.Cookie;\n",
+            "  goto done;\n",
+            "  done:\n",
+            "  return (lookup);\n",
+            "}\n",
+            "sub vcl_fetch {\n",
+            "  if (beresp.status == 503 && req.restarts < 1) { restart; }\n",
+            "  esi;\n",
+            "  return (deliver);\n",
+            "}\n",
+            "sub vcl_error {\n",
+            "  synthetic {\"<p>\"} obj.status {\"</p>\"};\n",
+            "  log \"syslog \" req.service_id \" x :: \" req.url;\n",
+            "  include \"snippet\";\n",
+            "  return (deliver);\n",
+            "}\n",
+        );
+        let lang = languages::find_by_name("vcl").unwrap();
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&(lang.language)()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "Fastly VCL failed to parse:\n{}",
+            tree.root_node().to_sexp()
+        );
+
+        // The renderer paints spans in order, so for a node captured more
+        // than once the last span wins; mirror that here.
+        let spans = highlight(source, lang);
+        let scope_of = |needle: &str| {
+            let start = source.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| s.scope.name().to_string())
+                .next_back()
+        };
+        assert_eq!(
+            scope_of("#FASTLY recv").as_deref(),
+            Some("keyword.directive")
+        );
+        assert_eq!(scope_of("table").as_deref(), Some("keyword"));
+        assert_eq!(scope_of("declare").as_deref(), Some("keyword"));
+        assert_eq!(scope_of("STRING").as_deref(), Some("type"));
+        assert_eq!(scope_of("INTEGER").as_deref(), Some("type"));
+        assert_eq!(scope_of("+=").as_deref(), Some("operator"));
+        assert_eq!(scope_of("20%").as_deref(), Some("constant.numeric"));
+        assert_eq!(scope_of("tolower").as_deref(), Some("function"));
+        assert_eq!(scope_of("std").as_deref(), Some("namespace"));
+        assert_eq!(scope_of("vcl_recv").as_deref(), Some("function.builtin"));
+        assert_eq!(scope_of("lookup").as_deref(), Some("constant"));
+        assert_eq!(scope_of("done").as_deref(), Some("label"));
+        assert_eq!(
+            scope_of(".quorum").as_deref(),
+            Some("variable.other.member")
+        );
+        assert_eq!(scope_of("random").as_deref(), Some("type"));
+    }
+
+    /// Varnish `C{ ... }C` blocks: the body is re-highlighted as C (spans
+    /// carrying the C language, so the renderer uses C's theme) and the
+    /// delimiters get their own color, at top level and inside a sub.
+    #[test]
+    fn vcl_inline_c_is_highlighted_as_c() {
+        let source = concat!(
+            "C{\n",
+            "#include <stdio.h>\n",
+            "static int counter = 0;\n",
+            "}C\n",
+            "sub vcl_recv {\n",
+            "  C{ if (1) { counter++; } }C\n",
+            "  return (pass);\n",
+            "}\n",
+            "C{}C\n",
+        );
+        let lang = languages::find_by_name("vcl").unwrap();
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&(lang.language)()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{}",
+            tree.root_node().to_sexp()
+        );
+
+        let spans = highlight(source, lang);
+        let at = |needle: &str| {
+            let start = source.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| (s.scope.name().to_string(), s.language))
+                .next_back()
+        };
+        // C keywords inside the block come from the C grammar and query.
+        assert_eq!(at("static"), Some(("keyword".to_string(), "c")));
+        assert_eq!(at("int"), Some(("type".to_string(), "c")));
+        assert_eq!(at("if"), Some(("keyword".to_string(), "c")));
+        // The delimiters are colored, and as VCL.
+        assert_eq!(at("C{"), Some(("punctuation.special".to_string(), "vcl")));
+        assert_eq!(at("}C"), Some(("punctuation.special".to_string(), "vcl")));
+        // Nothing from the VCL query survives inside a block.
+        let first_block_end = source.find("}C").unwrap() + 2;
+        assert!(
+            spans
+                .iter()
+                .filter(|s| s.start < first_block_end)
+                .all(|s| s.language == "c" || s.scope.name() == "punctuation.special"),
+            "VCL spans leaked into the C block"
+        );
+        // Statements after the block are still VCL.
+        assert_eq!(
+            at("return"),
+            Some(("keyword.control.return".to_string(), "vcl"))
+        );
+    }
+
+    /// An ordinary rule with no standard target name must still get color:
+    /// the crate's make query left `foo: bar` blank (only the `:` was
+    /// captured), which read as "highlighting is off" in a two-line Makefile.
+    #[test]
+    fn make_plain_rule_is_colored() {
+        let src = "foo: bar baz.o\n\tcc -o foo bar\n\nall: foo\n";
+        let lang = languages::detect(Some(std::path::Path::new("Makefile")), src).unwrap();
+        let spans = highlight(src, lang);
+        let at = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| s.scope.name().to_string())
+                .next_back()
+        };
+        assert_eq!(at("foo").as_deref(), Some("function"));
+        assert_eq!(at("bar").as_deref(), Some("string.special.path"));
+        assert_eq!(at("baz.o").as_deref(), Some("string.special.path"));
+        // A standard target keeps the crate's more specific capture.
+        assert_eq!(at("all").as_deref(), Some("constant.macro"));
+    }
+
     #[test]
     fn numeric_fallback_finds_disjoint_and_nested_numbers() {
         // Perl doesn't give numeric literals their own captured node, so
@@ -544,6 +756,43 @@ mod tests {
                 && s.end == from_start + 4),
             "expected a keyword span for FROM at {from_start}, got {spans:?}"
         );
+    }
+
+    /// `<<VCL` in Perl injects the VCL grammar, and a `C{ ... }C` block inside
+    /// that heredoc is injected as C in turn: highlight() recurses, so each
+    /// layer's injections run on the body it was handed.
+    #[test]
+    fn heredoc_vcl_with_inline_c_nests_both_injections() {
+        let lang = languages::detect(Some(std::path::Path::new("a.pl")), "").unwrap();
+        let src = concat!(
+            "my $vcl = <<VCL;\n",
+            "sub vcl_recv {\n",
+            "  C{ static int hits = 0; }C\n",
+            "  return (pass);\n",
+            "}\n",
+            "VCL\n",
+            "print $vcl;\n",
+        );
+        let spans = highlight(src, lang);
+        let at = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| (s.scope.name().to_string(), s.language))
+                .next_back()
+        };
+        assert_eq!(at("sub"), Some(("keyword".to_string(), "vcl")));
+        assert_eq!(
+            at("return"),
+            Some(("keyword.control.return".to_string(), "vcl"))
+        );
+        assert_eq!(at("C{"), Some(("punctuation.special".to_string(), "vcl")));
+        assert_eq!(at("static"), Some(("keyword".to_string(), "c")));
+        assert_eq!(at("int"), Some(("type".to_string(), "c")));
+        assert_eq!(at("}C"), Some(("punctuation.special".to_string(), "vcl")));
+        // The surrounding Perl is untouched.
+        assert_eq!(at("print").map(|(_, l)| l), Some("perl"));
     }
 
     #[test]
@@ -716,6 +965,11 @@ mod tests {
             ("lua", "a.lua", "-- hi\nfunction foo() return 1 end\n"),
             ("swift", "a.swift", "func foo() -> Int { return 1 } // hi\n"),
             ("go", "a.go", "package main\n// hi\nfunc main() {}\n"),
+            (
+                "vcl",
+                "default.vcl",
+                "vcl 4.1;\nsub vcl_recv { # hi\n    return (pass);\n}\n",
+            ),
         ];
         for (name, path, source) in cases {
             check(name, path, source, true);

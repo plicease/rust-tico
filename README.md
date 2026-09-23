@@ -12,3 +12,8 @@ editor and remaining under the Mozilla Public License 2.0 (see
   — see `themes/README.md`
 
 Both READMEs record the provenance of every vendored file.
+
+One tree-sitter grammar is vendored too, under `grammars/tree-sitter-vcl/`:
+a fork of [ntsk/tree-sitter-vcl](https://github.com/ntsk/tree-sitter-vcl)
+(MIT) extended to cover Fastly's VCL dialect; its README records what
+changed. Every other grammar is a crates.io dependency.

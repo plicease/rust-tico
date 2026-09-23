@@ -1,0 +1,38 @@
+{
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/config.schema.json",
+  "grammars": [
+    {
+      "name": "vcl",
+      "camelcase": "VCL",
+      "scope": "source.vcl",
+      "file-types": [
+        "vcl"
+      ],
+      "injection-regex": "^vcl$"
+    }
+  ],
+  "metadata": {
+    "version": "0.4.1",
+    "license": "MIT",
+    "description": "Varnish Configuration Language grammar for tree-sitter",
+    "authors": [
+      {
+        "name": "ntsk",
+        "email": "ntsk@ntsk.jp",
+        "url": "https://ntsk.jp/"
+      }
+    ],
+    "links": {
+      "repository": "https://github.com/ntsk/tree-sitter-vcl"
+    }
+  },
+  "bindings": {
+    "c": true,
+    "go": true,
+    "node": true,
+    "python": true,
+    "rust": true,
+    "swift": true,
+    "zig": false
+  }
+}

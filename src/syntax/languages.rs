@@ -93,6 +93,18 @@ lang_fn_old_api!(lang_vim, tree_sitter_vim);
 lang_fn!(lang_lua, tree_sitter_lua);
 lang_fn!(lang_markdown, tree_sitter_md);
 
+// The VCL grammar is not a crate: build.rs compiles it from
+// `grammars/tree-sitter-vcl/` (a fork of ntsk/tree-sitter-vcl extended for
+// Fastly's dialect), so its C entry point is declared here.
+unsafe extern "C" {
+    fn tree_sitter_vcl() -> *const ();
+}
+const VCL_LANGUAGE: tree_sitter_language::LanguageFn =
+    unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_vcl) };
+fn lang_vcl() -> tree_sitter::Language {
+    VCL_LANGUAGE.into()
+}
+
 const LANGUAGES: &[LanguageDef] = &[
     LanguageDef {
         name: "perl",
@@ -585,6 +597,18 @@ const LANGUAGES: &[LanguageDef] = &[
         linter: None,
         formatter: None,
         comment: "<!--|-->",
+    },
+    LanguageDef {
+        name: "vcl",
+        extensions: &["vcl"],
+        filenames: &[],
+        shebangs: &[],
+        modeline_aliases: &["varnish"],
+        language: lang_vcl,
+        highlights_query: include_str!("queries/vcl.scm"),
+        linter: None,
+        formatter: None,
+        comment: "#",
     },
 ];
 
