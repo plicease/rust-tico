@@ -165,10 +165,97 @@ pub fn highlight(text: &str, lang: &'static LanguageDef) -> Vec<HighlightSpan> {
     spans
 }
 
-/// Perl-specific for now: `tree-sitter-perl` is the only vendored grammar
-/// whose node kinds this matches (`heredoc_start_identifier`); other
-/// languages' trees simply won't contain nodes with that kind name, so this
-/// is a no-op for them.
+/// Heredoc language injection: when a heredoc's terminator names a known
+/// language (`<<SQL`, `<<~'VCL'`, `cat <<HTML`, PHP's `<<<JSON`),
+/// re-highlight its body with that language's own grammar instead of
+/// leaving it one flat string. Two routes, chosen by which node kinds the
+/// buffer's grammar produces: Perl's heredoc nodes can't be trusted for
+/// the body, so its bodies are found by text; Bash, Ruby and PHP give the
+/// body a real node with a clean range.
+fn inject_heredocs(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<HighlightSpan>) {
+    inject_perl_heredocs(tree, text, spans);
+    inject_tree_heredocs(tree, text, spans);
+}
+
+/// Replace whatever the outer grammar made of `text[start..end]` with the
+/// spans `lang`'s own grammar produces for it, offset back into `text`.
+/// If that comes to nothing, the outer coloring (typically one flat
+/// string) is left in place rather than blanking the range out.
+fn inject_range(
+    text: &str,
+    spans: &mut Vec<HighlightSpan>,
+    start: usize,
+    end: usize,
+    lang: &'static LanguageDef,
+) {
+    if end <= start || end > text.len() {
+        return;
+    }
+    let inner = highlight(&text[start..end], lang);
+    if inner.is_empty() {
+        return;
+    }
+    spans.retain(|s| !(s.start < end && s.end > start));
+    spans.extend(inner.into_iter().map(|s| HighlightSpan {
+        start: s.start + start,
+        end: s.end + start,
+        ..s
+    }));
+}
+
+/// Bash (`heredoc_start` / `heredoc_body`), Ruby (`heredoc_beginning` /
+/// `heredoc_body`) and PHP (`heredoc_start` / `heredoc_body`, or
+/// `nowdoc_body` for a nowdoc): these grammars give every heredoc body
+/// its own node, wherever the heredoc sits, so each start marker is paired
+/// with the first unclaimed body after it -- bodies follow their markers
+/// in source order, including several on one line. Ruby's body node ends
+/// with the `heredoc_end` line, which is trimmed off. No other vendored
+/// grammar produces these kinds, so this is a no-op elsewhere.
+fn inject_tree_heredocs(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<HighlightSpan>) {
+    let mut starts = Vec::new();
+    for kind in ["heredoc_start", "heredoc_beginning"] {
+        collect_by_kind(tree.root_node(), kind, &mut starts);
+    }
+    if starts.is_empty() {
+        return;
+    }
+    let mut bodies = Vec::new();
+    for kind in ["heredoc_body", "nowdoc_body"] {
+        collect_by_kind(tree.root_node(), kind, &mut bodies);
+    }
+    starts.sort_by_key(|n| n.start_byte());
+    bodies.sort_by_key(|n| n.start_byte());
+
+    let mut next_body = 0;
+    for start_id in starts {
+        let Some(i) = bodies
+            .iter()
+            .skip(next_body)
+            .position(|b| b.start_byte() >= start_id.end_byte())
+        else {
+            break;
+        };
+        let body = bodies[next_body + i];
+        next_body += i + 1;
+
+        let raw = &text[start_id.byte_range()];
+        let Some(lang) = languages::find_by_name(heredoc_language_name(raw)) else {
+            continue;
+        };
+        let mut body_end = body.end_byte();
+        let mut cursor = body.walk();
+        for child in body.children(&mut cursor) {
+            if child.kind() == "heredoc_end" {
+                body_end = child.start_byte();
+                break;
+            }
+        }
+        inject_range(text, spans, body.start_byte(), body_end, lang);
+    }
+}
+
+/// Perl (`heredoc_start_identifier`; no other vendored grammar produces
+/// that kind, so this is a no-op elsewhere).
 ///
 /// Bodies are located by text rather than from the tree. The Perl grammar
 /// only produces a `heredoc_body_statement` when the statement carrying
@@ -182,7 +269,7 @@ pub fn highlight(text: &str, lang: &'static LanguageDef) -> Vec<HighlightSpan> {
 /// after the previous heredoc's terminator, when several share a line) and
 /// ends at the first line that is exactly the terminator, with leading
 /// whitespace allowed for `<<~`.
-fn inject_heredocs(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<HighlightSpan>) {
+fn inject_perl_heredocs(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<HighlightSpan>) {
     let mut starts = Vec::new();
     collect_by_kind(tree.root_node(), "heredoc_start_identifier", &mut starts);
     if starts.is_empty() {
@@ -215,21 +302,7 @@ fn inject_heredocs(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<Highlig
         let Some(lang) = languages::find_by_name(name) else {
             continue;
         };
-        if body_end <= body_start {
-            continue;
-        }
-        let inner_spans = highlight(&text[body_start..body_end], lang);
-        if inner_spans.is_empty() {
-            // Leave the outer (Perl) query's own coloring in place rather
-            // than blanking the body out.
-            continue;
-        }
-        spans.retain(|s| !(s.start < body_end && s.end > body_start));
-        spans.extend(inner_spans.into_iter().map(|s| HighlightSpan {
-            start: s.start + body_start,
-            end: s.end + body_start,
-            ..s
-        }));
+        inject_range(text, spans, body_start, body_end, lang);
     }
 }
 
@@ -298,11 +371,15 @@ fn inject_inline_c(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<Highlig
     }
 }
 
-/// Strip a heredoc terminator down to the bare language name: an optional
-/// leading `~` (indented heredoc, `<<~SQL`) or `\` (no-interpolation
-/// bareword, `<<\SQL`), then matching surrounding `'` or `"` quotes.
+/// Strip a heredoc marker down to the bare language name, whichever
+/// grammar produced it: an optional leading `<<` (Ruby's marker node is the
+/// whole `<<~SQL`; Perl's, Bash's and PHP's start after the operator),
+/// then `~` (indented, `<<~SQL`) or `-` (Ruby's `<<-SQL`), then `\`
+/// (Perl's no-interpolation bareword, `<<\SQL`), then matching surrounding
+/// `'` or `"` quotes.
 fn heredoc_language_name(raw: &str) -> &str {
-    let s = raw.strip_prefix('~').unwrap_or(raw);
+    let s = raw.strip_prefix("<<").unwrap_or(raw);
+    let s = s.strip_prefix(['~', '-']).unwrap_or(s);
     let s = s.strip_prefix('\\').unwrap_or(s);
     let bytes = s.as_bytes();
     if bytes.len() >= 2 {
@@ -929,6 +1006,81 @@ mod tests {
                 .all(|s| s.start >= src.find("   SELECT").unwrap()),
             "no sql-tagged span may leak outside the heredoc body: {spans:?}"
         );
+    }
+
+    /// Bash, Ruby and PHP heredocs inject the same way Perl's do, through
+    /// the grammar's own body nodes: including Bash's `<<-`, Ruby's
+    /// indented `<<~` and `<<-`, PHP's nowdoc, and quoted terminators.
+    #[test]
+    fn heredocs_inject_in_bash_ruby_and_php() {
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "bash",
+                "a.sh",
+                "psql <<SQL\nSELECT * FROM foo WHERE bar = 1\nSQL\necho done\n",
+            ),
+            (
+                "bash",
+                "a.sh",
+                "psql <<-'SQL'\n\tSELECT * FROM foo\n\tSQL\n",
+            ),
+            (
+                "ruby",
+                "a.rb",
+                "q = <<~SQL\n  SELECT * FROM foo\n  WHERE bar = 1\nSQL\nputs q\n",
+            ),
+            (
+                "ruby",
+                "a.rb",
+                "q = <<-'SQL'\n  SELECT * FROM foo\n  SQL\nputs q\n",
+            ),
+            (
+                "ruby",
+                "a.rb",
+                "h = { a: <<~SQL, b: 1 }\n  SELECT * FROM foo\nSQL\n",
+            ),
+            (
+                "php",
+                "a.php",
+                "<?php\n$q = <<<SQL\nSELECT * FROM foo\nSQL;\necho $q;\n",
+            ),
+            (
+                "php",
+                "a.php",
+                "<?php\n$q = <<<'SQL'\nSELECT * FROM foo\nSQL;\n",
+            ),
+        ];
+        for (outer, path, src) in cases {
+            let lang = languages::detect(Some(std::path::Path::new(path)), src).unwrap();
+            assert_eq!(lang.name, *outer, "{path}");
+            let spans = highlight(src, lang);
+            let select = src.find("SELECT").unwrap();
+            assert!(
+                spans.iter().any(|s| s.language == "sql"
+                    && s.start == select
+                    && s.end == select + 6
+                    && s.scope.name().starts_with("keyword")),
+                "{outer} {src:?}: no SQL keyword span for SELECT, got {spans:?}"
+            );
+            // Nothing of the outer language survives inside the body.
+            let body_end = src.rfind("SQL").unwrap();
+            assert!(
+                spans
+                    .iter()
+                    .filter(|s| s.start >= select && s.end <= body_end)
+                    .all(|s| s.language == "sql"),
+                "{outer} {src:?}: outer spans leaked into the heredoc body"
+            );
+            // Code after the terminator is still the outer language.
+            if let Some(after) = src.find("puts").or_else(|| src.find("echo")) {
+                assert!(
+                    spans
+                        .iter()
+                        .any(|s| s.start == after && s.language == *outer),
+                    "{outer} {src:?}: code after the heredoc lost its language"
+                );
+            }
+        }
     }
 
     #[test]
