@@ -274,6 +274,20 @@ impl Buffer {
         self.replace_range(pos, after_pos, "", pos);
     }
 
+    /// Replace whole lines `first..=last` (the newlines between them
+    /// included, the one after `last` not) with `text`, as a single undo
+    /// step -- for line-oriented edits like indent/unindent that touch
+    /// several non-adjacent spots at once but must undo together.
+    pub fn replace_lines(&mut self, first: usize, last: usize, text: &str, cursor_after: Pos) {
+        let end_col = self.line(last).chars().count();
+        self.replace_range(
+            Pos::new(first, 0),
+            Pos::new(last, end_col),
+            text,
+            cursor_after,
+        );
+    }
+
     /// Cut and return the text of a line range (used by cut-line and
     /// cut-marked-region).
     pub fn delete_range(&mut self, start: Pos, end: Pos) -> String {

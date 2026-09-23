@@ -352,6 +352,7 @@ fn handle_editing_key(editor: &mut Editor, key: KeyEvent) {
     // Shift+Left binding needed), so the resolved action is identical
     // either way -- only whether to also manage a mark around it differs.
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    editor.shift_held = false;
     let tkey = normalize_key(key);
     let binding = tkey.and_then(|tk| editor.keymap.lookup(Menu::Main, tk).cloned());
     let is_movement = matches!(&binding, Some(Binding::Action(a)) if is_movement_action(*a));
@@ -384,9 +385,11 @@ fn handle_editing_key(editor: &mut Editor, key: KeyEvent) {
 
     // Any plain (non-Shift) movement or edit drops a soft mark -- matches
     // nano's own post-dispatch check (a hard mark, set via `^^`/`M-A`,
-    // isn't touched here at all).
+    // isn't touched here at all). An action that asked for the mark to be
+    // kept despite shifting it (`shift_held`: indent/unindent) is exempt.
     if !editor.buffers.is_empty()
         && !shift
+        && !editor.shift_held
         && editor.buf().softmark
         && editor.buf().mark.is_some()
         && (editor.buf().cursor != before || is_movement)
@@ -3784,5 +3787,35 @@ mod tests {
         for (key, desc) in &entries {
             assert!(!key.is_empty(), "no key resolved for {desc:?}");
         }
+    }
+
+    #[test]
+    fn shift_tab_unindents_and_keeps_a_soft_mark() {
+        // Shift+Down sets a soft mark spanning line 0; a following
+        // Shift-Tab (reported by crossterm as BackTab, here deliberately
+        // without the SHIFT modifier) unindents that line and, unlike a
+        // plain edit, must not drop the soft mark just because the
+        // cursor/mark columns shifted -- nano's `shift_held` exemption.
+        let mut ed = test_editor("\tone\n\ttwo\n");
+        ed.buf_mut().cursor = Pos::new(0, 3);
+        handle_editing_key(&mut ed, KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        assert_eq!(ed.buf().mark, Some(Pos::new(0, 3)));
+        assert!(ed.buf().softmark);
+        assert_eq!(ed.buf().cursor, Pos::new(1, 3));
+
+        handle_editing_key(&mut ed, KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(ed.buf().line(0), "one");
+        assert_eq!(ed.buf().line(1), "two");
+        assert_eq!(
+            ed.buf().mark,
+            Some(Pos::new(0, 2)),
+            "soft mark kept, shifted left"
+        );
+        assert!(ed.buf().softmark);
+        assert_eq!(ed.buf().cursor, Pos::new(1, 2));
+
+        // A plain movement afterwards still drops it as usual.
+        handle_editing_key(&mut ed, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(ed.buf().mark, None);
     }
 }
