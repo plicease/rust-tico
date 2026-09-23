@@ -663,6 +663,7 @@ name = "tico"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cc",
  "clap",
  "crossterm",
  "dirs",
@@ -694,6 +695,7 @@ dependencies = [
  "tree-sitter-javascript",
  "tree-sitter-json",
  "tree-sitter-julia",
+ "tree-sitter-language",
  "tree-sitter-lua",
  "tree-sitter-make",
  "tree-sitter-md",
