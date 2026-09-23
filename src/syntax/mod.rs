@@ -113,14 +113,16 @@ pub struct HighlightSpan {
 /// query, but a corrupt/huge buffer shouldn't be able to crash the editor).
 pub fn highlight(text: &str, lang: &'static LanguageDef) -> Vec<HighlightSpan> {
     let language = (lang.language)();
-    let mut parser = tree_sitter::Parser::new();
-    if parser.set_language(&language).is_err() {
-        return Vec::new();
-    }
-    let Some(tree) = parser.parse(text, None) else {
+    let Some(tree) = parse(text, &language) else {
         return Vec::new();
     };
     let Ok(query) = tree_sitter::Query::new(&language, lang.highlights_query) else {
+        return Vec::new();
+    };
+    // Perl heredocs are taken out of the text the outer grammar sees (see
+    // `perl_heredocs` for why) and colored from the original text further
+    // down. `outer` is `text` itself for every other grammar.
+    let Some((tree, outer, heredocs)) = parse_without_perl_heredocs(tree, text, &language) else {
         return Vec::new();
     };
 
@@ -134,7 +136,7 @@ pub fn highlight(text: &str, lang: &'static LanguageDef) -> Vec<HighlightSpan> {
 
     let mut spans = Vec::new();
     let mut cursor = tree_sitter::QueryCursor::new();
-    let mut captures = cursor.captures(&query, tree.root_node(), text.as_bytes());
+    let mut captures = cursor.captures(&query, tree.root_node(), outer.as_bytes());
     while let Some((m, capture_ix)) = captures.next() {
         let capture = m.captures[*capture_ix];
         if let Some(scope) = scopes[capture.index as usize] {
@@ -151,12 +153,13 @@ pub fn highlight(text: &str, lang: &'static LanguageDef) -> Vec<HighlightSpan> {
     // literals their own named node, so a query can't capture them at all.
     // Catch any leaf token that looks like a number and isn't already
     // covered by a real capture.
-    add_numeric_fallback(&tree, text, lang.name, &mut spans);
+    add_numeric_fallback(&tree, &outer, lang.name, &mut spans);
 
     // Heredoc language injection: when a heredoc's terminator names a known
     // language (e.g. `<<SQL`, `<<'HTML'`), re-highlight its body with that
     // language's own grammar instead of leaving it as one flat string.
-    inject_heredocs(&tree, text, &mut spans);
+    inject_perl_heredocs(&heredocs, text, lang.name, &mut spans);
+    inject_tree_heredocs(&tree, text, &mut spans);
 
     // Varnish inline C: highlight the body of a `C{ ... }C` block with the C
     // grammar instead of leaving it one flat string.
@@ -165,35 +168,30 @@ pub fn highlight(text: &str, lang: &'static LanguageDef) -> Vec<HighlightSpan> {
     spans
 }
 
-/// Heredoc language injection: when a heredoc's terminator names a known
-/// language (`<<SQL`, `<<~'VCL'`, `cat <<HTML`, PHP's `<<<JSON`),
-/// re-highlight its body with that language's own grammar instead of
-/// leaving it one flat string. Two routes, chosen by which node kinds the
-/// buffer's grammar produces: Perl's heredoc nodes can't be trusted for
-/// the body, so its bodies are found by text; Bash, Ruby and PHP give the
-/// body a real node with a clean range.
-fn inject_heredocs(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<HighlightSpan>) {
-    inject_perl_heredocs(tree, text, spans);
-    inject_tree_heredocs(tree, text, spans);
+fn parse(text: &str, language: &tree_sitter::Language) -> Option<tree_sitter::Tree> {
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(language).ok()?;
+    parser.parse(text, None)
 }
 
 /// Replace whatever the outer grammar made of `text[start..end]` with the
 /// spans `lang`'s own grammar produces for it, offset back into `text`.
 /// If that comes to nothing, the outer coloring (typically one flat
-/// string) is left in place rather than blanking the range out.
+/// string) is left in place rather than blanking the range out; returns
+/// whether anything was injected.
 fn inject_range(
     text: &str,
     spans: &mut Vec<HighlightSpan>,
     start: usize,
     end: usize,
     lang: &'static LanguageDef,
-) {
+) -> bool {
     if end <= start || end > text.len() {
-        return;
+        return false;
     }
     let inner = highlight(&text[start..end], lang);
     if inner.is_empty() {
-        return;
+        return false;
     }
     spans.retain(|s| !(s.start < end && s.end > start));
     spans.extend(inner.into_iter().map(|s| HighlightSpan {
@@ -201,16 +199,19 @@ fn inject_range(
         end: s.end + start,
         ..s
     }));
+    true
 }
 
-/// Bash (`heredoc_start` / `heredoc_body`), Ruby (`heredoc_beginning` /
-/// `heredoc_body`) and PHP (`heredoc_start` / `heredoc_body`, or
-/// `nowdoc_body` for a nowdoc): these grammars give every heredoc body
-/// its own node, wherever the heredoc sits, so each start marker is paired
-/// with the first unclaimed body after it -- bodies follow their markers
-/// in source order, including several on one line. Ruby's body node ends
-/// with the `heredoc_end` line, which is trimmed off. No other vendored
-/// grammar produces these kinds, so this is a no-op elsewhere.
+/// Heredoc language injection for Bash (`heredoc_start` / `heredoc_body`),
+/// Ruby (`heredoc_beginning` / `heredoc_body`) and PHP (`heredoc_start` /
+/// `heredoc_body`, or `nowdoc_body` for a nowdoc): these grammars give
+/// every heredoc body its own node, wherever the heredoc sits, so each
+/// start marker is paired with the first unclaimed body after it -- bodies
+/// follow their markers in source order, including several on one line.
+/// Ruby's body node ends with the `heredoc_end` line, which is trimmed
+/// off. No other vendored grammar produces these kinds, so this is a no-op
+/// elsewhere. (Perl's heredocs go through `inject_perl_heredocs`: its
+/// grammar can't be trusted for the body.)
 fn inject_tree_heredocs(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<HighlightSpan>) {
     let mut starts = Vec::new();
     for kind in ["heredoc_start", "heredoc_beginning"] {
@@ -254,29 +255,43 @@ fn inject_tree_heredocs(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<Hi
     }
 }
 
-/// Perl (`heredoc_start_identifier`; no other vendored grammar produces
-/// that kind, so this is a no-op elsewhere).
+/// One Perl heredoc, located by `perl_heredocs`. All offsets are into the
+/// original buffer text.
+struct PerlHeredoc {
+    /// The heredoc's bare name (`SQL` for `<<~'SQL'`).
+    name: String,
+    /// The `<<~'SQL'` marker, from its `<<` (when the grammar gave the
+    /// marker a node of its own; otherwise from the identifier).
+    marker_start: usize,
+    marker_end: usize,
+    body_start: usize,
+    body_end: usize,
+    /// The terminator word on the line that ends the body.
+    terminator_start: usize,
+    terminator_end: usize,
+}
+
+/// Perl heredocs (`heredoc_start_identifier`; no other vendored grammar
+/// produces that kind, so this finds nothing elsewhere), in source order.
 ///
 /// Bodies are located by text rather than from the tree. The Perl grammar
 /// only produces a `heredoc_body_statement` when the statement carrying
 /// the `<<TAG` ends on that same line; inside a multi-line construct
 /// (`content => <<~'VCL',` in a hash) it emits no body node and parses the
 /// body as Perl code, so pairing start identifiers with body nodes would
-/// silently skip exactly the heredocs that most need re-highlighting, and
-/// leave Perl's coloring of the body in place (where `-A` in a VCL header
-/// name reads as a file test operator). Perl's own rule is simple enough
-/// to apply directly: the body starts on the line after the `<<TAG` (or
-/// after the previous heredoc's terminator, when several share a line) and
-/// ends at the first line that is exactly the terminator, with leading
-/// whitespace allowed for `<<~`.
-fn inject_perl_heredocs(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<HighlightSpan>) {
+/// silently skip exactly the heredocs that most need re-highlighting.
+/// Perl's own rule is simple enough to apply directly: the body starts on
+/// the line after the `<<TAG` (or after the previous heredoc's terminator,
+/// when several share a line) and ends at the first line that is exactly
+/// the terminator, with leading whitespace allowed for `<<~`. An
+/// unterminated heredoc (perl itself would reject it) is dropped, along
+/// with any that follow it.
+fn perl_heredocs(tree: &tree_sitter::Tree, text: &str) -> Vec<PerlHeredoc> {
     let mut starts = Vec::new();
     collect_by_kind(tree.root_node(), "heredoc_start_identifier", &mut starts);
-    if starts.is_empty() {
-        return;
-    }
     starts.sort_by_key(|n| n.start_byte());
 
+    let mut heredocs = Vec::new();
     // Where the next body may begin: heredocs are consumed in source order,
     // so a second `<<TAG` on the same line gets the lines after the first
     // one's terminator.
@@ -289,27 +304,163 @@ fn inject_perl_heredocs(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<Hi
             .find('\n')
             .map_or(text.len(), |i| start_id.end_byte() + i + 1);
         let body_start = after_line.max(next_body);
-        let Some((body_end, after_terminator)) =
+        let Some((body_end, terminator_start)) =
             find_heredoc_terminator(text, body_start, name, indented)
         else {
-            // Unterminated: the body runs to end of file and Perl itself
-            // would reject it. Nothing sensible to inject, for this heredoc
-            // or any that follow it.
             break;
         };
-        next_body = after_terminator;
-
-        let Some(lang) = languages::find_by_name(name) else {
-            continue;
+        let terminator_end = terminator_start + name.len();
+        next_body = text[terminator_end..]
+            .find('\n')
+            .map_or(text.len(), |i| terminator_end + i + 1);
+        let marker_start = match start_id.parent() {
+            Some(p) if p.kind() == "heredoc_initializer" => p.start_byte(),
+            _ => start_id.start_byte(),
         };
-        inject_range(text, spans, body_start, body_end, lang);
+        heredocs.push(PerlHeredoc {
+            name: name.to_string(),
+            marker_start,
+            marker_end: start_id.end_byte(),
+            body_start,
+            body_end,
+            terminator_start,
+            terminator_end,
+        });
+    }
+    heredocs
+}
+
+/// The tree the highlight query should run on, the text it was parsed
+/// from, and the Perl heredocs found in `text`. For a grammar without
+/// Perl heredocs that is just the `tree` and `text` passed in.
+///
+/// A Perl heredoc body inside a multi-line construct is parsed as Perl
+/// code, and the quotes and semicolons in, say, a VCL body derail the
+/// parser's error recovery; worse, the scanner has queued the terminator
+/// and, never having opened a body, treats everything from the end of the
+/// enclosing statement to the end of the file as heredoc content. So do
+/// what perl's own lexer does and take the heredoc out of the line
+/// stream: the marker becomes a same-length `"   "` string (an ordinary
+/// expression in its place, with no terminator queued), and the body and
+/// terminator lines are blanked. Every newline stays, so byte offsets
+/// into the masked text are offsets into `text`. The real marker, body
+/// and terminator are colored from `text` by `inject_perl_heredocs`.
+///
+/// One masked re-parse per round: a body that derailed the parse can hide
+/// the heredoc markers after it, and those only surface once it's masked,
+/// so this repeats until a parse turns up no new heredoc (bounded, so a
+/// pathological file can't spin).
+fn parse_without_perl_heredocs<'a>(
+    mut tree: tree_sitter::Tree,
+    text: &'a str,
+    language: &tree_sitter::Language,
+) -> Option<(
+    tree_sitter::Tree,
+    std::borrow::Cow<'a, str>,
+    Vec<PerlHeredoc>,
+)> {
+    let mut heredocs: Vec<PerlHeredoc> = Vec::new();
+    let mut outer = std::borrow::Cow::Borrowed(text);
+    for _ in 0..64 {
+        let mut found = perl_heredocs(&tree, text);
+        // A marker that surfaced inside a heredoc already masked would
+        // be one the earlier parse misread; the masked body is blank, so
+        // this can only be a leftover of a still-derailed parse.
+        found.retain(|f| {
+            !heredocs
+                .iter()
+                .any(|h| f.marker_start < h.body_end && f.body_end > h.body_start)
+        });
+        if found.is_empty() {
+            break;
+        }
+        heredocs.extend(found);
+        outer = std::borrow::Cow::Owned(mask_perl_heredocs(text, &heredocs));
+        tree = parse(&outer, language)?;
+    }
+    Some((tree, outer, heredocs))
+}
+
+fn mask_perl_heredocs(text: &str, heredocs: &[PerlHeredoc]) -> String {
+    let mut bytes = text.as_bytes().to_vec();
+    let blank = |bytes: &mut [u8]| {
+        for b in bytes {
+            if *b != b'\n' && *b != b'\r' {
+                *b = b' ';
+            }
+        }
+    };
+    for h in heredocs {
+        // Every byte of each range becomes ASCII, and the ranges are node
+        // ranges or whole lines, so no multi-byte character is split and
+        // the result is still valid UTF-8.
+        blank(&mut bytes[h.marker_start..h.marker_end]);
+        if h.marker_end - h.marker_start >= 2 {
+            bytes[h.marker_start] = b'"';
+            bytes[h.marker_end - 1] = b'"';
+        }
+        blank(&mut bytes[h.body_start..h.body_end]);
+        blank(&mut bytes[h.terminator_start..h.terminator_end]);
+    }
+    String::from_utf8(bytes).unwrap_or_else(|_| text.to_string())
+}
+
+/// Color the Perl heredocs that `parse_without_perl_heredocs` hid from the
+/// outer grammar: the body with its named language, or as one string when
+/// the name isn't a known language (or that language makes nothing of it);
+/// the marker's identifier and the terminator as strings, which is what
+/// the Perl query gives `heredoc_start_identifier` and
+/// `heredoc_end_identifier` (the `<<` itself stays uncolored, as it does
+/// there).
+fn inject_perl_heredocs(
+    heredocs: &[PerlHeredoc],
+    text: &str,
+    outer_lang: &'static str,
+    spans: &mut Vec<HighlightSpan>,
+) {
+    if heredocs.is_empty() {
+        return;
+    }
+    let string = Scope::intern("string");
+    for h in heredocs {
+        let injected = languages::find_by_name(&h.name)
+            .is_some_and(|lang| inject_range(text, spans, h.body_start, h.body_end, lang));
+        if !injected {
+            spans.retain(|s| !(s.start < h.body_end && s.end > h.body_start));
+            if h.body_end > h.body_start {
+                spans.push(HighlightSpan {
+                    start: h.body_start,
+                    end: h.body_end,
+                    scope: string,
+                    language: outer_lang,
+                });
+            }
+        }
+        let identifier_start = if text[h.marker_start..h.marker_end].starts_with("<<") {
+            h.marker_start + 2
+        } else {
+            h.marker_start
+        };
+        for (start, end) in [
+            (identifier_start, h.marker_end),
+            (h.terminator_start, h.terminator_end),
+        ] {
+            spans.retain(|s| !(s.start < end && s.end > start));
+            spans.push(HighlightSpan {
+                start,
+                end,
+                scope: string,
+                language: outer_lang,
+            });
+        }
     }
 }
 
 /// Find the first line at or after byte offset `from` that is exactly
 /// `name` (after an optional `\r`, and after leading whitespace when
 /// `indented`, i.e. for `<<~`). Returns the byte offset where that line
-/// starts, which ends the heredoc body, and the offset just past it.
+/// starts, which ends the heredoc body, and the offset where `name`
+/// itself begins on it.
 fn find_heredoc_terminator(
     text: &str,
     from: usize,
@@ -324,13 +475,12 @@ fn find_heredoc_terminator(
             .unwrap_or(&text[pos..line_end]);
         let candidate = if indented { line.trim_start() } else { line };
         if candidate == name {
-            return Some((pos, (line_end + 1).min(text.len())));
+            return Some((pos, pos + line.len() - candidate.len()));
         }
         pos = line_end + 1;
     }
     None
 }
-
 /// VCL-specific: the vendored VCL grammar lexes a Varnish `C{ ... }C` block
 /// as a single `inline_c` token (its query colors it as a string as a
 /// fallback). Re-highlight the body with the C grammar and color the two
@@ -1096,6 +1246,155 @@ mod tests {
                 && s.start <= body_start
                 && s.end >= body_start + 9),
             "expected the heredoc body to remain a string span, got {spans:?}"
+        );
+    }
+
+    /// A heredoc inside a multi-line construct (here a hash argument, as
+    /// in a `.t` file) must not derail the Perl parse of everything after
+    /// it. The grammar parses such a body as Perl code, and the scanner,
+    /// still waiting for the terminator it queued, swallowed the rest of
+    /// the file as heredoc content once the enclosing statement ended: the
+    /// strings after it were paired wrong, then nothing was colored at all.
+    #[test]
+    fn heredoc_in_multiline_construct_keeps_following_perl_intact() {
+        let src = concat!(
+            "$client->send(\n",
+            "    'snippet.create',\n",
+            "    {\n",
+            "        content => <<~'VCL',\n",
+            "            set req.http.Key = \"AKIA;EXAMPLE\";\n",
+            "            set req.http.Token = \"xoxb-1\";\n",
+            "            VCL\n",
+            "    }\n",
+            ")->status_code_is(200);\n",
+            "is(\n",
+            "    $vclsearch->send( 'vclsearch.show', { service_id => $service->id } ),\n",
+            "    { error => 'service not found' },\n",
+            "    'show returns 404',\n",
+            ");\n",
+            "$service->activate_ok(1);\n",
+        );
+        let lang = languages::detect(Some(std::path::Path::new("a.t")), src).unwrap();
+        let spans = highlight(src, lang);
+        let exact = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| (s.scope.name().to_string(), s.language))
+                .next_back()
+        };
+        // The body is VCL, the marker's identifier and the terminator are
+        // strings as the Perl query makes them at statement level.
+        assert_eq!(exact("set"), Some(("keyword".to_string(), "vcl")));
+        assert_eq!(exact("~'VCL'"), Some(("string".to_string(), "perl")));
+        let terminator = src.rfind("VCL").unwrap();
+        assert!(
+            spans.iter().any(|s| s.start == terminator
+                && s.end == terminator + 3
+                && s.scope.name() == "string"
+                && s.language == "perl"),
+            "terminator should be a Perl string span: {spans:?}"
+        );
+        // Everything after the heredoc is ordinary Perl again.
+        assert_eq!(
+            exact("'vclsearch.show'"),
+            Some(("string".to_string(), "perl"))
+        );
+        assert_eq!(
+            exact("'service not found'"),
+            Some(("string".to_string(), "perl"))
+        );
+        assert_eq!(
+            exact("'show returns 404'"),
+            Some(("string".to_string(), "perl"))
+        );
+        assert_eq!(exact("$vclsearch"), Some(("variable".to_string(), "perl")));
+        assert_eq!(exact("$service"), Some(("variable".to_string(), "perl")));
+        let one = src.rfind('1').unwrap();
+        assert!(
+            spans.iter().any(|s| s.start == one
+                && s.end == one + 1
+                && s.scope.name() == "constant.numeric"
+                && s.language == "perl"),
+            "activate_ok(1) should keep its numeric span: {spans:?}"
+        );
+        // No Perl span reaches into or across the heredoc.
+        let (body_start, body_end) = (src.find("            set").unwrap(), terminator);
+        assert!(
+            spans
+                .iter()
+                .filter(|s| s.language == "perl")
+                .all(|s| s.end <= body_start || s.start >= body_end),
+            "a Perl span overlaps the heredoc body: {spans:?}"
+        );
+    }
+
+    /// A heredoc body that derails the parse hides every `<<TAG` after it,
+    /// so those only turn up once the first is masked: the masked re-parse
+    /// repeats until no new heredoc appears.
+    #[test]
+    fn heredocs_hidden_behind_an_earlier_one_are_still_injected() {
+        let one = concat!(
+            "my $h = {\n",
+            "    content => <<~'VCL',\n",
+            "        set req.http.Key = \"a;b\";\n",
+            "        VCL\n",
+            "    other => 'x',\n",
+            "};\n",
+        );
+        let src = one.repeat(3);
+        let lang = languages::detect(Some(std::path::Path::new("a.t")), &src).unwrap();
+        let spans = highlight(&src, lang);
+        let mut from = 0;
+        for _ in 0..3 {
+            let set = src[from..].find("set").unwrap() + from;
+            assert!(
+                spans.iter().any(|s| s.start == set && s.language == "vcl"),
+                "`set` at {set} should be VCL: {spans:?}"
+            );
+            let x = src[from..].find("'x'").unwrap() + from;
+            assert!(
+                spans.iter().any(|s| s.start == x
+                    && s.end == x + 3
+                    && s.scope.name() == "string"
+                    && s.language == "perl"),
+                "'x' at {x} should be a Perl string: {spans:?}"
+            );
+            from = x;
+        }
+    }
+
+    /// Masking applies to every Perl heredoc, not only those naming a
+    /// language: a `<<~EOT` body in a hash still reads as one string, and
+    /// still doesn't disturb the code after it.
+    #[test]
+    fn unknown_heredoc_in_multiline_construct_is_a_string() {
+        let src = concat!(
+            "my $h = {\n",
+            "    text => <<~EOT,\n",
+            "        it's \"quoted\"; sort of\n",
+            "        EOT\n",
+            "    other => 'x',\n",
+            "};\n",
+        );
+        let lang = languages::detect(Some(std::path::Path::new("a.pl")), src).unwrap();
+        let spans = highlight(src, lang);
+        let body_start = src.find("        it's").unwrap();
+        let body_end = src.find("        EOT").unwrap();
+        assert!(
+            spans.iter().any(|s| s.start == body_start
+                && s.end == body_end
+                && s.scope.name() == "string"
+                && s.language == "perl"),
+            "expected one string span over the body: {spans:?}"
+        );
+        let x = src.find("'x'").unwrap();
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.start == x && s.end == x + 3 && s.scope.name() == "string"),
+            "'x' should be a string: {spans:?}"
         );
     }
 
