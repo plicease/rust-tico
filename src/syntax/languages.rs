@@ -19,6 +19,13 @@ pub struct LanguageDef {
     pub linter: Option<&'static str>,
     /// A per-syntax external formatter command (nanorc 'formatter' directive default): run on a temp copy of the buffer, which replaces the buffer's content if the tool modified it.
     pub formatter: Option<&'static str>,
+    /// What `M-3` Comment/Uncomment prefixes lines with (nanorc `comment`
+    /// directive default, taken from nano's shipped syntax files where it
+    /// has one): a plain prefix like `#`, or `PREFIX|POSTFIX` for
+    /// bracketing comments like `<!--|-->`. Empty means the language has no
+    /// line comments and `M-3` reports so; a buffer with no language at
+    /// all uses nano's general default, `#`.
+    pub comment: &'static str,
 }
 
 macro_rules! lang_fn {
@@ -97,6 +104,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/perl.scm"),
         linter: None,
         formatter: None,
+        comment: "#",
     },
     LanguageDef {
         name: "c",
@@ -108,6 +116,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/c.scm"),
         linter: None,
         formatter: None,
+        comment: "//",
     },
     LanguageDef {
         name: "cpp",
@@ -119,6 +128,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/cpp.scm"),
         linter: None,
         formatter: None,
+        comment: "//",
     },
     LanguageDef {
         name: "html",
@@ -130,6 +140,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/html.scm"),
         linter: None,
         formatter: Some("tidy -m -q"),
+        comment: "<!--|-->",
     },
     LanguageDef {
         name: "css",
@@ -141,6 +152,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/css.scm"),
         linter: None,
         formatter: None,
+        comment: "/*|*/",
     },
     LanguageDef {
         name: "sql",
@@ -152,6 +164,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/sequel.scm"),
         linter: None,
         formatter: None,
+        comment: "-- ",
     },
     LanguageDef {
         name: "python",
@@ -163,6 +176,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/python.scm"),
         linter: Some("pyflakes"),
         formatter: None,
+        comment: "#",
     },
     LanguageDef {
         name: "rust",
@@ -174,6 +188,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/rust.scm"),
         linter: None,
         formatter: None,
+        comment: "//",
     },
     LanguageDef {
         name: "bash",
@@ -185,6 +200,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/bash.scm"),
         linter: Some("dash -n"),
         formatter: None,
+        comment: "#",
     },
     LanguageDef {
         name: "json",
@@ -196,6 +212,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/json.scm"),
         linter: None,
         formatter: None,
+        comment: "",
     },
     LanguageDef {
         name: "yaml",
@@ -207,6 +224,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/yaml.scm"),
         linter: None,
         formatter: None,
+        comment: "#",
     },
     LanguageDef {
         name: "toml",
@@ -218,6 +236,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/toml.scm"),
         linter: None,
         formatter: None,
+        comment: "#",
     },
     LanguageDef {
         name: "make",
@@ -229,6 +248,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/make.scm"),
         linter: None,
         formatter: None,
+        comment: "#",
     },
     LanguageDef {
         name: "fortran",
@@ -240,6 +260,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/fortran.scm"),
         linter: None,
         formatter: None,
+        comment: "!",
     },
     LanguageDef {
         name: "go",
@@ -251,6 +272,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/go.scm"),
         linter: None,
         formatter: Some("gofmt -w"),
+        comment: "//",
     },
     LanguageDef {
         name: "javascript",
@@ -262,6 +284,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/javascript.scm"),
         linter: None,
         formatter: None,
+        comment: "//",
     },
     LanguageDef {
         name: "typescript",
@@ -273,6 +296,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/typescript.scm"),
         linter: None,
         formatter: None,
+        comment: "//",
     },
     LanguageDef {
         name: "java",
@@ -284,6 +308,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/java.scm"),
         linter: None,
         formatter: None,
+        comment: "//",
     },
     LanguageDef {
         name: "ruby",
@@ -295,6 +320,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/ruby.scm"),
         linter: Some("ruby -w -c"),
         formatter: None,
+        comment: "#",
     },
     LanguageDef {
         name: "php",
@@ -306,6 +332,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/php.scm"),
         linter: None,
         formatter: None,
+        comment: "//",
     },
     LanguageDef {
         name: "csharp",
@@ -317,6 +344,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/c-sharp.scm"),
         linter: None,
         formatter: None,
+        comment: "//",
     },
     LanguageDef {
         name: "swift",
@@ -328,6 +356,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/swift.scm"),
         linter: None,
         formatter: None,
+        comment: "//",
     },
     LanguageDef {
         name: "haskell",
@@ -339,6 +368,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/haskell.scm"),
         linter: None,
         formatter: None,
+        comment: "--",
     },
     LanguageDef {
         name: "scala",
@@ -350,6 +380,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/scala.scm"),
         linter: None,
         formatter: None,
+        comment: "//",
     },
     LanguageDef {
         name: "objc",
@@ -361,6 +392,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/objc.scm"),
         linter: None,
         formatter: None,
+        comment: "//",
     },
     LanguageDef {
         name: "r",
@@ -372,6 +404,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/r.scm"),
         linter: None,
         formatter: None,
+        comment: "#",
     },
     LanguageDef {
         name: "julia",
@@ -383,6 +416,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/julia.scm"),
         linter: None,
         formatter: None,
+        comment: "#",
     },
     LanguageDef {
         name: "xml",
@@ -394,6 +428,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/xml.scm"),
         linter: None,
         formatter: None,
+        comment: "<!--|-->",
     },
     LanguageDef {
         name: "diff",
@@ -405,6 +440,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/diff.scm"),
         linter: None,
         formatter: None,
+        comment: "",
     },
     LanguageDef {
         name: "ini",
@@ -416,6 +452,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/ini.scm"),
         linter: None,
         formatter: None,
+        comment: ";",
     },
     LanguageDef {
         name: "elixir",
@@ -427,6 +464,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/elixir.scm"),
         linter: None,
         formatter: None,
+        comment: "#",
     },
     LanguageDef {
         name: "elm",
@@ -438,6 +476,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/elm.scm"),
         linter: None,
         formatter: None,
+        comment: "--",
     },
     LanguageDef {
         name: "zig",
@@ -449,6 +488,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/zig.scm"),
         linter: None,
         formatter: None,
+        comment: "//",
     },
     LanguageDef {
         name: "dart",
@@ -460,6 +500,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/dart.scm"),
         linter: None,
         formatter: None,
+        comment: "//",
     },
     LanguageDef {
         name: "scss",
@@ -471,6 +512,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/scss.scm"),
         linter: None,
         formatter: None,
+        comment: "//",
     },
     LanguageDef {
         name: "proto",
@@ -482,6 +524,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/proto.scm"),
         linter: None,
         formatter: None,
+        comment: "//",
     },
     LanguageDef {
         name: "cmake",
@@ -493,6 +536,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/cmake.scm"),
         linter: None,
         formatter: None,
+        comment: "#",
     },
     LanguageDef {
         name: "nix",
@@ -504,6 +548,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/nix.scm"),
         linter: None,
         formatter: None,
+        comment: "#",
     },
     LanguageDef {
         name: "vim",
@@ -515,6 +560,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/vim.scm"),
         linter: None,
         formatter: None,
+        comment: r#"""#,
     },
     LanguageDef {
         name: "lua",
@@ -526,6 +572,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/lua.scm"),
         linter: Some("luacheck --no-color"),
         formatter: None,
+        comment: "--",
     },
     LanguageDef {
         name: "markdown",
@@ -537,6 +584,7 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights_query: include_str!("queries/markdown.scm"),
         linter: None,
         formatter: None,
+        comment: "<!--|-->",
     },
 ];
 

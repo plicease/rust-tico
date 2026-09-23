@@ -198,14 +198,14 @@ pub struct Editor {
     pub cut_was_consecutive: bool,
     /// nano's `also_the_last`: whether a marked region that ends exactly
     /// at column 0 should nonetheless include that last line when
-    /// indenting/unindenting. Set once such an action has run on a region
+    /// indenting/unindenting/commenting. Set once such an action has run on a region
     /// that *did* reach into its last line, and cleared as soon as the
     /// cursor moves to another line -- so repeated `M-}`/`M-{` presses
-    /// keep acting on the same set of lines. See `line_range_for_indenting`.
+    /// keep acting on the same set of lines. See `marked_line_range`.
     pub also_the_last: bool,
     /// nano's `shift_held`: an action that moves the cursor/mark columns
-    /// but wants a soft (Shift-selected) mark kept anyway -- indent and
-    /// unindent -- sets this, and ui.rs's post-keystroke soft-mark drop
+    /// but wants a soft (Shift-selected) mark kept anyway -- indent,
+    /// unindent and comment -- sets this, and ui.rs's post-keystroke soft-mark drop
     /// skips that keystroke. Cleared before each keystroke is handled.
     pub shift_held: bool,
     pub search: SearchState,
@@ -553,7 +553,7 @@ impl Editor {
             FullJustify => self.run_justify(true),
             Indent => self.do_indent(),
             Unindent => self.do_unindent(),
-            Comment => self.set_status("comment: not yet implemented"),
+            Comment => self.do_comment(),
             Center => {}
             Cycle => {}
             ScrollUp => self.scroll_view(-1),
@@ -678,14 +678,14 @@ impl Editor {
         self.also_the_last = false;
     }
 
-    /// nano's `get_range()`: the lines an indent/unindent acts on -- just
-    /// the cursor's line without a mark, otherwise every line the marked
-    /// region touches. A region ending exactly at column 0 of a later line
-    /// doesn't reach into that line, so it's left out... unless a previous
-    /// indent/unindent already included it (`also_the_last`), which keeps
-    /// the set of lines stable across repeated presses even as the
+    /// nano's `get_range()`: the lines an indent/unindent/comment acts on
+    /// -- just the cursor's line without a mark, otherwise every line the
+    /// marked region touches. A region ending exactly at column 0 of a
+    /// later line doesn't reach into that line, so it's left out... unless
+    /// a previous such action already included it (`also_the_last`), which
+    /// keeps the set of lines stable across repeated presses even as the
     /// cursor's column shifts.
-    fn line_range_for_indenting(&mut self) -> (usize, usize) {
+    fn marked_line_range(&mut self) -> (usize, usize) {
         let Some((start, end)) = self.selection_range() else {
             let line = self.buf().cursor.line;
             return (line, line);
@@ -705,7 +705,7 @@ impl Editor {
     /// cursor and mark shift right with their line's text, except when
     /// sitting at column 0.
     fn do_indent(&mut self) {
-        let (mut top, bot) = self.line_range_for_indenting();
+        let (mut top, bot) = self.marked_line_range();
         while top <= bot && self.buf().line(top).is_empty() {
             top += 1;
         }
@@ -752,7 +752,7 @@ impl Editor {
     /// mark shift left with their line's text, stopping at column 0.
     fn do_unindent(&mut self) {
         let tabsize = self.options.tabsize.max(1) as usize;
-        let (mut top, bot) = self.line_range_for_indenting();
+        let (mut top, bot) = self.marked_line_range();
         while top <= bot && length_of_white(&self.buf().line(top), tabsize) == 0 {
             top += 1;
         }
@@ -774,6 +774,90 @@ impl Editor {
             } else {
                 p
             }
+        };
+        let cursor_after = shifted(self.buf().cursor);
+        let mark_after = self.buf().mark.map(shifted);
+        self.buf_mut()
+            .replace_lines(top, bot, &new_lines.join("\n"), cursor_after);
+        self.buf_mut().mark = mark_after;
+        self.shift_held = true;
+    }
+
+    /// `M-3` Comment/Uncomment: matches nano's `do_comment`. The comment
+    /// sequence is the language's (`LanguageDef::comment`; `#` with no
+    /// language; a `PREFIX|POSTFIX` pair brackets the line). If any
+    /// non-blank line in the range isn't already commented -- or all of
+    /// them are blank -- every line gets commented; otherwise the commented
+    /// ones get uncommented. The buffer's last line (nano's "magic line")
+    /// is never touched unless `nonewlines` is set, and selecting only it
+    /// is refused. One undo step; cursor and mark shift with their text.
+    fn do_comment(&mut self) {
+        let comment_seq = self.buf().language.map(|l| l.comment).unwrap_or("#");
+        if comment_seq.is_empty() {
+            self.set_status_mild("Commenting is not supported for this file type");
+            return;
+        }
+        let (pre, post) = comment_seq.split_once('|').unwrap_or((comment_seq, ""));
+        let pre_len = pre.chars().count();
+
+        let (top, bot) = self.marked_line_range();
+        let filebot = self.buf().line_count().saturating_sub(1);
+        let protect_last = !self.options.nonewlines;
+        if top == bot && bot == filebot && protect_last {
+            self.set_status_mild("Cannot comment past end of file");
+            return;
+        }
+        let untouchable = |i: usize| protect_last && i == filebot;
+
+        // Comment everything unless every non-blank line is already
+        // commented (and there is at least one non-blank line).
+        let mut add = false;
+        let mut all_blank = true;
+        for i in top..=bot {
+            let line = self.buf().line(i);
+            let blank = line.chars().all(|c| c == ' ' || c == '\t' || c == '\r');
+            if !blank && (untouchable(i) || !is_commented(&line, pre, post)) {
+                add = true;
+                break;
+            }
+            all_blank &= blank;
+        }
+        let add = add || all_blank;
+
+        let mut new_lines = Vec::with_capacity(bot - top + 1);
+        let mut changed = Vec::with_capacity(bot - top + 1);
+        for i in top..=bot {
+            let line = self.buf().line(i);
+            if untouchable(i) {
+                changed.push(false);
+                new_lines.push(line);
+            } else if add {
+                changed.push(true);
+                new_lines.push(format!("{pre}{line}{post}"));
+            } else if is_commented(&line, pre, post) {
+                changed.push(true);
+                let inner: String = line.chars().skip(pre_len).collect();
+                let keep = inner.chars().count() - post.chars().count();
+                new_lines.push(inner.chars().take(keep).collect());
+            } else {
+                changed.push(false);
+                new_lines.push(line);
+            }
+        }
+        if !changed.iter().any(|&c| c) {
+            return;
+        }
+        let shifted = |p: Pos| {
+            if !(top..=bot).contains(&p.line) || !changed[p.line - top] {
+                return p;
+            }
+            let col = if add {
+                if p.col > 0 { p.col + pre_len } else { 0 }
+            } else {
+                p.col.saturating_sub(pre_len)
+            };
+            // A removed postfix can leave a column past the new end.
+            Pos::new(p.line, col.min(new_lines[p.line - top].chars().count()))
         };
         let cursor_after = shifted(self.buf().cursor);
         let mark_after = self.buf().mark.map(shifted);
@@ -1687,6 +1771,13 @@ pub fn insert_prompt_label(new_buffer: bool, execute: bool) -> String {
 /// decide what `--view` blocks (with "Key is invalid in view mode")
 /// versus what it still allows (movement, search, Copy, Set Mark, the
 /// Insert-File prompt, ...).
+/// Whether `line` carries the comment sequence nano's way: `pre` at column
+/// 0 exactly (no leading whitespace allowed) and, for a bracketing
+/// sequence, `post` at the very end.
+fn is_commented(line: &str, pre: &str, post: &str) -> bool {
+    line.len() >= pre.len() + post.len() && line.starts_with(pre) && line.ends_with(post)
+}
+
 /// nano's `length_of_white()`: how much leading whitespace one unindent
 /// removes from `text` -- at most a tab's worth: up to `tabsize` spaces,
 /// or any spaces up to and including a tab.
@@ -2562,5 +2653,173 @@ mod tests {
         );
         assert_eq!(length_of_white("  ", 4), 2, "an all-blank short line");
         assert_eq!(length_of_white("", 4), 0);
+    }
+
+    // ----- Comment / Uncomment (nano's do_comment) -----
+
+    fn editor_for_language(text: &str, lang: &str) -> Editor {
+        let mut ed = test_editor(text);
+        ed.buf_mut().language =
+            Some(crate::syntax::find_by_name(lang).unwrap_or_else(|| panic!("no language {lang}")));
+        ed
+    }
+
+    #[test]
+    fn comment_uses_hash_when_the_buffer_has_no_language() {
+        let mut ed = test_editor("abc\n");
+        ed.buf_mut().cursor = Pos::new(0, 2);
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().line(0), "#abc");
+        assert_eq!(ed.buf().cursor, Pos::new(0, 3));
+        assert_eq!(ed.status, None);
+        assert!(ed.buf().modified);
+    }
+
+    #[test]
+    fn comment_uses_the_languages_sequence_and_toggles_back() {
+        let mut ed = editor_for_language("let x = 1;\n", "rust");
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().line(0), "//let x = 1;");
+        assert_eq!(
+            ed.buf().cursor,
+            Pos::new(0, 0),
+            "a cursor at column 0 stays"
+        );
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().line(0), "let x = 1;");
+    }
+
+    #[test]
+    fn comment_brackets_the_line_for_a_prefix_postfix_sequence() {
+        let mut ed = editor_for_language("<p>hi</p>\n", "html");
+        ed.buf_mut().cursor = Pos::new(0, 9);
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().line(0), "<!--<p>hi</p>-->");
+        assert_eq!(
+            ed.buf().cursor,
+            Pos::new(0, 13),
+            "shifted by the prefix only"
+        );
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().line(0), "<p>hi</p>");
+        assert_eq!(ed.buf().cursor, Pos::new(0, 9));
+    }
+
+    #[test]
+    fn uncomment_clamps_a_cursor_left_stranded_by_the_removed_postfix() {
+        let mut ed = editor_for_language("<!--x-->\n", "html");
+        ed.buf_mut().cursor = Pos::new(0, 8);
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().line(0), "x");
+        assert_eq!(ed.buf().cursor, Pos::new(0, 1));
+    }
+
+    #[test]
+    fn comment_is_refused_for_a_language_without_one() {
+        let mut ed = editor_for_language("{}\n", "json");
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().line(0), "{}");
+        assert_eq!(
+            ed.status.as_deref(),
+            Some("Commenting is not supported for this file type")
+        );
+        assert!(!ed.buf().modified);
+    }
+
+    #[test]
+    fn comment_refuses_the_magic_last_line_alone_but_skips_it_in_a_range() {
+        let mut ed = test_editor("one\ntwo\n");
+        ed.buf_mut().cursor = Pos::new(2, 0);
+        ed.execute(Action::Comment);
+        assert_eq!(
+            ed.status.as_deref(),
+            Some("Cannot comment past end of file")
+        );
+        assert_eq!(ed.buf().to_string(), "one\ntwo\n");
+
+        ed.status = None;
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(2, 0);
+        ed.also_the_last = true; // make the range reach the last line
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().to_string(), "#one\n#two\n", "last line left alone");
+        assert_eq!(ed.status, None);
+    }
+
+    #[test]
+    fn comment_touches_the_last_line_under_nonewlines() {
+        let mut ed = test_editor("one");
+        ed.options.nonewlines = true;
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().to_string(), "#one");
+    }
+
+    #[test]
+    fn mixed_range_gets_commented_and_fully_commented_range_uncommented() {
+        let mut ed = test_editor("#one\ntwo\n\nthree\n");
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(3, 5);
+        ed.execute(Action::Comment);
+        assert_eq!(
+            ed.buf().to_string(),
+            "##one\n#two\n#\n#three\n",
+            "one uncommented line means comment all, blank lines included"
+        );
+        assert_eq!(ed.buf().cursor, Pos::new(3, 6));
+        assert_eq!(ed.buf().mark, Some(Pos::new(0, 0)));
+
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().to_string(), "#one\ntwo\n\nthree\n");
+        assert_eq!(ed.buf().cursor, Pos::new(3, 5));
+    }
+
+    #[test]
+    fn uncomment_leaves_blank_lines_alone_and_only_strips_column_zero_prefixes() {
+        let mut ed = test_editor("#one\n\n#two\n");
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(2, 4);
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().to_string(), "one\n\ntwo\n");
+
+        // An indented "#" isn't a comment prefix to nano, so this line
+        // counts as uncommented and the range gets commented instead.
+        let mut ed = test_editor("#one\n  #two\n");
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(1, 6);
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().to_string(), "##one\n#  #two\n");
+    }
+
+    #[test]
+    fn all_blank_range_gets_commented() {
+        let mut ed = test_editor("\n  \nx\n");
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(2, 0);
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().to_string(), "#\n#  \nx\n");
+    }
+
+    #[test]
+    fn comment_is_a_single_undo_step() {
+        let mut ed = editor_for_language("a\nb\nc\n", "c");
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(2, 1);
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().to_string(), "//a\n//b\n//c\n");
+        ed.execute(Action::Undo);
+        assert_eq!(ed.buf().to_string(), "a\nb\nc\n");
+        assert_eq!(ed.buf().cursor, Pos::new(2, 1));
+        ed.execute(Action::Redo);
+        assert_eq!(ed.buf().to_string(), "//a\n//b\n//c\n");
+        assert_eq!(ed.buf().cursor, Pos::new(2, 3));
+    }
+
+    #[test]
+    fn comment_is_blocked_in_view_mode() {
+        let mut ed = test_editor("one\n");
+        ed.options.view = true;
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().to_string(), "one\n");
+        assert_eq!(ed.status.as_deref(), Some("Key is invalid in view mode"));
     }
 }

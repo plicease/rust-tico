@@ -9,7 +9,6 @@ Syntax highlighting is intentionally *not* nano-compatible; see
 
 ## Bound keys that report "not yet implemented"
 
-- [ ] Comment toggle (`M-3`)
 - [ ] Word completion (`^]`)
 - [ ] Paragraph navigation: begin/end of paragraph (`M-(` / `M-)`, `M-9` / `M-0`)
 - [ ] Block navigation: previous/next block (`^Up` / `^Down`, `M-7` / `M-8`)
