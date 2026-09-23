@@ -161,6 +161,10 @@ pub fn highlight(text: &str, lang: &'static LanguageDef) -> Vec<HighlightSpan> {
     inject_perl_heredocs(&heredocs, text, lang.name, &mut spans);
     inject_tree_heredocs(&tree, text, &mut spans);
 
+    // Perl `__DATA__` laid out as `@@ name` parts: highlight each part with
+    // the language its name would get as a file.
+    inject_data_sections(&tree, text, &mut spans);
+
     // Varnish inline C: highlight the body of a `C{ ... }C` block with the C
     // grammar instead of leaving it one flat string.
     inject_inline_c(&tree, text, &mut spans);
@@ -481,6 +485,135 @@ fn find_heredoc_terminator(
     }
     None
 }
+/// Perl `__DATA__`/`__END__` sections (`data_not_for_compiler`; no other
+/// vendored grammar produces that kind, so this is a no-op elsewhere) in
+/// the layout Mojo::Loader, Data::Section::Simple and
+/// Data::Section::Pluggable read: each `@@ name` line starts a named part
+/// that runs to the next such line. A part is highlighted with whatever
+/// language its name would get as a file (`@@ hello.json` as JSON), or
+/// left plain when the name says nothing, or when it carries a `(base64)`
+/// encoding as in `@@ hello.bin (base64)`, since the text isn't the data.
+/// Text before the first `@@` line is plain, and an `__END__` line ends
+/// the data section as it does for those modules. The `@@`, the name and
+/// the encoding are colored as the markers they are.
+fn inject_data_sections(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<HighlightSpan>) {
+    let mut sections = Vec::new();
+    collect_by_kind(tree.root_node(), "data_not_for_compiler", &mut sections);
+    if sections.is_empty() {
+        return;
+    }
+    let marker = Scope::intern("punctuation.special");
+    let path = Scope::intern("string.special.path");
+    let encoding = Scope::intern("keyword.directive");
+    for section in sections {
+        let (start, end) = (section.start_byte(), section.end_byte().min(text.len()));
+        if end <= start {
+            continue;
+        }
+        let parts = data_section_parts(text, start, end);
+        for (i, part) in parts.iter().enumerate() {
+            let body_end = parts.get(i + 1).map_or(part.end, |next| next.line_start);
+            spans.push(HighlightSpan {
+                start: part.line_start,
+                end: part.line_start + 2,
+                scope: marker,
+                language: "perl",
+            });
+            spans.push(HighlightSpan {
+                start: part.name_start,
+                end: part.name_end,
+                scope: path,
+                language: "perl",
+            });
+            if let Some((enc_start, enc_end)) = part.encoding {
+                spans.push(HighlightSpan {
+                    start: enc_start,
+                    end: enc_end,
+                    scope: encoding,
+                    language: "perl",
+                });
+                continue;
+            }
+            let name = std::path::Path::new(&text[part.name_start..part.name_end]);
+            let body = &text[part.body_start..body_end];
+            if let Some(lang) = languages::detect(Some(name), body) {
+                inject_range(text, spans, part.body_start, body_end, lang);
+            }
+        }
+    }
+}
+
+/// One `@@ name` part of a data section, as byte offsets into the buffer.
+struct DataSectionPart {
+    /// Where the `@@ name` line starts (its `@@`).
+    line_start: usize,
+    name_start: usize,
+    name_end: usize,
+    /// The `(base64)` after the name, when present.
+    encoding: Option<(usize, usize)>,
+    /// The line after the header; the body runs from here to the next
+    /// part's `line_start`, or to `end` for the last part.
+    body_start: usize,
+    end: usize,
+}
+
+/// The `@@ name` parts of `text[start..end]`, following
+/// Data::Section::Pluggable's `^@@\s+(.+?)\s*\r?\n` split and its
+/// `^(.*)\s+\((.*?)\)$` split of the name from an encoding. The parts
+/// stop at a line that is exactly `__END__`.
+fn data_section_parts(text: &str, start: usize, end: usize) -> Vec<DataSectionPart> {
+    let mut parts = Vec::new();
+    let mut end = end;
+    let mut pos = start;
+    while pos < end {
+        let line_end = text[pos..end].find('\n').map_or(end, |i| pos + i);
+        let next = (line_end + 1).min(end);
+        let line = text[pos..line_end]
+            .strip_suffix('\r')
+            .unwrap_or(&text[pos..line_end]);
+        if line == "__END__" {
+            end = pos;
+            break;
+        }
+        if let Some(rest) = line.strip_prefix("@@")
+            && rest.starts_with(char::is_whitespace)
+        {
+            let name_all = rest.trim();
+            if name_all.is_empty() {
+                pos = next;
+                continue;
+            }
+            let name_start = pos + 2 + (rest.len() - rest.trim_start().len());
+            let name_all_end = name_start + name_all.len();
+            let (name_end, encoding) = match name_all
+                .strip_suffix(')')
+                .and_then(|s| s.rfind('('))
+                .filter(|&i| i > 0 && name_all[..i].ends_with(char::is_whitespace))
+            {
+                Some(i) => (
+                    name_start + name_all[..i].trim_end().len(),
+                    Some((name_start + i, name_all_end)),
+                ),
+                None => (name_all_end, None),
+            };
+            parts.push(DataSectionPart {
+                line_start: pos,
+                name_start,
+                name_end,
+                encoding,
+                body_start: next,
+                end,
+            });
+        }
+        pos = next;
+    }
+    for part in &mut parts {
+        part.end = end;
+        part.body_start = part.body_start.min(end);
+    }
+    parts
+}
+
 /// VCL-specific: the vendored VCL grammar lexes a Varnish `C{ ... }C` block
 /// as a single `inline_c` token (its query colors it as a string as a
 /// fallback). Re-highlight the body with the C grammar and color the two
@@ -1395,6 +1528,122 @@ mod tests {
                 .iter()
                 .any(|s| s.start == x && s.end == x + 3 && s.scope.name() == "string"),
             "'x' should be a string: {spans:?}"
+        );
+    }
+
+    /// A `__DATA__` section laid out as `@@ name` parts (Mojo::Loader,
+    /// Data::Section::Simple, Data::Section::Pluggable): each part is
+    /// highlighted as the file its name suggests, a `(base64)` part and a
+    /// part with an unknown extension stay plain, and the markers on the
+    /// `@@` lines are colored.
+    #[test]
+    fn data_section_parts_are_highlighted_by_name() {
+        let src = concat!(
+            "print \"hi\";\n",
+            "__DATA__\n",
+            "\n",
+            "@@ hello.txt\n",
+            "  Welcome to Perl\n",
+            "\n",
+            "@@ hello.json\n",
+            "{\"message\":\"Welcome to Perl\"}\n",
+            "\n",
+            "@@ hello.bin (base64)\n",
+            "VGhpcyBpcyBiYXNlNjQgZW5jb2RlZC4K\n",
+        );
+        let lang = languages::detect(Some(std::path::Path::new("a.pl")), src).unwrap();
+        let spans = highlight(src, lang);
+        let exact = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| (s.scope.name().to_string(), s.language))
+                .next_back()
+        };
+        assert_eq!(
+            exact("__DATA__"),
+            Some(("keyword.directive".to_string(), "perl"))
+        );
+        assert_eq!(
+            exact("@@"),
+            Some(("punctuation.special".to_string(), "perl"))
+        );
+        assert_eq!(
+            exact("hello.txt"),
+            Some(("string.special.path".to_string(), "perl"))
+        );
+        assert_eq!(
+            exact("hello.bin"),
+            Some(("string.special.path".to_string(), "perl"))
+        );
+        assert_eq!(
+            exact("(base64)"),
+            Some(("keyword.directive".to_string(), "perl"))
+        );
+        assert_eq!(exact("\"message\""), Some(("string".to_string(), "json")));
+
+        // JSON spans stay inside the JSON part; the text and base64 parts
+        // get no spans at all beyond their header lines.
+        let json_body = src.find("{\"message\"").unwrap();
+        let json_end = src.find("@@ hello.bin").unwrap();
+        assert!(
+            spans
+                .iter()
+                .filter(|s| s.language == "json")
+                .all(|s| s.start >= json_body && s.end <= json_end),
+            "json span outside its part: {spans:?}"
+        );
+        for body in ["  Welcome to Perl", "VGhpcyBpcyBiYXNlNjQgZW5jb2RlZC4K"] {
+            let start = src.find(body).unwrap();
+            let end = start + body.len();
+            assert!(
+                !spans.iter().any(|s| s.start < end && s.end > start),
+                "{body:?} should be plain: {spans:?}"
+            );
+        }
+    }
+
+    /// `__END__` opens a data section too, text before the first `@@` is
+    /// plain, and an `__END__` line inside the section ends it, as it does
+    /// for Data::Section::Pluggable. The other special literals are
+    /// colored as the compile-time constants they are.
+    #[test]
+    fn data_section_after_end_marker_stops_at_inner_end_marker() {
+        let src = concat!(
+            "my $f = __FILE__;\n",
+            "__END__\n",
+            "ignored 'text'\n",
+            "@@ a.sql\n",
+            "SELECT 1;\n",
+            "__END__\n",
+            "@@ c.json\n",
+            "{\"x\":1}\n",
+        );
+        let lang = languages::detect(Some(std::path::Path::new("a.pl")), src).unwrap();
+        let spans = highlight(src, lang);
+        let exact = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| (s.scope.name().to_string(), s.language))
+                .next_back()
+        };
+        assert_eq!(
+            exact("__FILE__"),
+            Some(("constant.builtin".to_string(), "perl"))
+        );
+        assert_eq!(
+            exact("__END__"),
+            Some(("keyword.directive".to_string(), "perl"))
+        );
+        assert_eq!(exact("SELECT"), Some(("keyword".to_string(), "sql")));
+        assert_eq!(exact("'text'"), None);
+        let after = src.find("@@ c.json").unwrap();
+        assert!(
+            !spans.iter().any(|s| s.start >= after),
+            "nothing after the inner __END__ is part of the data: {spans:?}"
         );
     }
 

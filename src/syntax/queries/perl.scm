@@ -15,6 +15,12 @@
 (heredoc_start_identifier) @string
 (heredoc_end_identifier) @string
 
+; `__DATA__`/`__END__` open a data section (highlighted by tico's own
+; `inject_data_sections`, part by part, when it is laid out as `@@ name`
+; parts); the others stand for a compile-time value.
+(special_literal ["__DATA__" "__END__"] @keyword.directive)
+(special_literal ["__FILE__" "__LINE__" "__PACKAGE__" "__SUB__"] @constant.builtin)
+
 (regex_pattern_qr) @string.special
 (pattern_matcher_m) @string.special
 (regex_pattern_content) @string.special
