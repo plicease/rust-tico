@@ -569,14 +569,15 @@ impl Editor {
             Verbatim => {}
             RecordMacro | RunMacro => self.set_status("macros: not yet implemented"),
             Refresh => {}
-            Suspend => self.set_status("suspend: not supported in this build"),
+            SuggestSuspend => self.suggest_ctrl_t_ctrl_z(),
             Execute => self.begin_execute(),
             // Speller/Formatter/Linter need to run an external process (and,
             // for the alt-speller/formatter, hand the terminal over to it),
+            // and Suspend hands the terminal back to the shell outright --
             // which this UI-agnostic dispatcher can't do — ui.rs's
             // apply_binding/apply_prompt_action intercept them before they
             // would ever reach here.
-            Speller | Formatter | Linter => {}
+            Speller | Formatter | Linter | Suspend => {}
             NoHelp => self.options.nohelp = !self.options.nohelp,
             Zero => self.options.zero = !self.options.zero,
             ConstantShow => self.options.constantshow = !self.options.constantshow,
@@ -865,6 +866,27 @@ impl Editor {
             .replace_lines(top, bot, &new_lines.join("\n"), cursor_after);
         self.buf_mut().mark = mark_after;
         self.shift_held = true;
+    }
+
+    /// Plain `^Z` in the main menu: nano's `suggest_ctrlT_ctrlZ`. Tells the
+    /// user how suspension actually works -- but only while the keys the
+    /// hint names still do that (`^T` is Execute in the main menu and `^Z`
+    /// is Suspend in the Execute menu); with either rebound nano says
+    /// nothing rather than give a wrong hint. AHEM-level in nano: the
+    /// error coloring, no bell.
+    fn suggest_ctrl_t_ctrl_z(&mut self) {
+        use crate::keymap::{Binding, Key};
+        let ctrl_t_executes = matches!(
+            self.keymap.lookup(Menu::Main, Key::Ctrl('T')),
+            Some(Binding::Action(Action::Execute))
+        );
+        let ctrl_z_suspends = matches!(
+            self.keymap.lookup(Menu::Execute, Key::Ctrl('Z')),
+            Some(Binding::Action(Action::Suspend))
+        );
+        if ctrl_t_executes && ctrl_z_suspends {
+            self.set_status_mild("To suspend, type ^T^Z");
+        }
     }
 
     /// The marked region, normalized to (earlier, later) regardless of
@@ -2821,5 +2843,59 @@ mod tests {
         ed.execute(Action::Comment);
         assert_eq!(ed.buf().to_string(), "one\n");
         assert_eq!(ed.status.as_deref(), Some("Key is invalid in view mode"));
+    }
+
+    // ----- Suspend hint (nano's suggest_ctrlT_ctrlZ) -----
+
+    fn editor_with_default_keys(modern: bool) -> Editor {
+        let mut ed = test_editor("x");
+        ed.keymap = KeyMap::defaults(modern);
+        ed
+    }
+
+    #[test]
+    fn plain_ctrl_z_hints_at_ctrl_t_ctrl_z_with_the_default_keys() {
+        use crate::keymap::{Binding, Key};
+        let mut ed = editor_with_default_keys(false);
+        assert!(matches!(
+            ed.keymap.lookup(Menu::Main, Key::Ctrl('Z')),
+            Some(Binding::Action(Action::SuggestSuspend))
+        ));
+        assert!(matches!(
+            ed.keymap.lookup(Menu::Execute, Key::Ctrl('Z')),
+            Some(Binding::Action(Action::Suspend))
+        ));
+        ed.execute(Action::SuggestSuspend);
+        assert_eq!(ed.status.as_deref(), Some("To suspend, type ^T^Z"));
+        assert!(matches!(ed.status_level, StatusLevel::Mild));
+        assert!(!ed.bell_pending, "AHEM in nano: no beep");
+    }
+
+    #[test]
+    fn modern_bindings_put_undo_on_ctrl_z_instead_of_the_hint() {
+        use crate::keymap::{Binding, Key};
+        let ed = editor_with_default_keys(true);
+        assert!(matches!(
+            ed.keymap.lookup(Menu::Main, Key::Ctrl('Z')),
+            Some(Binding::Action(Action::Undo))
+        ));
+    }
+
+    #[test]
+    fn suspend_hint_is_withheld_once_either_key_is_rebound() {
+        use crate::keymap::{Binding, Key};
+        let mut ed = editor_with_default_keys(false);
+        ed.keymap.bind(
+            Menu::Main,
+            Key::Ctrl('T'),
+            Binding::Action(Action::GotoLine),
+        );
+        ed.execute(Action::SuggestSuspend);
+        assert_eq!(ed.status, None, "^T no longer opens the Execute menu");
+
+        let mut ed = editor_with_default_keys(false);
+        ed.keymap.unbind(Menu::Execute, Key::Ctrl('Z'));
+        ed.execute(Action::SuggestSuspend);
+        assert_eq!(ed.status, None, "^Z no longer suspends from that menu");
     }
 }

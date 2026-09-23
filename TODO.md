@@ -23,7 +23,6 @@ Syntax highlighting is intentionally *not* nano-compatible; see
 - [ ] Cut Till End (`^V`) from the Execute menu
 - [ ] Full Justify (`^J`) from the Execute menu — main-menu `M-J` already
       works; this path is stubbed separately in `src/ui.rs`
-- [ ] Suspend (`^Z`) — currently "not supported in this build"
 
 ## Bound keys that silently do nothing
 

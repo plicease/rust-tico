@@ -415,6 +415,9 @@ fn apply_binding(editor: &mut Editor, binding: Binding) {
         Binding::Action(Action::Speller) => run_speller(editor),
         Binding::Action(Action::Formatter) => run_formatter(editor),
         Binding::Action(Action::Linter) => run_linter(editor),
+        // Only reachable via a `bind ... suspend main` in nanorc: nano's
+        // default main-menu ^Z is the ^T^Z hint (Action::SuggestSuspend).
+        Binding::Action(Action::Suspend) => suspend_editor(editor),
         Binding::Action(action) => editor.execute(action),
         Binding::Macro(text) => {
             // Literal-string bindings; `{function}` substitution is not yet
@@ -736,9 +739,11 @@ fn apply_prompt_action(editor: &mut Editor, prompt: &mut Prompt, action: Action)
             editor.set_status("Pipe Text: not yet implemented");
             true
         }
+        // `^Z` from the Execute prompt: the real thing. Like the tools
+        // above, nano's `ran_a_tool` closes the prompt first.
         Action::Suspend => {
             editor.mode = Mode::Editing;
-            editor.set_status("suspend: not supported in this build");
+            suspend_editor(editor);
             true
         }
         _ => false,
@@ -1406,6 +1411,47 @@ fn run_suspended(mut cmd: std::process::Command) -> io::Result<std::process::Exi
         Clear(ClearType::All)
     );
     result
+}
+
+/// `^T^Z` Suspend: matches nano's `do_suspend`/`suspend_nano`. Hand the
+/// terminal back (leave the alternate screen and raw mode, show the
+/// cursor), print the same reminder nano prints, then stop our whole
+/// process group with SIGSTOP the way nano (and mutt) do, so the shell's
+/// job control takes over. When the shell resumes us (`fg`), execution
+/// carries on right here: back into raw mode and the alternate screen with
+/// a full repaint, and the terminal size re-read since the window may have
+/// changed meanwhile (nano's `continue_nano` flags a resize for the same
+/// reason).
+///
+/// Only the keystroke path is covered: crossterm's raw mode turns off the
+/// terminal's ISIG, so a typed ^Z arrives as a key rather than a SIGTSTP,
+/// and nano's SIGTSTP/SIGCONT handlers (for a `kill -TSTP` from outside)
+/// have no equivalent here.
+fn suspend_editor(editor: &mut Editor) {
+    // nano comes back with a blank status bar (its `lastmessage = HUSH`),
+    // not whatever was showing before the ^T prompt replaced it.
+    editor.status = None;
+    let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+    let _ = disable_raw_mode();
+    println!("\n\nUse \"fg\" to return to tico.");
+    let _ = io::stdout().flush();
+
+    let stopped = rustix::process::kill_current_process_group(rustix::process::Signal::STOP);
+
+    let _ = enable_raw_mode();
+    let _ = execute!(
+        io::stdout(),
+        EnterAlternateScreen,
+        Hide,
+        Clear(ClearType::All)
+    );
+    if let Ok((cols, rows)) = size() {
+        editor.screen_cols = cols as usize;
+        editor.screen_rows = rows as usize;
+    }
+    if let Err(e) = stopped {
+        editor.set_status_alert(format!("Could not suspend: {e}"));
+    }
 }
 
 /// `^T` Execute Command's submit: run `text` in the shell, and insert its
@@ -2437,9 +2483,9 @@ const INSERT_SHORTCUTS: &[(Action, &str)] = &[
 
 /// The `^T` Execute Command prompt's shortcut list, matching nano's full
 /// MEXECUTE menu (confirmed against the installed nano's own bottom bar).
-/// Full Justify (`^J`), Cut Till End (`^V`), Pipe Text (`M-\`), and Suspend
-/// (`^Z`) aren't actually implemented yet — see apply_prompt_action's
-/// arms for them — but are still listed rather than silently omitted.
+/// Full Justify (`^J`), Cut Till End (`^V`), and Pipe Text (`M-\`) aren't
+/// actually implemented yet — see apply_prompt_action's arms for them —
+/// but are still listed rather than silently omitted.
 const EXECUTE_SHORTCUTS: &[(Action, &str)] = &[
     (Action::Help, "Help"),
     (Action::Cancel, "Cancel"),
