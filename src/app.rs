@@ -583,7 +583,16 @@ impl Editor {
             ConstantShow => self.options.constantshow = !self.options.constantshow,
             SoftWrap => self.options.softwrap = !self.options.softwrap,
             LineNumbers => self.options.linenumbers = !self.options.linenumbers,
-            WhitespaceDisplay => {}
+            WhitespaceDisplay => {
+                self.options.whitespacedisplay = !self.options.whitespacedisplay;
+                // nano's do_toggle reports every flag flip this way; tico
+                // does so for this one (the others are still silent).
+                self.set_status(if self.options.whitespacedisplay {
+                    "Whitespace display enabled"
+                } else {
+                    "Whitespace display disabled"
+                });
+            }
             NoSyntax => self.options.syntax_highlighting = !self.options.syntax_highlighting,
             SmartHome => self.options.smarthome = !self.options.smarthome,
             AutoIndent => self.options.autoindent = !self.options.autoindent,
@@ -2916,5 +2925,18 @@ mod tests {
         ed.keymap.unbind(Menu::Execute, Key::Ctrl('Z'));
         ed.execute(Action::SuggestSuspend);
         assert_eq!(ed.status, None, "^Z no longer suspends from that menu");
+    }
+
+    #[test]
+    fn whitespace_display_toggle_reports_like_nanos_do_toggle() {
+        let mut ed = test_editor("x");
+        assert!(!ed.options.whitespacedisplay);
+        ed.execute(Action::WhitespaceDisplay);
+        assert!(ed.options.whitespacedisplay);
+        assert_eq!(ed.status.as_deref(), Some("Whitespace display enabled"));
+        assert!(matches!(ed.status_level, StatusLevel::Normal));
+        ed.execute(Action::WhitespaceDisplay);
+        assert!(!ed.options.whitespacedisplay);
+        assert_eq!(ed.status.as_deref(), Some("Whitespace display disabled"));
     }
 }

@@ -2378,7 +2378,11 @@ fn render_status_line(
         // nano's promptcolor defaults to the title bar's colors (reverse
         // video), confirmed against the installed nano's own escape-code
         // output for both the Search and WriteOut prompts.
-        let text = format!("{}: {}", prompt.label, prompt.input);
+        let text = format!(
+            "{}: {}",
+            prompt.label,
+            prompt_input_for_display(editor, &prompt.input)
+        );
         let mut s: String = text.chars().take(cols).collect();
         while s.chars().count() < cols {
             s.push(' ');
@@ -2812,6 +2816,10 @@ fn render_buffer(
     let gutter = editor.gutter_width();
     let cols = editor.screen_cols;
     let tabsize = editor.options.tabsize as usize;
+    let whitespace = editor
+        .options
+        .whitespacedisplay
+        .then_some(editor.options.whitespace);
 
     // Memoized on the buffer itself, invalidated only by an actual edit or
     // language change (see `Buffer::highlighted_spans_cached`) -- a full
@@ -2863,7 +2871,8 @@ fn render_buffer(
             let line_start = buf.line_start_byte(line_idx);
             let char_styles = map_spans_to_line(&raw, line_start, &spans, editor);
 
-            let (expanded, expanded_styles) = expand_tabs_with_styles(&raw, &char_styles, tabsize);
+            let (expanded, expanded_styles) =
+                expand_tabs_with_styles(&raw, &char_styles, tabsize, whitespace);
             rendered.push_str(&expanded);
             styles.extend(expanded_styles);
 
@@ -3187,11 +3196,16 @@ fn map_spans_to_line(
 
 /// Like tab expansion alone, but carries each source character's syntax
 /// style along to every column it expands to, so a tab adjacent to a
-/// highlighted token doesn't break the highlighting.
+/// highlighted token doesn't break the highlighting. With `whitespace`
+/// (the `set whitespace` pair, passed when `whitespacedisplay` is on) a
+/// tab shows as its marker followed by the usual fill to the next tab
+/// stop, and a space as its marker -- nano's `display_string`, whose
+/// markers take exactly the columns the blanks did.
 fn expand_tabs_with_styles(
     line: &str,
     styles: &[Option<Style>],
     tabsize: usize,
+    whitespace: Option<(char, char)>,
 ) -> (String, Vec<Option<Style>>) {
     let mut out = String::new();
     let mut out_styles = Vec::new();
@@ -3199,11 +3213,17 @@ fn expand_tabs_with_styles(
     for (c, k) in line.chars().zip(styles.iter().copied()) {
         if c == '\t' {
             let n = tabsize - (w % tabsize);
-            for _ in 0..n {
+            out.push(whitespace.map_or(' ', |(tab, _)| tab));
+            out_styles.push(k);
+            for _ in 1..n {
                 out.push(' ');
                 out_styles.push(k);
             }
             w += n;
+        } else if c == ' ' {
+            out.push(whitespace.map_or(' ', |(_, space)| space));
+            out_styles.push(k);
+            w += 1;
         } else {
             out.push(c);
             out_styles.push(k);
@@ -3211,6 +3231,19 @@ fn expand_tabs_with_styles(
         }
     }
     (out, out_styles)
+}
+
+/// Prompt input with whitespace made visible when `whitespacedisplay` is
+/// on -- nano runs the answer through the same `display_string` as the
+/// edit rows, so `Search: a·b` there too (only status messages are
+/// exempt).
+fn prompt_input_for_display(editor: &Editor, input: &str) -> String {
+    if !editor.options.whitespacedisplay {
+        return input.to_string();
+    }
+    let styles = vec![None; input.chars().count()];
+    let tabsize = editor.options.tabsize as usize;
+    expand_tabs_with_styles(input, &styles, tabsize, Some(editor.options.whitespace)).0
 }
 
 /// Highlight `body` (already-split lines of a unified diff) with the
@@ -4033,5 +4066,31 @@ mod tests {
         );
         std::fs::remove_file(&path).ok();
         std::fs::remove_file(&unix_path).ok();
+    }
+
+    #[test]
+    fn whitespace_display_substitutes_markers_without_changing_widths() {
+        let styles = vec![None; 6];
+        let (plain, plain_styles) = expand_tabs_with_styles("a\tb c ", &styles, 8, None);
+        assert_eq!(plain, "a       b c ");
+        let (marked, marked_styles) =
+            expand_tabs_with_styles("a\tb c ", &styles, 8, Some(('\u{bb}', '\u{b7}')));
+        assert_eq!(
+            marked, "a\u{bb}      b\u{b7}c\u{b7}",
+            "as nano 8.7.1 renders it"
+        );
+        assert_eq!(marked.chars().count(), plain.chars().count());
+        assert_eq!(marked_styles.len(), plain_styles.len());
+
+        let (t, _) = expand_tabs_with_styles("\tx", &[None, None], 4, Some(('>', '.')));
+        assert_eq!(t, ">   x", "a tab at a stop still fills to the next one");
+    }
+
+    #[test]
+    fn prompt_input_shows_markers_only_while_whitespace_display_is_on() {
+        let mut ed = test_editor("");
+        assert_eq!(prompt_input_for_display(&ed, "a b"), "a b");
+        ed.options.whitespacedisplay = true;
+        assert_eq!(prompt_input_for_display(&ed, "a b"), "a\u{b7}b");
     }
 }

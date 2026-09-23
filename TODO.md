@@ -28,8 +28,11 @@ here.
 
 - [ ] Verbatim input (`M-V`)
 - [ ] Center (`^L`) / Cycle (`M-%`)
-- [ ] Whitespace display toggle (`M-P`)
 - [ ] Scroll left / right (`M-<` / `M->`)
+- [ ] The other `M-` toggles (`M-S` soft wrap, `M-N` line numbers, `M-X`
+      help lines, ...) flip their option but don't show nano's
+      "<Feature> enabled/disabled" message; only `M-P` whitespace display
+      reports
 - [ ] Write Out prompt toggles: Append (`M-A`), Prepend (`M-P`), Backup
       (`M-B`) — bound and shown in the bar but no handler in
       `apply_prompt_action`
@@ -50,7 +53,6 @@ here.
 - [ ] `jumpyscrolling`
 - [ ] `emptyline`
 - [ ] `rawsequences`
-- [ ] `whitespace`
 - [ ] `atblanks`
 - [ ] `afterends`
 - [ ] `minibar` — shrinks the layout but the minibar itself is never drawn

@@ -107,7 +107,14 @@ pub struct Options {
     pub quotestr: String,
     pub speller: Option<String>,
     pub tabsize: u32,
+    /// `set whitespace "TS"`: the two single-column characters that
+    /// `whitespacedisplay` shows in place of a tab (first, followed by
+    /// the usual fill to the next tab stop) and a space (second). nano's
+    /// UTF-8 defaults: U+00BB » and U+00B7 ·.
     pub whitespace: (char, char),
+    /// `set whitespacedisplay` / `M-P`: show tabs and spaces as the
+    /// `whitespace` characters in the edit window and prompt input.
+    pub whitespacedisplay: bool,
     pub wordchars: Option<String>,
 
     // Colors.
@@ -211,7 +218,8 @@ impl Default for Options {
             quotestr: "^([ \t]*([!#%:;>|}]|//))+".to_string(),
             speller: None,
             tabsize: 8,
-            whitespace: ('\u{bb}', '\u{22c5}'),
+            whitespace: ('\u{bb}', '\u{b7}'),
+            whitespacedisplay: false,
             wordchars: None,
 
             errorcolor: ColorPair {
