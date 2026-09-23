@@ -196,6 +196,18 @@ pub struct Editor {
     pub language_themes: std::collections::HashMap<String, crate::theme::Theme>,
     pub cutbuffer: String,
     pub cut_was_consecutive: bool,
+    /// nano's `also_the_last`: whether a marked region that ends exactly
+    /// at column 0 should nonetheless include that last line when
+    /// indenting/unindenting/commenting. Set once such an action has run on a region
+    /// that *did* reach into its last line, and cleared as soon as the
+    /// cursor moves to another line -- so repeated `M-}`/`M-{` presses
+    /// keep acting on the same set of lines. See `marked_line_range`.
+    pub also_the_last: bool,
+    /// nano's `shift_held`: an action that moves the cursor/mark columns
+    /// but wants a soft (Shift-selected) mark kept anyway -- indent,
+    /// unindent and comment -- sets this, and ui.rs's post-keystroke soft-mark drop
+    /// skips that keystroke. Cleared before each keystroke is handled.
+    pub shift_held: bool,
     pub search: SearchState,
     pub status: Option<String>,
     pub status_level: StatusLevel,
@@ -267,6 +279,8 @@ impl Editor {
             language_themes: std::collections::HashMap::new(),
             cutbuffer: String::new(),
             cut_was_consecutive: false,
+            also_the_last: false,
+            shift_held: false,
             search,
             status: None,
             status_level: StatusLevel::Normal,
@@ -463,6 +477,7 @@ impl Editor {
         if !matches!(action, Cut | CutRestOfFile) {
             self.cut_was_consecutive = false;
         }
+        let was_line = self.buffers.get(self.current).map(|b| b.cursor.line);
         match action {
             Help => {
                 let lines = crate::help::build(Menu::Main, &self.keymap, self.screen_cols);
@@ -536,9 +551,9 @@ impl Editor {
             Complete => self.set_status("complete: not yet implemented"),
             Justify => self.run_justify(false),
             FullJustify => self.run_justify(true),
-            Indent => self.set_status("indent: not yet implemented"),
-            Unindent => self.set_status("unindent: not yet implemented"),
-            Comment => self.set_status("comment: not yet implemented"),
+            Indent => self.do_indent(),
+            Unindent => self.do_unindent(),
+            Comment => self.do_comment(),
             Center => {}
             Cycle => {}
             ScrollUp => self.scroll_view(-1),
@@ -554,20 +569,30 @@ impl Editor {
             Verbatim => {}
             RecordMacro | RunMacro => self.set_status("macros: not yet implemented"),
             Refresh => {}
-            Suspend => self.set_status("suspend: not supported in this build"),
+            SuggestSuspend => self.suggest_ctrl_t_ctrl_z(),
             Execute => self.begin_execute(),
             // Speller/Formatter/Linter need to run an external process (and,
             // for the alt-speller/formatter, hand the terminal over to it),
+            // and Suspend hands the terminal back to the shell outright --
             // which this UI-agnostic dispatcher can't do — ui.rs's
             // apply_binding/apply_prompt_action intercept them before they
             // would ever reach here.
-            Speller | Formatter | Linter => {}
+            Speller | Formatter | Linter | Suspend => {}
             NoHelp => self.options.nohelp = !self.options.nohelp,
             Zero => self.options.zero = !self.options.zero,
             ConstantShow => self.options.constantshow = !self.options.constantshow,
             SoftWrap => self.options.softwrap = !self.options.softwrap,
             LineNumbers => self.options.linenumbers = !self.options.linenumbers,
-            WhitespaceDisplay => {}
+            WhitespaceDisplay => {
+                self.options.whitespacedisplay = !self.options.whitespacedisplay;
+                // nano's do_toggle reports every flag flip this way; tico
+                // does so for this one (the others are still silent).
+                self.set_status(if self.options.whitespacedisplay {
+                    "Whitespace display enabled"
+                } else {
+                    "Whitespace display disabled"
+                });
+            }
             NoSyntax => self.options.syntax_highlighting = !self.options.syntax_highlighting,
             SmartHome => self.options.smarthome = !self.options.smarthome,
             AutoIndent => self.options.autoindent = !self.options.autoindent,
@@ -584,6 +609,11 @@ impl Editor {
         // closed the last buffer and set Mode::Quit; nothing left to
         // scroll in that case.
         if !self.buffers.is_empty() {
+            // nano resets its "last line too" flag whenever the current
+            // line changes (see the end of its `process_a_keystroke`).
+            if Some(self.buf().cursor.line) != was_line {
+                self.also_the_last = false;
+            }
             self.scroll_to_cursor();
         }
     }
@@ -654,6 +684,217 @@ impl Editor {
         self.buf_mut().insert_char('\n');
         if !indent.is_empty() {
             self.buf_mut().insert_str(&indent);
+        }
+        self.also_the_last = false;
+    }
+
+    /// nano's `get_range()`: the lines an indent/unindent/comment acts on
+    /// -- just the cursor's line without a mark, otherwise every line the
+    /// marked region touches. A region ending exactly at column 0 of a
+    /// later line doesn't reach into that line, so it's left out... unless
+    /// a previous such action already included it (`also_the_last`), which
+    /// keeps the set of lines stable across repeated presses even as the
+    /// cursor's column shifts.
+    fn marked_line_range(&mut self) -> (usize, usize) {
+        let Some((start, end)) = self.selection_range() else {
+            let line = self.buf().cursor.line;
+            return (line, line);
+        };
+        if end.col == 0 && end.line != start.line && !self.also_the_last {
+            (start.line, end.line - 1)
+        } else {
+            self.also_the_last = true;
+            (start.line, end.line)
+        }
+    }
+
+    /// `M-}` Indent: matches nano's `do_indent` -- prefix each non-empty
+    /// line of the range with one tab (or `tabsize` spaces under
+    /// `tabstospaces`), as a single undo step. Empty lines are left alone,
+    /// and if every line is empty nothing happens at all (no message). The
+    /// cursor and mark shift right with their line's text, except when
+    /// sitting at column 0.
+    fn do_indent(&mut self) {
+        let (mut top, bot) = self.marked_line_range();
+        while top <= bot && self.buf().line(top).is_empty() {
+            top += 1;
+        }
+        if top > bot {
+            return;
+        }
+        let indentation = if self.options.tabstospaces {
+            " ".repeat(self.options.tabsize.max(1) as usize)
+        } else {
+            "\t".to_string()
+        };
+        let indent_len = indentation.chars().count();
+
+        let mut new_lines = Vec::with_capacity(bot - top + 1);
+        let mut indented = Vec::with_capacity(bot - top + 1);
+        for i in top..=bot {
+            let line = self.buf().line(i);
+            indented.push(!line.is_empty());
+            if line.is_empty() {
+                new_lines.push(line);
+            } else {
+                new_lines.push(format!("{indentation}{line}"));
+            }
+        }
+        let shifted = |p: Pos| {
+            if (top..=bot).contains(&p.line) && p.col > 0 && indented[p.line - top] {
+                Pos::new(p.line, p.col + indent_len)
+            } else {
+                p
+            }
+        };
+        let cursor_after = shifted(self.buf().cursor);
+        let mark_after = self.buf().mark.map(shifted);
+        self.buf_mut()
+            .replace_lines(top, bot, &new_lines.join("\n"), cursor_after);
+        self.buf_mut().mark = mark_after;
+        self.shift_held = true;
+    }
+
+    /// `M-{`/`Shift-Tab` Unindent: matches nano's `do_unindent` -- strip
+    /// one tab's worth of leading whitespace (see `length_of_white`) from
+    /// each line of the range that has any, as a single undo step. If no
+    /// line has any, nothing happens at all (no message). The cursor and
+    /// mark shift left with their line's text, stopping at column 0.
+    fn do_unindent(&mut self) {
+        let tabsize = self.options.tabsize.max(1) as usize;
+        let (mut top, bot) = self.marked_line_range();
+        while top <= bot && length_of_white(&self.buf().line(top), tabsize) == 0 {
+            top += 1;
+        }
+        if top > bot {
+            return;
+        }
+
+        let mut new_lines = Vec::with_capacity(bot - top + 1);
+        let mut removed = Vec::with_capacity(bot - top + 1);
+        for i in top..=bot {
+            let line = self.buf().line(i);
+            let n = length_of_white(&line, tabsize);
+            removed.push(n);
+            new_lines.push(line.chars().skip(n).collect::<String>());
+        }
+        let shifted = |p: Pos| {
+            if (top..=bot).contains(&p.line) {
+                Pos::new(p.line, p.col.saturating_sub(removed[p.line - top]))
+            } else {
+                p
+            }
+        };
+        let cursor_after = shifted(self.buf().cursor);
+        let mark_after = self.buf().mark.map(shifted);
+        self.buf_mut()
+            .replace_lines(top, bot, &new_lines.join("\n"), cursor_after);
+        self.buf_mut().mark = mark_after;
+        self.shift_held = true;
+    }
+
+    /// `M-3` Comment/Uncomment: matches nano's `do_comment`. The comment
+    /// sequence is the language's (`LanguageDef::comment`; `#` with no
+    /// language; a `PREFIX|POSTFIX` pair brackets the line). If any
+    /// non-blank line in the range isn't already commented -- or all of
+    /// them are blank -- every line gets commented; otherwise the commented
+    /// ones get uncommented. The buffer's last line (nano's "magic line")
+    /// is never touched unless `nonewlines` is set, and selecting only it
+    /// is refused. One undo step; cursor and mark shift with their text.
+    fn do_comment(&mut self) {
+        let comment_seq = self.buf().language.map(|l| l.comment).unwrap_or("#");
+        if comment_seq.is_empty() {
+            self.set_status_mild("Commenting is not supported for this file type");
+            return;
+        }
+        let (pre, post) = comment_seq.split_once('|').unwrap_or((comment_seq, ""));
+        let pre_len = pre.chars().count();
+
+        let (top, bot) = self.marked_line_range();
+        let filebot = self.buf().line_count().saturating_sub(1);
+        let protect_last = !self.options.nonewlines;
+        if top == bot && bot == filebot && protect_last {
+            self.set_status_mild("Cannot comment past end of file");
+            return;
+        }
+        let untouchable = |i: usize| protect_last && i == filebot;
+
+        // Comment everything unless every non-blank line is already
+        // commented (and there is at least one non-blank line).
+        let mut add = false;
+        let mut all_blank = true;
+        for i in top..=bot {
+            let line = self.buf().line(i);
+            let blank = line.chars().all(|c| c == ' ' || c == '\t' || c == '\r');
+            if !blank && (untouchable(i) || !is_commented(&line, pre, post)) {
+                add = true;
+                break;
+            }
+            all_blank &= blank;
+        }
+        let add = add || all_blank;
+
+        let mut new_lines = Vec::with_capacity(bot - top + 1);
+        let mut changed = Vec::with_capacity(bot - top + 1);
+        for i in top..=bot {
+            let line = self.buf().line(i);
+            if untouchable(i) {
+                changed.push(false);
+                new_lines.push(line);
+            } else if add {
+                changed.push(true);
+                new_lines.push(format!("{pre}{line}{post}"));
+            } else if is_commented(&line, pre, post) {
+                changed.push(true);
+                let inner: String = line.chars().skip(pre_len).collect();
+                let keep = inner.chars().count() - post.chars().count();
+                new_lines.push(inner.chars().take(keep).collect());
+            } else {
+                changed.push(false);
+                new_lines.push(line);
+            }
+        }
+        if !changed.iter().any(|&c| c) {
+            return;
+        }
+        let shifted = |p: Pos| {
+            if !(top..=bot).contains(&p.line) || !changed[p.line - top] {
+                return p;
+            }
+            let col = if add {
+                if p.col > 0 { p.col + pre_len } else { 0 }
+            } else {
+                p.col.saturating_sub(pre_len)
+            };
+            // A removed postfix can leave a column past the new end.
+            Pos::new(p.line, col.min(new_lines[p.line - top].chars().count()))
+        };
+        let cursor_after = shifted(self.buf().cursor);
+        let mark_after = self.buf().mark.map(shifted);
+        self.buf_mut()
+            .replace_lines(top, bot, &new_lines.join("\n"), cursor_after);
+        self.buf_mut().mark = mark_after;
+        self.shift_held = true;
+    }
+
+    /// Plain `^Z` in the main menu: nano's `suggest_ctrlT_ctrlZ`. Tells the
+    /// user how suspension actually works -- but only while the keys the
+    /// hint names still do that (`^T` is Execute in the main menu and `^Z`
+    /// is Suspend in the Execute menu); with either rebound nano says
+    /// nothing rather than give a wrong hint. AHEM-level in nano: the
+    /// error coloring, no bell.
+    fn suggest_ctrl_t_ctrl_z(&mut self) {
+        use crate::keymap::{Binding, Key};
+        let ctrl_t_executes = matches!(
+            self.keymap.lookup(Menu::Main, Key::Ctrl('T')),
+            Some(Binding::Action(Action::Execute))
+        );
+        let ctrl_z_suspends = matches!(
+            self.keymap.lookup(Menu::Execute, Key::Ctrl('Z')),
+            Some(Binding::Action(Action::Suspend))
+        );
+        if ctrl_t_executes && ctrl_z_suspends {
+            self.set_status_mild("To suspend, type ^T^Z");
         }
     }
 
@@ -1086,7 +1327,7 @@ impl Editor {
                 execute: false,
             },
             menu: Menu::Insert,
-            label: insert_prompt_label(new_buffer, false),
+            label: insert_prompt_label(new_buffer, false, self.options.noconvert),
             input: String::new(),
             cursor: 0,
             history_pos: None,
@@ -1105,7 +1346,7 @@ impl Editor {
                 execute: true,
             },
             menu: Menu::Execute,
-            label: insert_prompt_label(new_buffer, true),
+            label: insert_prompt_label(new_buffer, true, self.options.noconvert),
             input: String::new(),
             cursor: 0,
             history_pos: None,
@@ -1141,11 +1382,7 @@ impl Editor {
                 .map(|p| p.display().to_string())
                 .unwrap_or_default()
         };
-        let label = if selecting {
-            "Write Selection to File".to_string()
-        } else {
-            "File Name to Write".to_string()
-        };
+        let label = self.writeout_prompt_label(exiting);
         self.mode = Mode::Prompt(Prompt {
             kind: PromptKind::WriteOut { exiting },
             menu: Menu::WriteOut,
@@ -1201,6 +1438,25 @@ impl Editor {
         self.run_search(&pattern, backwards);
     }
 
+    /// The Write Out prompt's label (nano 8.7's `do_writeout`), rebuilt
+    /// whenever `M-D`/`M-M` toggles the buffer's format: " [DOS Format]"
+    /// or " [Mac Format]" is appended for those formats (and " [Backup]"
+    /// under `set backup`, which tico doesn't have).
+    pub(crate) fn writeout_prompt_label(&self, exiting: bool) -> String {
+        use crate::buffer::LineFormat;
+        let selecting = !exiting && self.buf().mark.is_some();
+        let base = if selecting {
+            "Write Selection to File"
+        } else {
+            "Write to File"
+        };
+        match self.buf().format {
+            LineFormat::Dos => format!("{base} [DOS Format]"),
+            LineFormat::Mac => format!("{base} [Mac Format]"),
+            LineFormat::Unix | LineFormat::Unspecified => base.to_string(),
+        }
+    }
+
     pub fn begin_writeout_for_exit(&mut self) {
         self.begin_writeout(true);
     }
@@ -1218,6 +1474,8 @@ impl Editor {
             self.mode = Mode::Editing;
             return;
         };
+        // Compare like with like: the buffer holds converted text.
+        let (theirs, _) = crate::fileio::convert_line_endings(&theirs, self.options.noconvert);
         let base = self.buf().original_content.clone();
         let ours = self.buf().to_string();
         match crate::fileio::three_way_merge(&base, &ours, &theirs) {
@@ -1547,12 +1805,14 @@ pub fn search_prompt_label(base: &str, suffix: &str, search: &SearchState) -> St
 
 /// The `^R` Read File prompt's label, matching the installed nano's exact
 /// wording for both states (it toggles with `M-F`, no other wording change).
-pub fn insert_prompt_label(new_buffer: bool, execute: bool) -> String {
-    match (execute, new_buffer) {
-        (true, true) => "Command to execute in new buffer".to_string(),
-        (true, false) => "Command to execute".to_string(),
-        (false, true) => "File to read into new buffer [from ./]".to_string(),
-        (false, false) => "File to insert [from ./]".to_string(),
+pub fn insert_prompt_label(new_buffer: bool, execute: bool, noconvert: bool) -> String {
+    match (execute, new_buffer, noconvert) {
+        (true, true, _) => "Command to execute in new buffer".to_string(),
+        (true, false, _) => "Command to execute".to_string(),
+        (false, true, false) => "File to read into new buffer [from ./]".to_string(),
+        (false, true, true) => "File to read unconverted into new buffer [from ./]".to_string(),
+        (false, false, false) => "File to insert [from ./]".to_string(),
+        (false, false, true) => "File to insert unconverted [from ./]".to_string(),
     }
 }
 
@@ -1561,6 +1821,33 @@ pub fn insert_prompt_label(new_buffer: bool, execute: bool) -> String {
 /// decide what `--view` blocks (with "Key is invalid in view mode")
 /// versus what it still allows (movement, search, Copy, Set Mark, the
 /// Insert-File prompt, ...).
+/// Whether `line` carries the comment sequence nano's way: `pre` at column
+/// 0 exactly (no leading whitespace allowed) and, for a bracketing
+/// sequence, `post` at the very end.
+fn is_commented(line: &str, pre: &str, post: &str) -> bool {
+    line.len() >= pre.len() + post.len() && line.starts_with(pre) && line.ends_with(post)
+}
+
+/// nano's `length_of_white()`: how much leading whitespace one unindent
+/// removes from `text` -- at most a tab's worth: up to `tabsize` spaces,
+/// or any spaces up to and including a tab.
+fn length_of_white(text: &str, tabsize: usize) -> usize {
+    let mut count = 0;
+    for c in text.chars() {
+        match c {
+            '\t' => return count + 1,
+            ' ' => {
+                count += 1;
+                if count == tabsize {
+                    return tabsize;
+                }
+            }
+            _ => break,
+        }
+    }
+    count
+}
+
 fn action_changes_something(action: Action) -> bool {
     use Action::*;
     matches!(
@@ -2201,5 +2488,455 @@ mod tests {
         for _ in 0..20 {
             ed.execute(Action::Right); // must not panic
         }
+    }
+
+    // ----- Indent / Unindent (nano's do_indent / do_unindent) -----
+
+    #[test]
+    fn indent_prefixes_the_cursor_line_with_a_tab_and_shifts_the_cursor() {
+        let mut ed = test_editor("abc\ndef\n");
+        ed.buf_mut().cursor = Pos::new(0, 2);
+        ed.execute(Action::Indent);
+        assert_eq!(ed.buf().line(0), "\tabc");
+        assert_eq!(
+            ed.buf().line(1),
+            "def",
+            "only the cursor's line is indented"
+        );
+        assert_eq!(ed.buf().cursor, Pos::new(0, 3));
+        assert!(ed.buf().modified);
+        assert_eq!(ed.status, None, "nano shows no message for an indent");
+    }
+
+    #[test]
+    fn indent_leaves_a_cursor_at_column_zero_where_it_is() {
+        let mut ed = test_editor("abc\n");
+        ed.execute(Action::Indent);
+        assert_eq!(ed.buf().line(0), "\tabc");
+        assert_eq!(ed.buf().cursor, Pos::new(0, 0));
+    }
+
+    #[test]
+    fn indent_uses_tabsize_spaces_under_tabstospaces() {
+        let mut ed = test_editor("abc\n");
+        ed.options.tabstospaces = true;
+        ed.options.tabsize = 4;
+        ed.buf_mut().cursor = Pos::new(0, 1);
+        ed.execute(Action::Indent);
+        assert_eq!(ed.buf().line(0), "    abc");
+        assert_eq!(ed.buf().cursor, Pos::new(0, 5));
+    }
+
+    #[test]
+    fn indent_of_a_marked_region_skips_empty_lines_and_keeps_the_mark() {
+        let mut ed = test_editor("one\n\nthree\nfour\n");
+        ed.buf_mut().mark = Some(Pos::new(0, 1));
+        ed.buf_mut().cursor = Pos::new(2, 2);
+        ed.execute(Action::Indent);
+        assert_eq!(ed.buf().line(0), "\tone");
+        assert_eq!(ed.buf().line(1), "", "empty lines get no indentation");
+        assert_eq!(ed.buf().line(2), "\tthree");
+        assert_eq!(ed.buf().line(3), "four", "past the region");
+        assert_eq!(
+            ed.buf().mark,
+            Some(Pos::new(0, 2)),
+            "mark shifts with its text"
+        );
+        assert_eq!(ed.buf().cursor, Pos::new(2, 3));
+    }
+
+    #[test]
+    fn indent_of_only_empty_lines_does_nothing_at_all() {
+        let mut ed = test_editor("\n\n\n");
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(2, 0);
+        ed.execute(Action::Indent);
+        assert_eq!(ed.buf().to_string(), "\n\n\n");
+        assert!(!ed.buf().modified);
+        assert!(ed.buf().undo_stack.is_empty(), "no undo record for a no-op");
+    }
+
+    #[test]
+    fn indent_region_ending_at_column_zero_excludes_that_line() {
+        let mut ed = test_editor("one\ntwo\nthree\n");
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(2, 0);
+        ed.execute(Action::Indent);
+        assert_eq!(ed.buf().line(0), "\tone");
+        assert_eq!(ed.buf().line(1), "\ttwo");
+        assert_eq!(
+            ed.buf().line(2),
+            "three",
+            "a region ending at col 0 doesn't reach into that line"
+        );
+    }
+
+    #[test]
+    fn indent_keeps_including_the_last_line_until_the_cursor_changes_line() {
+        // nano's `also_the_last`: once an indent has acted on a region that
+        // reached into its last line, a follow-up press keeps that line
+        // even if the cursor has since moved to column 0 of it...
+        let mut ed = test_editor("one\ntwo\n");
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(1, 2);
+        ed.execute(Action::Indent);
+        assert_eq!(ed.buf().line(1), "\ttwo");
+        ed.execute(Action::Home);
+        assert_eq!(ed.buf().cursor, Pos::new(1, 0));
+        ed.execute(Action::Indent);
+        assert_eq!(
+            ed.buf().line(1),
+            "\t\ttwo",
+            "still included: same line as before"
+        );
+
+        // ...but not once the cursor has been on a different line.
+        ed.execute(Action::Up);
+        ed.execute(Action::Down);
+        assert_eq!(ed.buf().cursor, Pos::new(1, 0));
+        ed.execute(Action::Indent);
+        assert_eq!(ed.buf().line(0), "\t\t\tone");
+        assert_eq!(
+            ed.buf().line(1),
+            "\t\ttwo",
+            "excluded again after a line change"
+        );
+    }
+
+    #[test]
+    fn indent_is_a_single_undo_step() {
+        let mut ed = test_editor("one\ntwo\nthree\n");
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(2, 3);
+        ed.execute(Action::Indent);
+        assert_eq!(ed.buf().to_string(), "\tone\n\ttwo\n\tthree\n");
+        ed.execute(Action::Undo);
+        assert_eq!(ed.buf().to_string(), "one\ntwo\nthree\n");
+        assert_eq!(ed.buf().cursor, Pos::new(2, 3));
+        ed.execute(Action::Redo);
+        assert_eq!(ed.buf().to_string(), "\tone\n\ttwo\n\tthree\n");
+        assert_eq!(ed.buf().cursor, Pos::new(2, 4));
+    }
+
+    #[test]
+    fn unindent_removes_a_tabs_worth_of_leading_whitespace() {
+        // tabsize 8 (the default): up to 8 spaces, or spaces up to and
+        // including a tab, but never more than that per press.
+        let mut ed = test_editor("\t\tone\n    two\n  \tthree\n          four\n");
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(3, 10);
+        ed.execute(Action::Unindent);
+        assert_eq!(ed.buf().line(0), "\tone");
+        assert_eq!(ed.buf().line(1), "two");
+        assert_eq!(ed.buf().line(2), "three", "spaces plus a tab go together");
+        assert_eq!(ed.buf().line(3), "  four", "only tabsize of ten spaces");
+        assert_eq!(ed.buf().cursor, Pos::new(3, 2));
+        assert_eq!(ed.status, None);
+    }
+
+    #[test]
+    fn unindent_clamps_cursor_and_mark_at_column_zero() {
+        let mut ed = test_editor("    one\n    two\n");
+        ed.buf_mut().mark = Some(Pos::new(0, 2));
+        ed.buf_mut().cursor = Pos::new(1, 6);
+        ed.options.tabsize = 4;
+        ed.execute(Action::Unindent);
+        assert_eq!(ed.buf().line(0), "one");
+        assert_eq!(ed.buf().line(1), "two");
+        assert_eq!(
+            ed.buf().mark,
+            Some(Pos::new(0, 0)),
+            "mark inside the indent lands at col 0"
+        );
+        assert_eq!(ed.buf().cursor, Pos::new(1, 2));
+    }
+
+    #[test]
+    fn unindent_with_nothing_to_remove_is_a_silent_no_op() {
+        let mut ed = test_editor("one\ntwo\n");
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(1, 3);
+        ed.execute(Action::Unindent);
+        assert_eq!(ed.buf().to_string(), "one\ntwo\n");
+        assert!(!ed.buf().modified);
+        assert!(ed.buf().undo_stack.is_empty());
+        assert_eq!(ed.status, None, "nano gives no feedback here either");
+    }
+
+    #[test]
+    fn unindent_only_touches_lines_that_have_an_indent() {
+        let mut ed = test_editor("one\n\ttwo\nthree\n");
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(2, 5);
+        ed.execute(Action::Unindent);
+        assert_eq!(ed.buf().to_string(), "one\ntwo\nthree\n");
+        assert_eq!(
+            ed.buf().cursor,
+            Pos::new(2, 5),
+            "unchanged: its line lost nothing"
+        );
+        ed.execute(Action::Undo);
+        assert_eq!(ed.buf().to_string(), "one\n\ttwo\nthree\n");
+    }
+
+    #[test]
+    fn indent_and_unindent_are_blocked_in_view_mode() {
+        let mut ed = test_editor("\tone\n");
+        ed.options.view = true;
+        ed.execute(Action::Indent);
+        ed.execute(Action::Unindent);
+        assert_eq!(ed.buf().to_string(), "\tone\n");
+        assert_eq!(ed.status.as_deref(), Some("Key is invalid in view mode"));
+    }
+
+    #[test]
+    fn length_of_white_matches_nano() {
+        assert_eq!(length_of_white("abc", 4), 0);
+        assert_eq!(length_of_white("  abc", 4), 2);
+        assert_eq!(length_of_white("      abc", 4), 4);
+        assert_eq!(length_of_white("\tabc", 4), 1);
+        assert_eq!(length_of_white("  \tabc", 4), 3);
+        assert_eq!(
+            length_of_white("   \t\tabc", 4),
+            4,
+            "reaches tabsize before the tab"
+        );
+        assert_eq!(length_of_white("  ", 4), 2, "an all-blank short line");
+        assert_eq!(length_of_white("", 4), 0);
+    }
+
+    // ----- Comment / Uncomment (nano's do_comment) -----
+
+    fn editor_for_language(text: &str, lang: &str) -> Editor {
+        let mut ed = test_editor(text);
+        ed.buf_mut().language =
+            Some(crate::syntax::find_by_name(lang).unwrap_or_else(|| panic!("no language {lang}")));
+        ed
+    }
+
+    #[test]
+    fn comment_uses_hash_when_the_buffer_has_no_language() {
+        let mut ed = test_editor("abc\n");
+        ed.buf_mut().cursor = Pos::new(0, 2);
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().line(0), "#abc");
+        assert_eq!(ed.buf().cursor, Pos::new(0, 3));
+        assert_eq!(ed.status, None);
+        assert!(ed.buf().modified);
+    }
+
+    #[test]
+    fn comment_uses_the_languages_sequence_and_toggles_back() {
+        let mut ed = editor_for_language("let x = 1;\n", "rust");
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().line(0), "//let x = 1;");
+        assert_eq!(
+            ed.buf().cursor,
+            Pos::new(0, 0),
+            "a cursor at column 0 stays"
+        );
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().line(0), "let x = 1;");
+    }
+
+    #[test]
+    fn comment_brackets_the_line_for_a_prefix_postfix_sequence() {
+        let mut ed = editor_for_language("<p>hi</p>\n", "html");
+        ed.buf_mut().cursor = Pos::new(0, 9);
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().line(0), "<!--<p>hi</p>-->");
+        assert_eq!(
+            ed.buf().cursor,
+            Pos::new(0, 13),
+            "shifted by the prefix only"
+        );
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().line(0), "<p>hi</p>");
+        assert_eq!(ed.buf().cursor, Pos::new(0, 9));
+    }
+
+    #[test]
+    fn uncomment_clamps_a_cursor_left_stranded_by_the_removed_postfix() {
+        let mut ed = editor_for_language("<!--x-->\n", "html");
+        ed.buf_mut().cursor = Pos::new(0, 8);
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().line(0), "x");
+        assert_eq!(ed.buf().cursor, Pos::new(0, 1));
+    }
+
+    #[test]
+    fn comment_is_refused_for_a_language_without_one() {
+        let mut ed = editor_for_language("{}\n", "json");
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().line(0), "{}");
+        assert_eq!(
+            ed.status.as_deref(),
+            Some("Commenting is not supported for this file type")
+        );
+        assert!(!ed.buf().modified);
+    }
+
+    #[test]
+    fn comment_refuses_the_magic_last_line_alone_but_skips_it_in_a_range() {
+        let mut ed = test_editor("one\ntwo\n");
+        ed.buf_mut().cursor = Pos::new(2, 0);
+        ed.execute(Action::Comment);
+        assert_eq!(
+            ed.status.as_deref(),
+            Some("Cannot comment past end of file")
+        );
+        assert_eq!(ed.buf().to_string(), "one\ntwo\n");
+
+        ed.status = None;
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(2, 0);
+        ed.also_the_last = true; // make the range reach the last line
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().to_string(), "#one\n#two\n", "last line left alone");
+        assert_eq!(ed.status, None);
+    }
+
+    #[test]
+    fn comment_touches_the_last_line_under_nonewlines() {
+        let mut ed = test_editor("one");
+        ed.options.nonewlines = true;
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().to_string(), "#one");
+    }
+
+    #[test]
+    fn mixed_range_gets_commented_and_fully_commented_range_uncommented() {
+        let mut ed = test_editor("#one\ntwo\n\nthree\n");
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(3, 5);
+        ed.execute(Action::Comment);
+        assert_eq!(
+            ed.buf().to_string(),
+            "##one\n#two\n#\n#three\n",
+            "one uncommented line means comment all, blank lines included"
+        );
+        assert_eq!(ed.buf().cursor, Pos::new(3, 6));
+        assert_eq!(ed.buf().mark, Some(Pos::new(0, 0)));
+
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().to_string(), "#one\ntwo\n\nthree\n");
+        assert_eq!(ed.buf().cursor, Pos::new(3, 5));
+    }
+
+    #[test]
+    fn uncomment_leaves_blank_lines_alone_and_only_strips_column_zero_prefixes() {
+        let mut ed = test_editor("#one\n\n#two\n");
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(2, 4);
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().to_string(), "one\n\ntwo\n");
+
+        // An indented "#" isn't a comment prefix to nano, so this line
+        // counts as uncommented and the range gets commented instead.
+        let mut ed = test_editor("#one\n  #two\n");
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(1, 6);
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().to_string(), "##one\n#  #two\n");
+    }
+
+    #[test]
+    fn all_blank_range_gets_commented() {
+        let mut ed = test_editor("\n  \nx\n");
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(2, 0);
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().to_string(), "#\n#  \nx\n");
+    }
+
+    #[test]
+    fn comment_is_a_single_undo_step() {
+        let mut ed = editor_for_language("a\nb\nc\n", "c");
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(2, 1);
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().to_string(), "//a\n//b\n//c\n");
+        ed.execute(Action::Undo);
+        assert_eq!(ed.buf().to_string(), "a\nb\nc\n");
+        assert_eq!(ed.buf().cursor, Pos::new(2, 1));
+        ed.execute(Action::Redo);
+        assert_eq!(ed.buf().to_string(), "//a\n//b\n//c\n");
+        assert_eq!(ed.buf().cursor, Pos::new(2, 3));
+    }
+
+    #[test]
+    fn comment_is_blocked_in_view_mode() {
+        let mut ed = test_editor("one\n");
+        ed.options.view = true;
+        ed.execute(Action::Comment);
+        assert_eq!(ed.buf().to_string(), "one\n");
+        assert_eq!(ed.status.as_deref(), Some("Key is invalid in view mode"));
+    }
+
+    // ----- Suspend hint (nano's suggest_ctrlT_ctrlZ) -----
+
+    fn editor_with_default_keys(modern: bool) -> Editor {
+        let mut ed = test_editor("x");
+        ed.keymap = KeyMap::defaults(modern);
+        ed
+    }
+
+    #[test]
+    fn plain_ctrl_z_hints_at_ctrl_t_ctrl_z_with_the_default_keys() {
+        use crate::keymap::{Binding, Key};
+        let mut ed = editor_with_default_keys(false);
+        assert!(matches!(
+            ed.keymap.lookup(Menu::Main, Key::Ctrl('Z')),
+            Some(Binding::Action(Action::SuggestSuspend))
+        ));
+        assert!(matches!(
+            ed.keymap.lookup(Menu::Execute, Key::Ctrl('Z')),
+            Some(Binding::Action(Action::Suspend))
+        ));
+        ed.execute(Action::SuggestSuspend);
+        assert_eq!(ed.status.as_deref(), Some("To suspend, type ^T^Z"));
+        assert!(matches!(ed.status_level, StatusLevel::Mild));
+        assert!(!ed.bell_pending, "AHEM in nano: no beep");
+    }
+
+    #[test]
+    fn modern_bindings_put_undo_on_ctrl_z_instead_of_the_hint() {
+        use crate::keymap::{Binding, Key};
+        let ed = editor_with_default_keys(true);
+        assert!(matches!(
+            ed.keymap.lookup(Menu::Main, Key::Ctrl('Z')),
+            Some(Binding::Action(Action::Undo))
+        ));
+    }
+
+    #[test]
+    fn suspend_hint_is_withheld_once_either_key_is_rebound() {
+        use crate::keymap::{Binding, Key};
+        let mut ed = editor_with_default_keys(false);
+        ed.keymap.bind(
+            Menu::Main,
+            Key::Ctrl('T'),
+            Binding::Action(Action::GotoLine),
+        );
+        ed.execute(Action::SuggestSuspend);
+        assert_eq!(ed.status, None, "^T no longer opens the Execute menu");
+
+        let mut ed = editor_with_default_keys(false);
+        ed.keymap.unbind(Menu::Execute, Key::Ctrl('Z'));
+        ed.execute(Action::SuggestSuspend);
+        assert_eq!(ed.status, None, "^Z no longer suspends from that menu");
+    }
+
+    #[test]
+    fn whitespace_display_toggle_reports_like_nanos_do_toggle() {
+        let mut ed = test_editor("x");
+        assert!(!ed.options.whitespacedisplay);
+        ed.execute(Action::WhitespaceDisplay);
+        assert!(ed.options.whitespacedisplay);
+        assert_eq!(ed.status.as_deref(), Some("Whitespace display enabled"));
+        assert!(matches!(ed.status_level, StatusLevel::Normal));
+        ed.execute(Action::WhitespaceDisplay);
+        assert!(!ed.options.whitespacedisplay);
+        assert_eq!(ed.status.as_deref(), Some("Whitespace display disabled"));
     }
 }

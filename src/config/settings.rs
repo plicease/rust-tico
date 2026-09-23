@@ -61,6 +61,7 @@ pub fn apply(
         "tabstospaces" => flag!(tabstospaces),
         "trimblanks" => flag!(trimblanks),
         "unix" => flag!(unix),
+        "whitespacedisplay" => flag!(whitespacedisplay),
         "wordbounds" => flag!(wordbounds),
         "zap" => flag!(zap),
         "zero" => flag!(zero),
@@ -124,11 +125,15 @@ pub fn apply(
             Ok(())
         }
         "whitespace" => {
+            // nano: exactly two characters, each one column wide.
             if let Some(v) = arg {
-                let mut chars = v.chars();
-                if let (Some(a), Some(b)) = (chars.next(), chars.next()) {
-                    options.whitespace = (a, b);
+                let chars: Vec<char> = v.chars().collect();
+                let single_column =
+                    |c: &char| unicode_width::UnicodeWidthChar::width(*c) == Some(1);
+                if chars.len() != 2 || !chars.iter().all(single_column) {
+                    return Err("Two single-column characters required".to_string());
                 }
+                options.whitespace = (chars[0], chars[1]);
             }
             Ok(())
         }
@@ -163,4 +168,32 @@ fn set_color(field: &mut options::ColorPair, arg: Option<&str>) -> Result<(), St
         return Err(format!("invalid color spec: {v}"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn whitespace_needs_exactly_two_single_column_characters() {
+        let mut o = Options::default();
+        apply(&mut o, "whitespace", Some(">."), true).unwrap();
+        assert_eq!(o.whitespace, ('>', '.'));
+        apply(&mut o, "whitespace", Some("\u{bb}\u{b7}"), true).unwrap();
+        assert_eq!(o.whitespace, ('\u{bb}', '\u{b7}'));
+        for bad in [">", ">.x", "\u{4e2d}."] {
+            assert_eq!(
+                apply(&mut o, "whitespace", Some(bad), true),
+                Err("Two single-column characters required".to_string()),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            o.whitespace,
+            ('\u{bb}', '\u{b7}'),
+            "a bad value leaves the old one"
+        );
+        apply(&mut o, "whitespacedisplay", None, true).unwrap();
+        assert!(o.whitespacedisplay);
+    }
 }

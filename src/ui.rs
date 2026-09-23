@@ -221,7 +221,8 @@ fn maybe_check_external_change(editor: &mut Editor) -> bool {
     match crate::fileio::check_external_change(editor.buf()) {
         ExternalChange::Unchanged => return false,
         ExternalChange::ChangedNoLocalEdits => {
-            let _ = crate::fileio::reload(editor.buf_mut());
+            let (noconvert, unix) = (editor.options.noconvert, editor.options.unix);
+            let _ = crate::fileio::reload(editor.buf_mut(), noconvert, unix);
             editor.set_status("File reloaded (changed on disk)");
         }
         ExternalChange::ChangedWithLocalEdits => {
@@ -352,6 +353,7 @@ fn handle_editing_key(editor: &mut Editor, key: KeyEvent) {
     // Shift+Left binding needed), so the resolved action is identical
     // either way -- only whether to also manage a mark around it differs.
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    editor.shift_held = false;
     let tkey = normalize_key(key);
     let binding = tkey.and_then(|tk| editor.keymap.lookup(Menu::Main, tk).cloned());
     let is_movement = matches!(&binding, Some(Binding::Action(a)) if is_movement_action(*a));
@@ -384,9 +386,11 @@ fn handle_editing_key(editor: &mut Editor, key: KeyEvent) {
 
     // Any plain (non-Shift) movement or edit drops a soft mark -- matches
     // nano's own post-dispatch check (a hard mark, set via `^^`/`M-A`,
-    // isn't touched here at all).
+    // isn't touched here at all). An action that asked for the mark to be
+    // kept despite shifting it (`shift_held`: indent/unindent) is exempt.
     if !editor.buffers.is_empty()
         && !shift
+        && !editor.shift_held
         && editor.buf().softmark
         && editor.buf().mark.is_some()
         && (editor.buf().cursor != before || is_movement)
@@ -412,6 +416,9 @@ fn apply_binding(editor: &mut Editor, binding: Binding) {
         Binding::Action(Action::Speller) => run_speller(editor),
         Binding::Action(Action::Formatter) => run_formatter(editor),
         Binding::Action(Action::Linter) => run_linter(editor),
+        // Only reachable via a `bind ... suspend main` in nanorc: nano's
+        // default main-menu ^Z is the ^T^Z hint (Action::SuggestSuspend).
+        Binding::Action(Action::Suspend) => suspend_editor(editor),
         Binding::Action(action) => editor.execute(action),
         Binding::Macro(text) => {
             // Literal-string bindings; `{function}` substitution is not yet
@@ -647,7 +654,8 @@ fn apply_prompt_action(editor: &mut Editor, prompt: &mut Prompt, action: Action)
                 return false;
             };
             *new_buffer = !*new_buffer;
-            prompt.label = crate::app::insert_prompt_label(*new_buffer, *execute);
+            prompt.label =
+                crate::app::insert_prompt_label(*new_buffer, *execute, editor.options.noconvert);
             false
         }
         // `^X` flips the Insert-File/Execute-Command prompt between its two
@@ -668,7 +676,48 @@ fn apply_prompt_action(editor: &mut Editor, prompt: &mut Prompt, action: Action)
             } else {
                 Menu::Insert
             };
-            prompt.label = crate::app::insert_prompt_label(*new_buffer, *execute);
+            prompt.label =
+                crate::app::insert_prompt_label(*new_buffer, *execute, editor.options.noconvert);
+            false
+        }
+        // `M-N` No Conversion: nano's `flip_convert` toggles the *global*
+        // NO_CONVERT flag (it persists for later reads too, not just this
+        // one), and the prompt's label says "unconverted" while it's on.
+        Action::FlipConvert => {
+            let PromptKind::InsertFile {
+                new_buffer,
+                execute,
+            } = &prompt.kind
+            else {
+                return false;
+            };
+            editor.options.noconvert = !editor.options.noconvert;
+            prompt.label =
+                crate::app::insert_prompt_label(*new_buffer, *execute, editor.options.noconvert);
+            false
+        }
+        // `M-D` DOS Format / `M-M` Mac Format at the Write Out prompt:
+        // nano's `dos_format`/`mac_format` flip the buffer's own format
+        // (so it sticks for later saves too) -- to that format, or back
+        // to Unix if it already was that -- and re-show the prompt with
+        // its " [DOS Format]"/" [Mac Format]" tag updated.
+        Action::DosFormat | Action::MacFormat => {
+            let PromptKind::WriteOut { exiting } = prompt.kind else {
+                return false;
+            };
+            use crate::buffer::LineFormat;
+            let wanted = if action == Action::DosFormat {
+                LineFormat::Dos
+            } else {
+                LineFormat::Mac
+            };
+            let buf = editor.buf_mut();
+            buf.format = if buf.format == wanted {
+                LineFormat::Unix
+            } else {
+                wanted
+            };
+            prompt.label = editor.writeout_prompt_label(exiting);
             false
         }
         // Recognized (bound, shown in the shortcut bar and ^G help) but not
@@ -677,11 +726,6 @@ fn apply_prompt_action(editor: &mut Editor, prompt: &mut Prompt, action: Action)
         // messages don't show while a prompt is up (the status line is the
         // prompt itself), so this closes the prompt to make the message
         // visible, same as a real result would.
-        Action::FlipConvert => {
-            editor.mode = Mode::Editing;
-            editor.set_status("No Conversion: not yet implemented");
-            true
-        }
         Action::Browser => {
             editor.mode = Mode::Editing;
             editor.set_status("File Browser: not yet implemented");
@@ -733,9 +777,11 @@ fn apply_prompt_action(editor: &mut Editor, prompt: &mut Prompt, action: Action)
             editor.set_status("Pipe Text: not yet implemented");
             true
         }
+        // `^Z` from the Execute prompt: the real thing. Like the tools
+        // above, nano's `ran_a_tool` closes the prompt first.
         Action::Suspend => {
             editor.mode = Mode::Editing;
-            editor.set_status("suspend: not supported in this build");
+            suspend_editor(editor);
             true
         }
         _ => false,
@@ -953,7 +999,8 @@ fn handle_conflict_choice(editor: &mut Editor, prompt: Prompt, key: KeyEvent) {
     }
     match key.code {
         KeyCode::Char('r') | KeyCode::Char('R') => {
-            let _ = crate::fileio::reload(editor.buf_mut());
+            let (noconvert, unix) = (editor.options.noconvert, editor.options.unix);
+            let _ = crate::fileio::reload(editor.buf_mut(), noconvert, unix);
             editor.mode = Mode::Editing;
             editor.set_status("Reloaded from disk; local edits discarded");
         }
@@ -1223,9 +1270,12 @@ fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
                     editor.current = editor.buffers.len() - 1;
                     editor.set_status("New File");
                 } else {
-                    match crate::fileio::load_file(&path) {
-                        Ok(mut buf) => {
-                            let msg = crate::fileio::describe_read(&buf.to_string());
+                    match crate::fileio::load_file(&path, &editor.options) {
+                        Ok(crate::fileio::LoadedFile {
+                            buffer: mut buf,
+                            detected,
+                        }) => {
+                            let msg = crate::fileio::describe_read(&buf.to_string(), detected);
                             buf.language = crate::syntax::detect_with_override(
                                 buf.path.as_deref(),
                                 &buf.to_string(),
@@ -1241,9 +1291,13 @@ fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
                 }
             } else {
                 match std::fs::read_to_string(&path) {
-                    Ok(content) => {
-                        let msg = crate::fileio::describe_read(&content);
+                    Ok(raw) => {
+                        let (content, detected) =
+                            crate::fileio::convert_line_endings(&raw, editor.options.noconvert);
+                        let msg = crate::fileio::describe_read(&content, detected);
+                        let unix = editor.options.unix;
                         editor.buf_mut().insert_str(&content);
+                        editor.buf_mut().adopt_format(detected, unix);
                         editor.set_status(msg);
                     }
                     Err(e) => {
@@ -1403,6 +1457,47 @@ fn run_suspended(mut cmd: std::process::Command) -> io::Result<std::process::Exi
         Clear(ClearType::All)
     );
     result
+}
+
+/// `^T^Z` Suspend: matches nano's `do_suspend`/`suspend_nano`. Hand the
+/// terminal back (leave the alternate screen and raw mode, show the
+/// cursor), print the same reminder nano prints, then stop our whole
+/// process group with SIGSTOP the way nano (and mutt) do, so the shell's
+/// job control takes over. When the shell resumes us (`fg`), execution
+/// carries on right here: back into raw mode and the alternate screen with
+/// a full repaint, and the terminal size re-read since the window may have
+/// changed meanwhile (nano's `continue_nano` flags a resize for the same
+/// reason).
+///
+/// Only the keystroke path is covered: crossterm's raw mode turns off the
+/// terminal's ISIG, so a typed ^Z arrives as a key rather than a SIGTSTP,
+/// and nano's SIGTSTP/SIGCONT handlers (for a `kill -TSTP` from outside)
+/// have no equivalent here.
+fn suspend_editor(editor: &mut Editor) {
+    // nano comes back with a blank status bar (its `lastmessage = HUSH`),
+    // not whatever was showing before the ^T prompt replaced it.
+    editor.status = None;
+    let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+    let _ = disable_raw_mode();
+    println!("\n\nUse \"fg\" to return to tico.");
+    let _ = io::stdout().flush();
+
+    let stopped = rustix::process::kill_current_process_group(rustix::process::Signal::STOP);
+
+    let _ = enable_raw_mode();
+    let _ = execute!(
+        io::stdout(),
+        EnterAlternateScreen,
+        Hide,
+        Clear(ClearType::All)
+    );
+    if let Ok((cols, rows)) = size() {
+        editor.screen_cols = cols as usize;
+        editor.screen_rows = rows as usize;
+    }
+    if let Err(e) = stopped {
+        editor.set_status_alert(format!("Could not suspend: {e}"));
+    }
 }
 
 /// `^T` Execute Command's submit: run `text` in the shell, and insert its
@@ -2283,7 +2378,11 @@ fn render_status_line(
         // nano's promptcolor defaults to the title bar's colors (reverse
         // video), confirmed against the installed nano's own escape-code
         // output for both the Search and WriteOut prompts.
-        let text = format!("{}: {}", prompt.label, prompt.input);
+        let text = format!(
+            "{}: {}",
+            prompt.label,
+            prompt_input_for_display(editor, &prompt.input)
+        );
         let mut s: String = text.chars().take(cols).collect();
         while s.chars().count() < cols {
             s.push(' ');
@@ -2419,24 +2518,39 @@ const GOTOLINE_SHORTCUTS: &[(Action, &str)] = &[
 ];
 
 /// The `^R` Read File prompt's shortcut list, matching nano's full menu.
-/// No-conversion (`M-N`) and the file browser (`^T`) aren't actually
-/// implemented yet — see apply_prompt_action's FlipConvert/Browser arms —
-/// but are still listed rather than silently omitted, since pressing them
-/// does now give real feedback.
+/// The file browser (`^T`) isn't actually implemented yet — see
+/// apply_prompt_action's Browser arm — but is still listed rather than
+/// silently omitted, since pressing it does give real feedback.
 const INSERT_SHORTCUTS: &[(Action, &str)] = &[
     (Action::Help, "Help"),
     (Action::Cancel, "Cancel"),
     (Action::FlipNewBuffer, "New Buffer"),
     (Action::FlipConvert, "No Conversion"),
-    (Action::Browser, "Browse"),
     (Action::FlipExecute, "Execute Command"),
+    (Action::Browser, "Browse"),
+];
+
+/// The `^O` Write Out prompt's shortcut list, matching nano 8.7's
+/// MWRITEFILE bar (confirmed against the installed nano). Append,
+/// Prepend, Backup File and Browse aren't implemented yet but are listed
+/// rather than silently omitted.
+const WRITEOUT_SHORTCUTS: &[(Action, &str)] = &[
+    (Action::Help, "Help"),
+    (Action::Cancel, "Cancel"),
+    (Action::DosFormat, "DOS Format"),
+    (Action::MacFormat, "Mac Format"),
+    (Action::Append, "Append"),
+    (Action::Prepend, "Prepend"),
+    (Action::Backup, "Backup File"),
+    (Action::DiscardBuffer, "Discard buffer"),
+    (Action::Browser, "Browse"),
 ];
 
 /// The `^T` Execute Command prompt's shortcut list, matching nano's full
 /// MEXECUTE menu (confirmed against the installed nano's own bottom bar).
-/// Full Justify (`^J`), Cut Till End (`^V`), Pipe Text (`M-\`), and Suspend
-/// (`^Z`) aren't actually implemented yet — see apply_prompt_action's
-/// arms for them — but are still listed rather than silently omitted.
+/// Full Justify (`^J`), Cut Till End (`^V`), and Pipe Text (`M-\`) aren't
+/// actually implemented yet — see apply_prompt_action's arms for them —
+/// but are still listed rather than silently omitted.
 const EXECUTE_SHORTCUTS: &[(Action, &str)] = &[
     (Action::Help, "Help"),
     (Action::Cancel, "Cancel"),
@@ -2543,6 +2657,7 @@ fn shortcut_bar_entries(keymap: &KeyMap, prompt: Option<&Prompt>) -> Vec<(String
         Menu::GotoLine => GOTOLINE_SHORTCUTS,
         Menu::Help => HELP_SHORTCUTS,
         Menu::Insert => INSERT_SHORTCUTS,
+        Menu::WriteOut => WRITEOUT_SHORTCUTS,
         Menu::Execute => EXECUTE_SHORTCUTS,
         Menu::Linter => LINTER_SHORTCUTS,
         _ => return resolve_shortcuts(keymap, Menu::Main, SHORTCUT_PRIORITY),
@@ -2701,6 +2816,10 @@ fn render_buffer(
     let gutter = editor.gutter_width();
     let cols = editor.screen_cols;
     let tabsize = editor.options.tabsize as usize;
+    let whitespace = editor
+        .options
+        .whitespacedisplay
+        .then_some(editor.options.whitespace);
 
     // Memoized on the buffer itself, invalidated only by an actual edit or
     // language change (see `Buffer::highlighted_spans_cached`) -- a full
@@ -2752,7 +2871,8 @@ fn render_buffer(
             let line_start = buf.line_start_byte(line_idx);
             let char_styles = map_spans_to_line(&raw, line_start, &spans, editor);
 
-            let (expanded, expanded_styles) = expand_tabs_with_styles(&raw, &char_styles, tabsize);
+            let (expanded, expanded_styles) =
+                expand_tabs_with_styles(&raw, &char_styles, tabsize, whitespace);
             rendered.push_str(&expanded);
             styles.extend(expanded_styles);
 
@@ -3076,11 +3196,16 @@ fn map_spans_to_line(
 
 /// Like tab expansion alone, but carries each source character's syntax
 /// style along to every column it expands to, so a tab adjacent to a
-/// highlighted token doesn't break the highlighting.
+/// highlighted token doesn't break the highlighting. With `whitespace`
+/// (the `set whitespace` pair, passed when `whitespacedisplay` is on) a
+/// tab shows as its marker followed by the usual fill to the next tab
+/// stop, and a space as its marker -- nano's `display_string`, whose
+/// markers take exactly the columns the blanks did.
 fn expand_tabs_with_styles(
     line: &str,
     styles: &[Option<Style>],
     tabsize: usize,
+    whitespace: Option<(char, char)>,
 ) -> (String, Vec<Option<Style>>) {
     let mut out = String::new();
     let mut out_styles = Vec::new();
@@ -3088,11 +3213,17 @@ fn expand_tabs_with_styles(
     for (c, k) in line.chars().zip(styles.iter().copied()) {
         if c == '\t' {
             let n = tabsize - (w % tabsize);
-            for _ in 0..n {
+            out.push(whitespace.map_or(' ', |(tab, _)| tab));
+            out_styles.push(k);
+            for _ in 1..n {
                 out.push(' ');
                 out_styles.push(k);
             }
             w += n;
+        } else if c == ' ' {
+            out.push(whitespace.map_or(' ', |(_, space)| space));
+            out_styles.push(k);
+            w += 1;
         } else {
             out.push(c);
             out_styles.push(k);
@@ -3100,6 +3231,19 @@ fn expand_tabs_with_styles(
         }
     }
     (out, out_styles)
+}
+
+/// Prompt input with whitespace made visible when `whitespacedisplay` is
+/// on -- nano runs the answer through the same `display_string` as the
+/// edit rows, so `Search: a·b` there too (only status messages are
+/// exempt).
+fn prompt_input_for_display(editor: &Editor, input: &str) -> String {
+    if !editor.options.whitespacedisplay {
+        return input.to_string();
+    }
+    let styles = vec![None; input.chars().count()];
+    let tabsize = editor.options.tabsize as usize;
+    expand_tabs_with_styles(input, &styles, tabsize, Some(editor.options.whitespace)).0
 }
 
 /// Highlight `body` (already-split lines of a unified diff) with the
@@ -3240,7 +3384,7 @@ mod tests {
                 execute: false,
             },
             menu: Menu::Insert,
-            label: crate::app::insert_prompt_label(new_buffer, false),
+            label: crate::app::insert_prompt_label(new_buffer, false, false),
             input: input.to_string(),
             cursor: input.chars().count(),
             history_pos: None,
@@ -3532,10 +3676,8 @@ mod tests {
 
     #[test]
     fn unimplemented_insert_actions_report_plainly_and_close_the_prompt() {
-        for (action, expected) in [
-            (Action::FlipConvert, "No Conversion: not yet implemented"),
-            (Action::Browser, "File Browser: not yet implemented"),
-        ] {
+        let (action, expected) = (Action::Browser, "File Browser: not yet implemented");
+        {
             let mut ed = test_editor("x");
             let mut prompt = insert_prompt(false, "");
             assert!(
@@ -3784,5 +3926,171 @@ mod tests {
         for (key, desc) in &entries {
             assert!(!key.is_empty(), "no key resolved for {desc:?}");
         }
+    }
+
+    #[test]
+    fn shift_tab_unindents_and_keeps_a_soft_mark() {
+        // Shift+Down sets a soft mark spanning line 0; a following
+        // Shift-Tab (reported by crossterm as BackTab, here deliberately
+        // without the SHIFT modifier) unindents that line and, unlike a
+        // plain edit, must not drop the soft mark just because the
+        // cursor/mark columns shifted -- nano's `shift_held` exemption.
+        let mut ed = test_editor("\tone\n\ttwo\n");
+        ed.buf_mut().cursor = Pos::new(0, 3);
+        handle_editing_key(&mut ed, KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        assert_eq!(ed.buf().mark, Some(Pos::new(0, 3)));
+        assert!(ed.buf().softmark);
+        assert_eq!(ed.buf().cursor, Pos::new(1, 3));
+
+        handle_editing_key(&mut ed, KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(ed.buf().line(0), "one");
+        assert_eq!(ed.buf().line(1), "two");
+        assert_eq!(
+            ed.buf().mark,
+            Some(Pos::new(0, 2)),
+            "soft mark kept, shifted left"
+        );
+        assert!(ed.buf().softmark);
+        assert_eq!(ed.buf().cursor, Pos::new(1, 2));
+
+        // A plain movement afterwards still drops it as usual.
+        handle_editing_key(&mut ed, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(ed.buf().mark, None);
+    }
+
+    #[test]
+    fn dos_and_mac_toggles_at_the_write_out_prompt_flip_label_and_format() {
+        use crate::buffer::LineFormat;
+        let mut ed = test_editor("x\n");
+        let mut prompt = Prompt {
+            kind: PromptKind::WriteOut { exiting: false },
+            menu: Menu::WriteOut,
+            label: ed.writeout_prompt_label(false),
+            input: String::new(),
+            cursor: 0,
+            history_pos: None,
+            saved_input: None,
+        };
+        assert_eq!(prompt.label, "Write to File");
+        assert!(
+            !apply_prompt_action(&mut ed, &mut prompt, Action::DosFormat),
+            "the prompt stays open"
+        );
+        assert_eq!(ed.buf().format, LineFormat::Dos);
+        assert_eq!(prompt.label, "Write to File [DOS Format]");
+        assert!(!apply_prompt_action(
+            &mut ed,
+            &mut prompt,
+            Action::MacFormat
+        ));
+        assert_eq!(ed.buf().format, LineFormat::Mac);
+        assert_eq!(prompt.label, "Write to File [Mac Format]");
+        assert!(!apply_prompt_action(
+            &mut ed,
+            &mut prompt,
+            Action::MacFormat
+        ));
+        assert_eq!(
+            ed.buf().format,
+            LineFormat::Unix,
+            "toggling the current format off means Unix"
+        );
+        assert_eq!(prompt.label, "Write to File");
+        assert!(
+            !ed.buf().modified,
+            "a format flip alone doesn't dirty the buffer"
+        );
+    }
+
+    #[test]
+    fn no_conversion_flips_the_global_option_and_the_prompt_label() {
+        let mut ed = test_editor("x");
+        let mut prompt = insert_prompt(false, "");
+        assert!(!apply_prompt_action(
+            &mut ed,
+            &mut prompt,
+            Action::FlipConvert
+        ));
+        assert!(
+            ed.options.noconvert,
+            "nano's flip_convert toggles the global flag"
+        );
+        assert_eq!(prompt.label, "File to insert unconverted [from ./]");
+        assert!(!apply_prompt_action(
+            &mut ed,
+            &mut prompt,
+            Action::FlipNewBuffer
+        ));
+        assert_eq!(
+            prompt.label,
+            "File to read unconverted into new buffer [from ./]"
+        );
+        assert!(!apply_prompt_action(
+            &mut ed,
+            &mut prompt,
+            Action::FlipConvert
+        ));
+        assert!(!ed.options.noconvert);
+        assert_eq!(prompt.label, "File to read into new buffer [from ./]");
+    }
+
+    #[test]
+    fn inserting_a_file_converts_it_and_a_fresh_buffer_adopts_its_format() {
+        use crate::buffer::LineFormat;
+        let path = std::env::temp_dir().join("tico_test_insert_dos.txt");
+        std::fs::write(&path, "in\r\n").unwrap();
+        let mut ed = test_editor("");
+        submit_prompt(&mut ed, insert_prompt(false, path.to_str().unwrap()));
+        assert_eq!(ed.buf().to_string(), "in\n");
+        assert_eq!(ed.buf().format, LineFormat::Dos);
+        assert_eq!(
+            ed.status.as_deref(),
+            Some("Read 1 line (converted from DOS format)")
+        );
+
+        let unix_path = std::env::temp_dir().join("tico_test_insert_unix.txt");
+        std::fs::write(&unix_path, "more\n").unwrap();
+        submit_prompt(&mut ed, insert_prompt(false, unix_path.to_str().unwrap()));
+        assert_eq!(
+            ed.buf().format,
+            LineFormat::Dos,
+            "an existing format sticks"
+        );
+        assert_eq!(ed.status.as_deref(), Some("Read 1 line"));
+
+        ed.options.noconvert = true;
+        submit_prompt(&mut ed, insert_prompt(false, path.to_str().unwrap()));
+        assert!(
+            ed.buf().to_string().contains("in\r\n"),
+            "unconverted bytes are inserted as-is"
+        );
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&unix_path).ok();
+    }
+
+    #[test]
+    fn whitespace_display_substitutes_markers_without_changing_widths() {
+        let styles = vec![None; 6];
+        let (plain, plain_styles) = expand_tabs_with_styles("a\tb c ", &styles, 8, None);
+        assert_eq!(plain, "a       b c ");
+        let (marked, marked_styles) =
+            expand_tabs_with_styles("a\tb c ", &styles, 8, Some(('\u{bb}', '\u{b7}')));
+        assert_eq!(
+            marked, "a\u{bb}      b\u{b7}c\u{b7}",
+            "as nano 8.7.1 renders it"
+        );
+        assert_eq!(marked.chars().count(), plain.chars().count());
+        assert_eq!(marked_styles.len(), plain_styles.len());
+
+        let (t, _) = expand_tabs_with_styles("\tx", &[None, None], 4, Some(('>', '.')));
+        assert_eq!(t, ">   x", "a tab at a stop still fills to the next one");
+    }
+
+    #[test]
+    fn prompt_input_shows_markers_only_while_whitespace_display_is_on() {
+        let mut ed = test_editor("");
+        assert_eq!(prompt_input_for_display(&ed, "a b"), "a b");
+        ed.options.whitespacedisplay = true;
+        assert_eq!(prompt_input_for_display(&ed, "a b"), "a\u{b7}b");
     }
 }

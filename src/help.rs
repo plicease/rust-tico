@@ -9,7 +9,7 @@
 //! Intro wording is adapted from nano's own help text (src/help.c), which
 //! is itself the closest thing to a spec for what each prompt does.
 
-use crate::keymap::{Binding, Key, KeyMap, Menu};
+use crate::keymap::{Action, Binding, Key, KeyMap, Menu};
 use std::collections::BTreeMap;
 
 /// Build the help screen for `menu`. Element 0 is the title, shown on its
@@ -257,6 +257,11 @@ fn shortcut_lines(menu: Menu, keymap: &KeyMap) -> Vec<String> {
             continue;
         }
         if let Binding::Action(action) = binding {
+            // nano's main-menu ^Z entry (the "type ^T^Z" hint) isn't a
+            // listed function there either.
+            if *action == Action::SuggestSuspend {
+                continue;
+            }
             by_description
                 .entry(action.description())
                 .or_default()
@@ -316,6 +321,10 @@ mod tests {
                 .any(|l| l.contains("^G") && l.contains("Display this help text"))
         );
         assert!(lines.iter().any(|l| l.contains("Search forward")));
+        assert!(
+            !lines.iter().any(|l| l.contains("Say how to suspend")),
+            "nano's main help doesn't list the ^Z hint entry"
+        );
     }
 
     #[test]

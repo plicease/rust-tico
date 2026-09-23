@@ -82,6 +82,13 @@ pub enum Action {
     Redo,
     Refresh,
     Suspend,
+    /// What plain `^Z` does in the main menu by default: nano's
+    /// `suggest_ctrlT_ctrlZ`, which just says "To suspend, type ^T^Z".
+    /// Not a nanorc-bindable function (nano has no name for it either);
+    /// it exists as an action so `bind ^Z ... main` / `unbind ^Z main`
+    /// displace it exactly like nano's shortcut-list entry, and so
+    /// `--modernbindings` can put Undo on `^Z` instead.
+    SuggestSuspend,
     CaseSens,
     Regexp,
     Backwards,
@@ -318,6 +325,7 @@ impl Action {
             Redo => "Redo the last undone operation",
             Refresh => "Refresh (redraw) the current screen",
             Suspend => "Suspend the editor (return to the shell)",
+            SuggestSuspend => "Say how to suspend the editor",
             CaseSens => "Toggle the case sensitivity of the search",
             Regexp => "Toggle the use of regular expressions",
             Backwards => "Reverse the direction of the search",
@@ -835,6 +843,9 @@ impl KeyMap {
         b(K::Meta(';'), A::RunMacro);
         b(K::Meta('U'), A::Undo);
         b(K::Meta('E'), A::Redo);
+        // nano binds plain ^Z in the main menu to a hint about ^T^Z, not
+        // to suspend itself (that lives in the Execute menu).
+        b(K::Ctrl('Z'), A::SuggestSuspend);
         b(K::Ctrl('S'), A::SaveFile);
         b(K::Ctrl('C'), A::Location);
         b(K::F(11), A::Location);
@@ -932,6 +943,9 @@ impl KeyMap {
         );
         self.bind(Menu::WriteOut, K::Meta('D'), Binding::Action(A::DosFormat));
         self.bind(Menu::WriteOut, K::Meta('M'), Binding::Action(A::MacFormat));
+        // nano's `to_files` (Browse) is bound in both the Write Out and
+        // Read File menus.
+        self.bind(Menu::WriteOut, K::Ctrl('T'), Binding::Action(A::Browser));
         self.bind(Menu::WriteOut, K::Meta('A'), Binding::Action(A::Append));
         self.bind(Menu::WriteOut, K::Meta('P'), Binding::Action(A::Prepend));
         self.bind(Menu::WriteOut, K::Meta('B'), Binding::Action(A::Backup));

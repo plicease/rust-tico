@@ -1,0 +1,98 @@
+# Known differences from nano
+
+tico aims to match GNU nano's behavior, verified against the installed
+`nano` binary and its source. This file records the places where it
+knowingly does not. These are either deliberate design choices or
+accepted limitations, not work that is planned: unimplemented features
+live in `TODO.md`. When a difference here is later removed, delete its
+entry.
+
+## Syntax highlighting is not nano's
+
+tico highlights with tree-sitter grammars (`src/syntax/`) rather than
+nano's regex-based `color`/`icolor` engine. nanorc's highlighting
+directives — `syntax`, `color`, `icolor`, `header`, `magic`, `include`,
+`extendsyntax`, and the per-syntax `formatter`/`linter`/`comment`/
+`tabgives` lines — are parsed so a real-world nanorc still loads, but
+have no effect. The built-in language table in `src/syntax/languages.rs`
+supplies what those per-syntax lines would have (the linter/formatter
+commands and the `M-3` comment sequence), sourced from nano's shipped
+syntax files where nano has one.
+
+Colors come from a theme in Helix's format (`src/theme.rs`), selected in
+`~/.ticorc` or with `--tico-theme`, and only the syntax scopes of a theme
+are honored. A theme's `ui.*` entries are ignored: bars, line numbers and
+the selection are nano's domain (`set titlecolor` and friends; see
+`TODO.md` for which of those tico consults so far).
+
+Consequences worth knowing:
+
+- A user's custom `syntax`/`color` definitions do nothing, and there is
+  no way to add highlighting for a language without adding a tree-sitter
+  grammar to tico itself.
+- nano's per-syntax `tabgives` string cannot override what `M-}` indents
+  with; tico always uses a tab, or `tabsize` spaces under `tabstospaces`.
+- `M-3` cannot comment a file whose syntax only a nanorc defines; a
+  buffer with no recognized language uses nano's general default, `#`.
+
+The trade is deliberate: tree-sitter parses the language rather than
+pattern-matching lines, so highlighting is accurate across multi-line
+constructs and heredocs, and any Helix theme works unmodified.
+
+## Title bar: `[x/y]` with multiple buffers, and "View"
+
+When more than one buffer is open, nano replaces the version text in the
+upper-left corner with the `[current/total]` buffer indicator. tico keeps
+`tico VERSION` on the left and puts `[x/y]` in the upper-right corner
+instead, so neither is lost. `--view`'s "View" marker shares that corner,
+and the two show together when both apply.
+
+## Suspend: no SIGTSTP/SIGCONT handling
+
+`^T^Z` suspends exactly as nano does: the terminal is restored and the
+whole process group is stopped with SIGSTOP, and `fg` resumes in place.
+But nano also installs SIGTSTP and SIGCONT handlers so that a stop sent
+from outside (`kill -TSTP`, or a shell or multiplexer stopping the job)
+restores the terminal first and re-initializes it on resume. tico has no
+signal handlers, so an externally sent SIGTSTP stops it with the terminal
+still in raw mode and on the alternate screen.
+
+A typed `^Z` is unaffected: both editors disable the terminal's ISIG in
+raw mode, so it arrives as a keystroke (nano's "To suspend, type ^T^Z"
+hint, or the Execute menu's suspend) rather than as a signal.
+
+## Help listing order and contents
+
+nano's `^G` help lists a menu's functions in its fixed registration
+order, and lists a function even when it has no key in that menu (in the
+main menu, Suspend appears with an empty key column). tico builds the
+listing from the live keymap, so only bound actions appear, sorted by
+description rather than by nano's order.
+
+## Comment toggle: cursor after removing a postfix
+
+For a bracketing comment sequence such as HTML's `<!--|-->`, uncommenting
+a line with the cursor near its end can leave the cursor past the new
+line end once the postfix is gone. nano leaves that stale column in
+place; tico clamps the cursor (and mark) to the end of the line.
+
+## Mac (bare-CR) line endings are kept on purpose
+
+nano removed Mac format -- reading and writing files whose lines end in
+a bare CR, the `M-M Mac Format` toggle at the Write Out prompt, and the
+"converted from Mac format" message -- from its master branch in April
+2026, so nano releases after 8.7.1 have only Unix and DOS. tico keeps
+it: vintage machines still produce and consume such files, and tico is
+used with them. Do not remove Mac format to track newer nano; when the
+installed nano no longer has it, this becomes an intentional difference
+rather than a bug.
+
+## `set noconvert`: how kept carriage returns display
+
+With conversion off, nano keeps a DOS or Mac file's CRs as content and
+shows each one as `^M`. tico keeps the bytes too, and writes them back
+unchanged, but its text store treats a CR as a line break: a CRLF file's
+CRs are invisible at the ends of their lines rather than shown as `^M`,
+and an old Mac file (bare CRs) displays as separate lines instead of one
+long line with `^M` markers. The default, converting on read, behaves as
+nano does.

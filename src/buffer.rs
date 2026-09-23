@@ -68,8 +68,24 @@ struct HighlightCache {
     spans: Vec<crate::syntax::HighlightSpan>,
 }
 
+/// A buffer's line-ending format, nano 8.7's `format_type`: what
+/// `save_file` writes after each line -- LF, CR LF (DOS) or a bare CR
+/// (old Mac). `Unspecified` is a buffer nothing has been read into yet
+/// (nano's UNSPECIFIED): it writes as Unix, but the first file read into
+/// it decides the format (see `adopt_format`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineFormat {
+    #[default]
+    Unspecified,
+    Unix,
+    Dos,
+    Mac,
+}
+
 pub struct Buffer {
     pub rope: Rope,
+    /// Line endings to write this buffer with; see `LineFormat`.
+    pub format: LineFormat,
     pub path: Option<PathBuf>,
     pub cursor: Pos,
     pub mark: Option<Pos>,
@@ -129,6 +145,7 @@ impl Buffer {
     pub fn empty() -> Buffer {
         Buffer {
             rope: Rope::new(),
+            format: LineFormat::Unspecified,
             path: None,
             cursor: Pos::new(0, 0),
             mark: None,
@@ -161,6 +178,19 @@ impl Buffer {
 
     pub fn line_count(&self) -> usize {
         self.rope.len_lines()
+    }
+
+    /// Settle this buffer's line-ending format after reading a file into
+    /// it, matching the end of nano's `read_file`: `set unix` forces Unix
+    /// regardless; otherwise only a buffer that has no format yet takes
+    /// the file's `detected` one (from `fileio::convert_line_endings`), so
+    /// inserting a DOS file into an existing buffer doesn't flip it.
+    pub fn adopt_format(&mut self, detected: LineFormat, unix: bool) {
+        if unix {
+            self.format = LineFormat::Unix;
+        } else if self.format == LineFormat::Unspecified {
+            self.format = detected;
+        }
     }
 
     pub fn line(&self, idx: usize) -> String {
@@ -272,6 +302,20 @@ impl Buffer {
             Pos::new(pos.line, pos.col + 1)
         };
         self.replace_range(pos, after_pos, "", pos);
+    }
+
+    /// Replace whole lines `first..=last` (the newlines between them
+    /// included, the one after `last` not) with `text`, as a single undo
+    /// step -- for line-oriented edits like indent/unindent that touch
+    /// several non-adjacent spots at once but must undo together.
+    pub fn replace_lines(&mut self, first: usize, last: usize, text: &str, cursor_after: Pos) {
+        let end_col = self.line(last).chars().count();
+        self.replace_range(
+            Pos::new(first, 0),
+            Pos::new(last, end_col),
+            text,
+            cursor_after,
+        );
     }
 
     /// Cut and return the text of a line range (used by cut-line and
