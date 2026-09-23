@@ -581,6 +581,19 @@ fn apply_prompt_action(editor: &mut Editor, prompt: &mut Prompt, action: Action)
             editor.mode = Mode::Editing;
             true
         }
+        // nano runs a bound movement function from the prompt and is then
+        // done with it (`ask_for_line_and_column`: "when a function was
+        // run, we're done"), so these leave the prompt like ^Y/^V do.
+        Action::BeginPara => {
+            editor.move_para_begin();
+            editor.mode = Mode::Editing;
+            true
+        }
+        Action::EndPara => {
+            editor.move_para_end();
+            editor.mode = Mode::Editing;
+            true
+        }
         Action::CaseSens => {
             editor.search.case_sensitive = !editor.search.case_sensitive;
             refresh_search_label(editor, prompt);

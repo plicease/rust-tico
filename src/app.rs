@@ -559,8 +559,10 @@ impl Editor {
             ScrollUp => self.scroll_view(-1),
             ScrollDown => self.scroll_view(1),
             ScrollLeft | ScrollRight => {}
-            BeginPara | EndPara | PrevBlock | NextBlock | TopRow | BottomRow => {
-                self.set_status("paragraph/block navigation: not yet implemented");
+            BeginPara => self.move_para_begin(),
+            EndPara => self.move_para_end(),
+            PrevBlock | NextBlock | TopRow | BottomRow => {
+                self.set_status("block navigation: not yet implemented");
             }
             FindBracket => self.set_status("find-bracket: not yet implemented"),
             Anchor | PrevAnchor | NextAnchor => self.set_status("anchors: not yet implemented"),
@@ -972,9 +974,7 @@ impl Editor {
         let brackets = self.options.brackets.clone();
         let trim_blanks = self.options.trimblanks;
 
-        let lines: Vec<Vec<char>> = (0..self.buf().line_count())
-            .map(|i| self.buf().line(i).chars().collect())
-            .collect();
+        let lines = self.char_lines();
 
         if whole_buffer {
             let mut result = lines;
@@ -1230,6 +1230,45 @@ impl Editor {
     fn move_next_word(&mut self) {
         let pos = word_right_pos(self.buf(), self.buf().cursor);
         self.buf_mut().cursor = pos;
+    }
+
+    /// The buffer as the `justify` module's line vectors.
+    fn char_lines(&self) -> Vec<Vec<char>> {
+        (0..self.buf().line_count())
+            .map(|i| self.buf().line(i).chars().collect())
+            .collect()
+    }
+
+    /// nano's `to_para_begin` (`M-(`, `M-9`; `^W` in the Go To Line
+    /// prompt): to the first line of the paragraph the cursor is in, or
+    /// of the previous one when already on that line. A paragraph here
+    /// is what justify would treat as one, `quotestr` included. nano
+    /// redraws with CENTERING, so an off-screen landing is centered.
+    pub fn move_para_begin(&mut self) {
+        let quote_re = regex::Regex::new(&self.options.quotestr).ok();
+        let lines = self.char_lines();
+        let from = self.buf().cursor.line;
+        let line = crate::justify::para_begin(&lines, from, quote_re.as_ref());
+        self.buf_mut().cursor = Pos::new(line, 0);
+        self.scroll_to_cursor_centered();
+    }
+
+    /// nano's `to_para_end` (`M-)`, `M-0`; `^O` in the Go To Line
+    /// prompt): to just beyond the end of the paragraph the cursor is in
+    /// or before, i.e. the start of the line after it; or the end of the
+    /// buffer's last line when that is where the paragraph ends.
+    pub fn move_para_end(&mut self) {
+        let quote_re = regex::Regex::new(&self.options.quotestr).ok();
+        let lines = self.char_lines();
+        let from = self.buf().cursor.line;
+        let line = crate::justify::para_end(&lines, from, quote_re.as_ref());
+        let cursor = if line + 1 < lines.len() {
+            Pos::new(line + 1, 0)
+        } else {
+            Pos::new(line, lines[line].len())
+        };
+        self.buf_mut().cursor = cursor;
+        self.scroll_to_cursor_centered();
     }
 
     fn page_up(&mut self) {
@@ -2874,6 +2913,83 @@ mod tests {
     }
 
     // ----- Suspend hint (nano's suggest_ctrlT_ctrlZ) -----
+
+    /// nano's `to_para_begin`/`to_para_end`, checked against the installed
+    /// nano: a paragraph is a run of non-blank lines (as justify sees it);
+    /// begin goes to the paragraph's first line, then to the previous
+    /// paragraph's; end goes to the start of the line after the paragraph,
+    /// then past the next one, and to the end of the last line at the end
+    /// of the buffer.
+    #[test]
+    fn paragraph_begin_and_end_move_like_nano() {
+        let text = "one a\none b\none c\n\ntwo a\ntwo b\n\n\nthree a\nthree b";
+        let mut ed = test_editor(text);
+
+        // Begin: from mid-paragraph to its first line, then back one
+        // paragraph at a time, stopping at the first line.
+        ed.buf_mut().cursor = Pos::new(5, 3);
+        ed.execute(Action::BeginPara);
+        assert_eq!(ed.buf().cursor, Pos::new(4, 0));
+        ed.execute(Action::BeginPara);
+        assert_eq!(ed.buf().cursor, Pos::new(0, 0));
+        ed.execute(Action::BeginPara);
+        assert_eq!(ed.buf().cursor, Pos::new(0, 0));
+        // From a blank line, to the start of the paragraph before it.
+        ed.buf_mut().cursor = Pos::new(7, 0);
+        ed.execute(Action::BeginPara);
+        assert_eq!(ed.buf().cursor, Pos::new(4, 0));
+
+        // End: from mid-paragraph to the line after it, then on past the
+        // next paragraph (skipping the blank lines before it), and at the
+        // last paragraph to the end of the buffer's last line.
+        ed.buf_mut().cursor = Pos::new(1, 2);
+        ed.execute(Action::EndPara);
+        assert_eq!(ed.buf().cursor, Pos::new(3, 0));
+        ed.execute(Action::EndPara);
+        assert_eq!(ed.buf().cursor, Pos::new(6, 0));
+        ed.execute(Action::EndPara);
+        assert_eq!(ed.buf().cursor, Pos::new(9, "three b".len()));
+        ed.execute(Action::EndPara);
+        assert_eq!(ed.buf().cursor, Pos::new(9, "three b".len()));
+    }
+
+    /// `quotestr` decides paragraph membership for these moves as it does
+    /// for justify: a change of quote prefix starts a new paragraph.
+    #[test]
+    fn paragraph_moves_respect_quotestr() {
+        let text = "> q1\n> q2\nplain\n";
+        let mut ed = test_editor(text);
+        ed.buf_mut().cursor = Pos::new(2, 3);
+        ed.execute(Action::BeginPara);
+        assert_eq!(
+            ed.buf().cursor,
+            Pos::new(0, 0),
+            "the quoted lines are one paragraph"
+        );
+        ed.execute(Action::EndPara);
+        assert_eq!(
+            ed.buf().cursor,
+            Pos::new(2, 0),
+            "the quoted paragraph ends before `plain`"
+        );
+        ed.execute(Action::EndPara);
+        assert_eq!(ed.buf().cursor, Pos::new(3, 0));
+    }
+
+    /// A paragraph jump that lands off-screen centers the cursor, as
+    /// nano's `edit_redraw(..., CENTERING)` does for these moves.
+    #[test]
+    fn paragraph_end_centers_offscreen_landing() {
+        let text = (0..60).map(|i| format!("line{i}\n")).collect::<String>();
+        let mut ed = test_editor(&text);
+        ed.screen_rows = 24;
+        ed.buf_mut().cursor = Pos::new(0, 0);
+        ed.buf_mut().top_line = 0;
+        ed.execute(Action::EndPara);
+        let rows = ed.text_rows();
+        assert_eq!(ed.buf().cursor, Pos::new(60, 0));
+        assert_eq!(ed.buf().top_line, 60 - rows / 2);
+    }
 
     fn editor_with_default_keys(modern: bool) -> Editor {
         let mut ed = test_editor("x");

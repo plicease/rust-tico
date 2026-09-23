@@ -92,6 +92,21 @@ pub fn para_begin(lines: &[Vec<char>], from: usize, quote_re: Option<&Regex>) ->
     idx
 }
 
+/// nano's `do_para_end`: step forward to the last line of the first
+/// paragraph found at or after `from` (the last line of the buffer when
+/// there is none).
+pub fn para_end(lines: &[Vec<char>], from: usize, quote_re: Option<&Regex>) -> usize {
+    let last = lines.len().saturating_sub(1);
+    let mut idx = from.min(last);
+    while idx < last && !inpar(&lines[idx], quote_re) {
+        idx += 1;
+    }
+    while idx < last && inpar(&lines[idx + 1], quote_re) && !begpar(lines, idx + 1, quote_re) {
+        idx += 1;
+    }
+    idx
+}
+
 /// Whether `lines[from]` sits inside a paragraph without being its first
 /// line -- nano's own gate for whether `^J` should first back up to
 /// `para_begin` before searching forward.
