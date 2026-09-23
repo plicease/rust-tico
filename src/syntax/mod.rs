@@ -166,50 +166,62 @@ pub fn highlight(text: &str, lang: &'static LanguageDef) -> Vec<HighlightSpan> {
 }
 
 /// Perl-specific for now: `tree-sitter-perl` is the only vendored grammar
-/// whose node kinds this matches (`heredoc_start_identifier` /
-/// `heredoc_body_statement`); other languages' trees simply won't contain
-/// nodes with these kind names, so this is a no-op for them.
+/// whose node kinds this matches (`heredoc_start_identifier`); other
+/// languages' trees simply won't contain nodes with that kind name, so this
+/// is a no-op for them.
+///
+/// Bodies are located by text rather than from the tree. The Perl grammar
+/// only produces a `heredoc_body_statement` when the statement carrying
+/// the `<<TAG` ends on that same line; inside a multi-line construct
+/// (`content => <<~'VCL',` in a hash) it emits no body node and parses the
+/// body as Perl code, so pairing start identifiers with body nodes would
+/// silently skip exactly the heredocs that most need re-highlighting, and
+/// leave Perl's coloring of the body in place (where `-A` in a VCL header
+/// name reads as a file test operator). Perl's own rule is simple enough
+/// to apply directly: the body starts on the line after the `<<TAG` (or
+/// after the previous heredoc's terminator, when several share a line) and
+/// ends at the first line that is exactly the terminator, with leading
+/// whitespace allowed for `<<~`.
 fn inject_heredocs(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<HighlightSpan>) {
     let mut starts = Vec::new();
     collect_by_kind(tree.root_node(), "heredoc_start_identifier", &mut starts);
     if starts.is_empty() {
         return;
     }
-    let mut bodies = Vec::new();
-    collect_by_kind(tree.root_node(), "heredoc_body_statement", &mut bodies);
     starts.sort_by_key(|n| n.start_byte());
-    bodies.sort_by_key(|n| n.start_byte());
 
-    // Heredoc bodies appear in the source in the same order as their `<<TAG`
-    // starts (Perl processes them in that order), so pairing by position is
-    // reliable for the common case of one heredoc per statement. There's no
-    // structural link in the tree between a start identifier and its body.
-    for (start_id, body) in starts.iter().zip(bodies.iter()) {
-        let raw = &text[start_id.start_byte()..start_id.end_byte()];
-        let Some(lang) = languages::find_by_name(heredoc_language_name(raw)) else {
+    // Where the next body may begin: heredocs are consumed in source order,
+    // so a second `<<TAG` on the same line gets the lines after the first
+    // one's terminator.
+    let mut next_body = 0;
+    for start_id in starts {
+        let raw = &text[start_id.byte_range()];
+        let indented = raw.starts_with('~');
+        let name = heredoc_language_name(raw);
+        let after_line = text[start_id.end_byte()..]
+            .find('\n')
+            .map_or(text.len(), |i| start_id.end_byte() + i + 1);
+        let body_start = after_line.max(next_body);
+        let Some((body_end, after_terminator)) =
+            find_heredoc_terminator(text, body_start, name, indented)
+        else {
+            // Unterminated: the body runs to end of file and Perl itself
+            // would reject it. Nothing sensible to inject, for this heredoc
+            // or any that follow it.
+            break;
+        };
+        next_body = after_terminator;
+
+        let Some(lang) = languages::find_by_name(name) else {
             continue;
         };
-
-        // The body node includes its own closing terminator line (as a
-        // `heredoc_end_identifier` child); only the text before that should
-        // be handed to the injected grammar.
-        let mut body_end = body.end_byte();
-        let mut cursor = body.walk();
-        for child in body.children(&mut cursor) {
-            if child.kind() == "heredoc_end_identifier" {
-                body_end = child.start_byte();
-                break;
-            }
-        }
-        let body_start = body.start_byte();
-        if body_end <= body_start || body_end > text.len() {
+        if body_end <= body_start {
             continue;
         }
-
         let inner_spans = highlight(&text[body_start..body_end], lang);
         if inner_spans.is_empty() {
-            // Leave the outer (Perl) query's own @string coloring in place
-            // rather than blanking the body out.
+            // Leave the outer (Perl) query's own coloring in place rather
+            // than blanking the body out.
             continue;
         }
         spans.retain(|s| !(s.start < body_end && s.end > body_start));
@@ -219,6 +231,31 @@ fn inject_heredocs(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<Highlig
             ..s
         }));
     }
+}
+
+/// Find the first line at or after byte offset `from` that is exactly
+/// `name` (after an optional `\r`, and after leading whitespace when
+/// `indented`, i.e. for `<<~`). Returns the byte offset where that line
+/// starts, which ends the heredoc body, and the offset just past it.
+fn find_heredoc_terminator(
+    text: &str,
+    from: usize,
+    name: &str,
+    indented: bool,
+) -> Option<(usize, usize)> {
+    let mut pos = from;
+    while pos < text.len() {
+        let line_end = text[pos..].find('\n').map_or(text.len(), |i| pos + i);
+        let line = text[pos..line_end]
+            .strip_suffix('\r')
+            .unwrap_or(&text[pos..line_end]);
+        let candidate = if indented { line.trim_start() } else { line };
+        if candidate == name {
+            return Some((pos, (line_end + 1).min(text.len())));
+        }
+        pos = line_end + 1;
+    }
+    None
 }
 
 /// VCL-specific: the vendored VCL grammar lexes a Varnish `C{ ... }C` block
@@ -708,6 +745,78 @@ mod tests {
         assert_eq!(at("baz.o").as_deref(), Some("string.special.path"));
         // A standard target keeps the crate's more specific capture.
         assert_eq!(at("all").as_deref(), Some("constant.macro"));
+    }
+
+    /// A Fastly VCL snippet is a bare run of statements with no `sub` around
+    /// it, and that is also what a `<<VCL` heredoc usually holds. It must
+    /// parse cleanly: when it went through error recovery instead, the
+    /// lexer split hyphenated header names and left odd characters
+    /// uncolored (`AWS-Access-Key-Id` lost its second `A`).
+    #[test]
+    fn vcl_snippet_without_sub_parses_and_keeps_hyphenated_names_whole() {
+        let snippet = concat!(
+            "set req.http.AWS-Access-Key-Id = \"AKIA\";\n",
+            "set req.http.Slack-Bot-Token = \"xoxb\";\n",
+            "if (req.url ~ \"^/x\") { error 404; }\n",
+            "C{ int x; }C\n",
+            "include \"snip\";\n",
+        );
+        let lang = languages::find_by_name("vcl").unwrap();
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&(lang.language)()).unwrap();
+        let tree = parser.parse(snippet, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{}",
+            tree.root_node().to_sexp()
+        );
+
+        // The same snippet as an indented, quoted heredoc inside a Perl hash.
+        let src = format!(
+            "my %h = (\n    content => <<~'VCL',\n{}    VCL\n);\n",
+            snippet
+                .lines()
+                .map(|l| format!("        {l}\n"))
+                .collect::<String>()
+        );
+        let perl = languages::detect(Some(std::path::Path::new("a.pl")), &src).unwrap();
+        let spans = highlight(&src, perl);
+        let at = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| (s.scope.name().to_string(), s.language))
+                .next_back()
+        };
+        assert_eq!(at("set"), Some(("keyword".to_string(), "vcl")));
+        assert_eq!(
+            at("AWS-Access-Key-Id"),
+            Some(("variable".to_string(), "vcl"))
+        );
+        assert_eq!(at("Slack-Bot-Token"), Some(("variable".to_string(), "vcl")));
+        assert_eq!(at("error"), Some(("keyword".to_string(), "vcl")));
+        assert_eq!(at("int"), Some(("type".to_string(), "c")));
+        // Every non-blank character of the header name lines is covered by
+        // some VCL span, so nothing renders in the terminal's plain color.
+        for line in [
+            "set req.http.AWS-Access-Key-Id = \"AKIA\";",
+            "set req.http.Slack-Bot-Token = \"xoxb\";",
+        ] {
+            let start = src.find(line).unwrap();
+            for (i, ch) in line.char_indices() {
+                if ch == ' ' {
+                    continue;
+                }
+                let pos = start + i;
+                assert!(
+                    spans
+                        .iter()
+                        .any(|s| s.language == "vcl" && s.start <= pos && pos < s.end),
+                    "{ch:?} at column {i} of {line:?} has no VCL span"
+                );
+            }
+        }
     }
 
     #[test]

@@ -32,10 +32,14 @@ module.exports = grammar({
   rules: {
     source_file: $ => repeat($._statement),
 
+    // Declarations, plus any subroutine statement: a Fastly VCL snippet is a
+    // bare run of statements with no enclosing `sub`, and it must parse
+    // cleanly rather than through error recovery (which mis-tokenizes
+    // hyphenated header names).
     _statement: $ => choice(
+      $._subroutine_statement,
       $.vcl_declaration,
       $.import_statement,
-      $.include_statement,
       $.pragma_declaration,
       $.backend_declaration,
       $.probe_declaration,
@@ -45,7 +49,6 @@ module.exports = grammar({
       $.penaltybox_declaration,
       $.ratecounter_declaration,
       $.subroutine_declaration,
-      $.inline_c,
     ),
 
     comment: $ => token(choice(

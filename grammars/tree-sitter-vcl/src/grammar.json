@@ -15,15 +15,15 @@
       "members": [
         {
           "type": "SYMBOL",
+          "name": "_subroutine_statement"
+        },
+        {
+          "type": "SYMBOL",
           "name": "vcl_declaration"
         },
         {
           "type": "SYMBOL",
           "name": "import_statement"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "include_statement"
         },
         {
           "type": "SYMBOL",
@@ -60,10 +60,6 @@
         {
           "type": "SYMBOL",
           "name": "subroutine_declaration"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "inline_c"
         }
       ]
     },
