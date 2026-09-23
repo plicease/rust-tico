@@ -5,6 +5,11 @@ keybindings, configuration, and on-screen behavior as closely as practical,
 verified against the installed `nano` binary and the nano source (checked
 out separately, if available, for reference) rather than assumptions.
 
+`TODO.md` lists nano features tico does not have yet; `DIFFERENCES.md`
+records the known, intentional differences from nano. Keep both current:
+remove a TODO entry when its feature lands, and add a DIFFERENCES entry
+whenever a deliberate deviation is introduced.
+
 ## Never commit or push without explicit instructions
 
 Do not run `git commit` or `git push` (or anything else that lands work in

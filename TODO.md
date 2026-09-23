@@ -5,7 +5,8 @@ implemented (and, where it applies, its "not yet implemented" status
 message and test in `src/app.rs` / `src/ui.rs`).
 
 Syntax highlighting is intentionally *not* nano-compatible; see
-`CLAUDE.md`. Nothing about nanorc `color`/`syntax` directives belongs here.
+`DIFFERENCES.md`. Nothing about nanorc `color`/`syntax` directives belongs
+here.
 
 ## Bound keys that report "not yet implemented"
 
