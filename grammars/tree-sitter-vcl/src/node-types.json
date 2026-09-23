@@ -1894,11 +1894,47 @@
           "named": true
         },
         {
+          "type": "add_statement",
+          "named": true
+        },
+        {
           "type": "backend_declaration",
           "named": true
         },
         {
+          "type": "call_statement",
+          "named": true
+        },
+        {
+          "type": "declaration_statement",
+          "named": true
+        },
+        {
+          "type": "declare_statement",
+          "named": true
+        },
+        {
           "type": "director_declaration",
+          "named": true
+        },
+        {
+          "type": "error_statement",
+          "named": true
+        },
+        {
+          "type": "esi_statement",
+          "named": true
+        },
+        {
+          "type": "expression_statement",
+          "named": true
+        },
+        {
+          "type": "goto_statement",
+          "named": true
+        },
+        {
+          "type": "if_statement",
           "named": true
         },
         {
@@ -1911,6 +1947,14 @@
         },
         {
           "type": "inline_c",
+          "named": true
+        },
+        {
+          "type": "label_statement",
+          "named": true
+        },
+        {
+          "type": "log_statement",
           "named": true
         },
         {
@@ -1930,11 +1974,31 @@
           "named": true
         },
         {
+          "type": "restart_statement",
+          "named": true
+        },
+        {
+          "type": "return_statement",
+          "named": true
+        },
+        {
+          "type": "set_statement",
+          "named": true
+        },
+        {
           "type": "subroutine_declaration",
           "named": true
         },
         {
+          "type": "synthetic_statement",
+          "named": true
+        },
+        {
           "type": "table_declaration",
+          "named": true
+        },
+        {
+          "type": "unset_statement",
           "named": true
         },
         {

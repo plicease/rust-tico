@@ -25,6 +25,9 @@ the upstream grammar has no rule for. Each Fastly addition is marked
 - Varnish's inline C, `C{ ... }C`, at top level or in a subroutine, as a
   single `inline_c` token (upstream has no rule for it either); tico
   re-highlights the body with its C grammar
+- any statement at top level, since a Fastly VCL snippet is a bare run of
+  statements with no enclosing `sub`; error recovery on such input
+  mis-tokenized hyphenated header names, so this is not cosmetic
 
 Two upstream shapes changed along the way: `return (action)` now parses
 as a `parenthesized_expression` around the action (so that `return`
