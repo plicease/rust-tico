@@ -52,12 +52,6 @@ here.
 - [ ] `atblanks`
 - [ ] `afterends`
 
-### Colors
-
-`selectedcolor`, `spotlightcolor`, `titlecolor`, `statuscolor`,
-`promptcolor`, `numbercolor`, `keycolor`, `functioncolor`, `errorcolor`,
-`minicolor`, `scrollercolor` and `stripecolor` are all honored.
-
 ### Files and safety
 
 - [ ] `backup` / `backupdir` (no backup-file machinery exists yet)
