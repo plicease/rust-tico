@@ -174,6 +174,23 @@ pub enum StatusLevel {
     Alert,
 }
 
+/// `set minibar`'s "(N lines[, DOS/Mac])" note text for a buffer with
+/// `count` lines in the given format -- shared by `Editor::note_buffer_linecount`
+/// and the startup file-loading path in `main.rs`, which needs it before the
+/// buffer is pushed onto `Editor::buffers` (so `note_buffer_linecount`,
+/// which reads the *current* buffer, isn't usable yet). Singular "line" and
+/// the format tag only appear when they apply, confirmed against the
+/// installed nano's own escape-code output.
+pub fn minibar_linecount_note(count: usize, format: crate::buffer::LineFormat) -> String {
+    use crate::buffer::LineFormat;
+    let word = if count == 1 { "line" } else { "lines" };
+    match format {
+        LineFormat::Dos => format!("({count} {word}, DOS)"),
+        LineFormat::Mac => format!("({count} {word}, Mac)"),
+        LineFormat::Unix | LineFormat::Unspecified => format!("({count} {word})"),
+    }
+}
+
 #[derive(Default)]
 pub struct SearchState {
     pub last_pattern: Option<String>,
@@ -244,6 +261,14 @@ pub struct Editor {
     /// of the buffer, matching nano's `input_tab`. Cleared by any other
     /// keystroke.
     pub file_completions: Option<Vec<String>>,
+    /// `set minibar`'s one-shot "(N lines[, DOS/Mac])" note, shown after the
+    /// filename in place of an `[i/n]` buffer counter right after a file is
+    /// loaded or saved, or a buffer is switched to (nano's `report_size`;
+    /// see `note_buffer_linecount`). Cleared by the next keystroke handled
+    /// in the main editing window, same as `shift_held`/the search
+    /// spotlight — confirmed against the installed nano's own escape-code
+    /// output.
+    pub minibar_note: Option<String>,
 }
 
 impl Editor {
@@ -293,6 +318,7 @@ impl Editor {
             screen_rows: 24,
             screen_cols: 80,
             file_completions: None,
+            minibar_note: None,
         }
     }
 
@@ -382,14 +408,16 @@ impl Editor {
     /// Number of rows available for buffer text (screen minus title bar,
     /// status line, and the two-line shortcut help unless `nohelp`).
     pub fn text_rows(&self) -> usize {
-        let mut used = 2; // title bar + status/prompt line
+        let mut used = 2; // title bar + status/prompt/minibar line
         if !self.options.nohelp {
             used += 2;
         }
         if self.options.zero {
             used = 0;
         } else if self.options.minibar {
-            used = 1;
+            // `set minibar` suppresses just the title bar row; the minibar
+            // itself takes over the status row, already counted above.
+            used -= 1;
         }
         self.screen_rows.saturating_sub(used).max(1)
     }
@@ -1301,6 +1329,18 @@ impl Editor {
         }
         let cur = self.current as isize;
         self.current = ((cur + delta).rem_euclid(n)) as usize;
+        self.note_buffer_linecount();
+    }
+
+    /// Set `minibar_note` to the current buffer's line count (plus a
+    /// `DOS`/`Mac` tag when applicable), for `set minibar`'s one-shot
+    /// display right after a load, a save, or a buffer switch -- matches
+    /// nano's `report_size = TRUE` plus the wording `minibar()` builds from
+    /// it, confirmed against the installed nano's own escape-code output
+    /// (singular "line" and the format tag only show up when they apply).
+    pub fn note_buffer_linecount(&mut self) {
+        let buf = self.buf();
+        self.minibar_note = Some(minibar_linecount_note(buf.nano_line_count(), buf.format));
     }
 
     fn report_location(&mut self) {
@@ -3054,5 +3094,66 @@ mod tests {
         ed.execute(Action::WhitespaceDisplay);
         assert!(!ed.options.whitespacedisplay);
         assert_eq!(ed.status.as_deref(), Some("Whitespace display disabled"));
+    }
+
+    // `set minibar`
+
+    #[test]
+    fn minibar_note_says_lines_singular_and_tags_dos_mac_format() {
+        assert_eq!(
+            minibar_linecount_note(1, crate::buffer::LineFormat::Unix),
+            "(1 line)"
+        );
+        assert_eq!(
+            minibar_linecount_note(3, crate::buffer::LineFormat::Unspecified),
+            "(3 lines)"
+        );
+        assert_eq!(
+            minibar_linecount_note(3, crate::buffer::LineFormat::Dos),
+            "(3 lines, DOS)"
+        );
+        assert_eq!(
+            minibar_linecount_note(1, crate::buffer::LineFormat::Mac),
+            "(1 line, Mac)"
+        );
+    }
+
+    #[test]
+    fn minibar_shrinks_text_rows_by_the_title_bar_only() {
+        let mut ed = test_editor("x");
+        ed.screen_rows = 24;
+        let baseline = ed.text_rows(); // title(1) + status(1) + help(2)
+        ed.options.minibar = true;
+        // Losing just the title bar gains the buffer exactly one row back:
+        // the minibar itself still occupies the status row, and the
+        // shortcut bar is untouched (unlike nano's own `--zero`).
+        assert_eq!(ed.text_rows(), baseline + 1);
+
+        ed.options.nohelp = true;
+        let baseline_nohelp = {
+            let mut plain = test_editor("x");
+            plain.screen_rows = 24;
+            plain.options.nohelp = true;
+            plain.text_rows()
+        };
+        assert_eq!(ed.text_rows(), baseline_nohelp + 1);
+    }
+
+    #[test]
+    fn switching_buffers_sets_the_minibar_note_to_the_new_buffers_linecount() {
+        let mut ed = test_editor("one\ntwo\nthree\n");
+        ed.buffers.push(Buffer::from_text("only one line", None));
+        ed.minibar_note = None;
+        ed.execute(Action::NextBuf);
+        assert_eq!(ed.current, 1);
+        assert_eq!(ed.minibar_note.as_deref(), Some("(1 line)"));
+    }
+
+    #[test]
+    fn switching_with_only_one_buffer_open_leaves_the_note_untouched() {
+        let mut ed = test_editor("x");
+        ed.minibar_note = Some("unchanged".to_string());
+        ed.execute(Action::NextBuf);
+        assert_eq!(ed.minibar_note.as_deref(), Some("unchanged"));
     }
 }

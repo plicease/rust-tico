@@ -180,6 +180,22 @@ impl Buffer {
         self.rope.len_lines()
     }
 
+    /// The line count the way nano itself reports one (`"Read N lines"`,
+    /// the minibar's `(N lines)`, ...): `line_count()` minus one when the
+    /// text ends with a newline, since ropey's own convention (like
+    /// nano's linked list of lines) counts the empty "line" after a final
+    /// `\n` as a line of its own, which nano's messages never count.
+    /// Matches `fileio::nano_style_line_count`, which takes raw text
+    /// instead, for wherever a `Buffer` is already at hand.
+    pub fn nano_line_count(&self) -> usize {
+        let total = self.rope.len_lines();
+        if total > 0 && self.rope.line(total - 1).len_chars() == 0 {
+            total - 1
+        } else {
+            total
+        }
+    }
+
     /// Settle this buffer's line-ending format after reading a file into
     /// it, matching the end of nano's `read_file`: `set unix` forces Unix
     /// regardless; otherwise only a buffer that has no format yet takes
@@ -581,5 +597,23 @@ mod tests {
         assert_eq!(b.cursor, Pos::new(1, 2));
         b.move_up();
         assert_eq!(b.cursor, Pos::new(0, 8));
+    }
+
+    #[test]
+    fn nano_line_count_ignores_the_trailing_empty_line_after_a_final_newline() {
+        // A trailing newline leaves ropey's own `line_count()` one higher
+        // than nano ever reports (`(N lines)` in the minibar, "Read N
+        // lines", ...) -- confirmed against the installed nano.
+        let with_trailing_newline = Buffer::from_text("a\nb\nc\n", None);
+        assert_eq!(with_trailing_newline.line_count(), 4);
+        assert_eq!(with_trailing_newline.nano_line_count(), 3);
+
+        let without_trailing_newline = Buffer::from_text("a\nb\nc", None);
+        assert_eq!(without_trailing_newline.line_count(), 3);
+        assert_eq!(without_trailing_newline.nano_line_count(), 3);
+
+        let empty = Buffer::from_text("", None);
+        assert_eq!(empty.line_count(), 1);
+        assert_eq!(empty.nano_line_count(), 0);
     }
 }

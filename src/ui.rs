@@ -253,6 +253,12 @@ fn handle_key(editor: &mut Editor, key: KeyEvent) {
             // one; the persistent replace-confirm kind only exists while
             // in Mode::Prompt, not here.
             editor.clear_spotlight();
+            // `set minibar`'s one-shot line-count note is likewise good for
+            // exactly one keystroke -- cleared here, before dispatch, so a
+            // fresh note the dispatch itself sets (e.g. `M->` switching
+            // buffers) survives to be shown, same ordering as the two
+            // clears above.
+            editor.minibar_note = None;
             handle_editing_key(editor, key);
         }
         Mode::Help {
@@ -1296,7 +1302,16 @@ fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
                             );
                             editor.buffers.push(buf);
                             editor.current = editor.buffers.len() - 1;
-                            editor.set_status(msg);
+                            editor.note_buffer_linecount();
+                            // Loading into a *new* buffer this way is never
+                            // an undoable insert into the current one, so
+                            // nano suppresses the ordinary blurb here too
+                            // whenever minibar is on (only the persistent
+                            // note shows) -- confirmed against the
+                            // installed nano's own escape-code output.
+                            if !editor.options.minibar {
+                                editor.set_status(msg);
+                            }
                         }
                         Err(e) => editor
                             .set_status_alert(format!("Error reading {}: {e}", path.display())),
@@ -1312,6 +1327,7 @@ fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
                         editor.buf_mut().insert_str(&content);
                         editor.buf_mut().adopt_format(detected, unix);
                         editor.set_status(msg);
+                        editor.note_buffer_linecount();
                     }
                     Err(e) => {
                         editor.set_status_alert(format!("Error reading {}: {e}", path.display()))
@@ -1346,7 +1362,14 @@ fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
             }
             match crate::fileio::save_file(editor.buf_mut(), &path) {
                 Ok(()) => {
-                    editor.set_status(format!("Wrote {}", path.display()));
+                    editor.note_buffer_linecount();
+                    // nano suppresses the ordinary "Wrote N lines" blurb
+                    // under minibar too -- only the persistent note shows
+                    // (confirmed against the installed nano's own
+                    // escape-code output).
+                    if !editor.options.minibar {
+                        editor.set_status(format!("Wrote {}", path.display()));
+                    }
                     if exiting {
                         editor.close_current_buffer();
                     }
@@ -2073,12 +2096,19 @@ fn render(editor: &Editor) -> io::Result<()> {
         return out.flush();
     }
 
-    queue!(out, MoveTo(0, 0))?;
-    render_title_bar(editor, &mut out, cols)?;
+    // `set minibar` suppresses the title bar entirely -- its own summary
+    // takes over the status row instead (see `render_minibar`), so the
+    // buffer gets that row back.
+    let text_start_row = if editor.options.minibar {
+        0u16
+    } else {
+        queue!(out, MoveTo(0, 0))?;
+        render_title_bar(editor, &mut out, cols)?;
+        1u16
+    };
 
     let help_rows = if editor.options.nohelp { 0 } else { 2 };
-    let text_start_row = 1u16;
-    let text_rows = rows.saturating_sub(2 + help_rows);
+    let text_rows = rows.saturating_sub(text_start_row as usize + 1 + help_rows);
     if let Some(matches) = &editor.file_completions {
         render_completions_grid(&mut out, text_start_row, text_rows, cols, matches)?;
     } else {
@@ -2443,9 +2473,70 @@ fn render_status_line(
             queue!(out, Print(" ".repeat(cols - used)))?;
         }
         Ok(())
+    } else if editor.options.minibar {
+        render_minibar(editor, out, cols)
     } else {
         queue!(out, Print(" ".repeat(cols)))
     }
+}
+
+/// `set minibar`'s condensed one-line summary of the current buffer, shown
+/// where the status bar normally goes once no prompt or status message is
+/// active: the filename (plus `*` if modified) on the left, then either the
+/// one-shot `minibar_note` (right after a load/save/buffer-switch) or,
+/// once that's gone, an `[i/n]` counter when multiple buffers are open, and
+/// finally the cursor's percentage into the file, right-aligned. Colored
+/// with `minicolor` (falling back to the title bar's own colors, same as
+/// `promptcolor`) -- confirmed layout and colors against the installed
+/// nano's own escape-code output.
+fn render_minibar(editor: &Editor, out: &mut impl Write, cols: usize) -> io::Result<()> {
+    let buf = editor.buf();
+    let name = buf
+        .path
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "New Buffer".to_string());
+    let mark = if buf.modified { '*' } else { ' ' };
+    let left = format!("  {name} {mark} ");
+
+    let mut line: Vec<char> = vec![' '; cols];
+    let mut cursor = 0;
+    for c in left.chars() {
+        if cursor >= cols {
+            break;
+        }
+        line[cursor] = c;
+        cursor += 1;
+    }
+
+    let right_note = editor.minibar_note.clone().or_else(|| {
+        (editor.buffers.len() > 1)
+            .then(|| format!("[{}/{}]", editor.current + 1, editor.buffers.len()))
+    });
+    if let Some(note) = right_note {
+        for c in note.chars() {
+            if cursor >= cols {
+                break;
+            }
+            line[cursor] = c;
+            cursor += 1;
+        }
+    }
+
+    // Right-aligned, 2 columns in from the edge -- the same margin the
+    // title bar's own `[i/n]`/"View" indicator uses.
+    let pct = 100 * (buf.cursor.line + 1) / buf.line_count().max(1);
+    let pct_str = format!("{pct}%");
+    let pct_start = cols.saturating_sub(pct_str.chars().count() + 2);
+    for (i, c) in pct_str.chars().enumerate() {
+        if pct_start + i < cols {
+            line[pct_start + i] = c;
+        }
+    }
+
+    let s: String = line.into_iter().collect();
+    let style = bar_style(&editor.options.minicolor, title_bar_style(editor));
+    queue_bar_segment(out, style, &s)
 }
 
 /// The default main-menu shortcut priority list, in the exact order GNU
@@ -3697,6 +3788,63 @@ mod tests {
             "original\n",
             "original buffer untouched"
         );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn insert_file_new_buffer_under_minibar_suppresses_the_blurb_but_notes_the_linecount() {
+        // Loading into a *new* buffer is never an undoable insert into the
+        // current one, so nano suppresses the ordinary "Read N lines"
+        // blurb under minibar too, showing only the persistent note --
+        // confirmed against the installed nano's own escape-code output.
+        let path = std::env::temp_dir().join("tico_test_insert_new_buffer_minibar.txt");
+        std::fs::write(&path, "a\nb\nc\n").unwrap();
+        let mut ed = test_editor("original\n");
+        ed.options.minibar = true;
+        submit_prompt(&mut ed, insert_prompt(true, path.to_str().unwrap()));
+        assert_eq!(ed.status, None, "blurb suppressed under minibar");
+        assert_eq!(ed.minibar_note.as_deref(), Some("(3 lines)"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn insert_file_into_current_buffer_under_minibar_still_shows_the_blurb() {
+        // Unlike loading into a new buffer, an interactive insert into the
+        // *current* buffer is undoable, so nano does NOT suppress its
+        // ordinary blurb even under minibar (only startup loads and
+        // new-buffer loads are silenced) -- confirmed against the
+        // installed nano's own escape-code output.
+        let path = std::env::temp_dir().join("tico_test_insert_current_minibar.txt");
+        std::fs::write(&path, "x\n").unwrap();
+        let mut ed = test_editor("original\n");
+        ed.options.minibar = true;
+        submit_prompt(&mut ed, insert_prompt(false, path.to_str().unwrap()));
+        assert!(
+            ed.status.is_some(),
+            "blurb still shown for an in-place insert"
+        );
+        assert_eq!(ed.minibar_note.as_deref(), Some("(2 lines)"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn write_out_under_minibar_suppresses_the_blurb_but_notes_the_linecount() {
+        let path = std::env::temp_dir().join("tico_test_write_out_minibar.txt");
+        std::fs::remove_file(&path).ok();
+        let mut ed = test_editor("one\ntwo\n");
+        ed.options.minibar = true;
+        let prompt = Prompt {
+            kind: PromptKind::WriteOut { exiting: false },
+            menu: Menu::WriteOut,
+            label: "Write Out".to_string(),
+            input: path.to_str().unwrap().to_string(),
+            cursor: 0,
+            history_pos: None,
+            saved_input: None,
+        };
+        submit_prompt(&mut ed, prompt);
+        assert_eq!(ed.status, None, "blurb suppressed under minibar");
+        assert_eq!(ed.minibar_note.as_deref(), Some("(2 lines)"));
         std::fs::remove_file(&path).ok();
     }
 

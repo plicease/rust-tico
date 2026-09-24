@@ -54,17 +54,15 @@ here.
 - [ ] `rawsequences`
 - [ ] `atblanks`
 - [ ] `afterends`
-- [ ] `minibar` — shrinks the layout but the minibar itself is never drawn
 
 ### Colors
 
 `selectedcolor`, `spotlightcolor`, `titlecolor`, `statuscolor`,
-`promptcolor`, `numbercolor`, `keycolor`, `functioncolor` and
-`errorcolor` are honored. The remaining three have nothing to paint yet,
+`promptcolor`, `numbercolor`, `keycolor`, `functioncolor`, `errorcolor`
+and `minicolor` are honored. The remaining two have nothing to paint yet,
 since the display feature they color is itself unimplemented (see
 "Display" above):
 
-- [ ] `minicolor` — blocked on `minibar` actually being drawn
 - [ ] `stripecolor` — blocked on `guidestripe` actually being drawn
 - [ ] `scrollercolor` — blocked on `indicator` actually being drawn
 
