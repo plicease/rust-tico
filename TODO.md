@@ -42,7 +42,6 @@ here.
 - [ ] `softwrap` — toggle flips the flag, nothing wraps
 - [ ] `constantshow`
 - [ ] `matchbrackets`
-- [ ] `indicator` (scrollbar)
 - [ ] `stateflags`
 - [ ] `guidestripe`
 - [ ] `showcursor`
@@ -57,13 +56,12 @@ here.
 ### Colors
 
 `selectedcolor`, `spotlightcolor`, `titlecolor`, `statuscolor`,
-`promptcolor`, `numbercolor`, `keycolor`, `functioncolor`, `errorcolor`
-and `minicolor` are honored. The remaining two have nothing to paint yet,
-since the display feature they color is itself unimplemented (see
-"Display" above):
+`promptcolor`, `numbercolor`, `keycolor`, `functioncolor`, `errorcolor`,
+`minicolor` and `scrollercolor` are honored. The remaining one has
+nothing to paint yet, since the display feature it colors is itself
+unimplemented (see "Display" above):
 
 - [ ] `stripecolor` — blocked on `guidestripe` actually being drawn
-- [ ] `scrollercolor` — blocked on `indicator` actually being drawn
 
 ### Files and safety
 

@@ -2937,6 +2937,18 @@ fn render_buffer(
     let selection = editor.selection_range();
     let number_style = numbercolor_style(&editor.options.numbercolor);
 
+    // `set indicator`: a one-column "scrollbar" on the right edge, showing
+    // the viewport's position and extent within the buffer -- suppressed
+    // on a too-small screen, matching nano's own `sidebar` guard exactly.
+    let sidebar = usize::from(editor.options.indicator && cols > 9 && editor.screen_rows > 5);
+    let (thumb_lowest, thumb_highest) = if sidebar == 1 && rows > 0 {
+        scrollbar_thumb_range(buf.top_line, rows, buf.line_count())
+    } else {
+        (0, 0)
+    };
+    let scrollbar_track_style = scrollbar_cell_style(&editor.options.scrollercolor, false);
+    let scrollbar_thumb_style = scrollbar_cell_style(&editor.options.scrollercolor, true);
+
     for r in 0..rows {
         queue!(out, MoveTo(0, start_row + r as u16))?;
         let line_idx = buf.top_line + r;
@@ -3019,7 +3031,7 @@ fn render_buffer(
         } else {
             0
         };
-        let content_width = cols.saturating_sub(gutter_chars);
+        let content_width = cols.saturating_sub(gutter_chars + sidebar);
         let show_left = left > 0;
         let mut capacity = content_width.saturating_sub(if show_left { 1 } else { 0 });
         let show_right = left + capacity < text_total;
@@ -3124,8 +3136,18 @@ fn render_buffer(
             }
             i = j;
         }
-        if len < cols {
-            queue!(out, Print(" ".repeat(cols - len)))?;
+        let fill_width = cols.saturating_sub(sidebar);
+        if len < fill_width {
+            queue!(out, Print(" ".repeat(fill_width - len)))?;
+        }
+        if sidebar == 1 {
+            let in_thumb = r >= thumb_lowest && r <= thumb_highest;
+            let style = if in_thumb {
+                scrollbar_thumb_style
+            } else {
+                scrollbar_track_style
+            };
+            print_styled(out, " ", Some(style))?;
         }
     }
     Ok(())
@@ -3170,6 +3192,47 @@ fn numbercolor_style(cp: &crate::options::ColorPair) -> Style {
             modifiers: crate::theme::Modifiers::any(cp.bold, cp.italic, false),
             ..Style::default()
         }
+    }
+}
+
+/// The row range (inclusive, 0-based within the viewport) of `set
+/// indicator`'s scrollbar "thumb" -- the portion representing the current
+/// viewport within the whole buffer. Matches nano's own `draw_scrollbar`
+/// exactly (`lowest`/`highest`, for the no-softwrap case, since tico
+/// doesn't support `softwrap` yet): `top_line` is 0-based, `viewport_rows`
+/// is the edit window's height, and `total_lines` is the buffer's own
+/// (ropey-native) line count, consistent with nano's `filebot->lineno`.
+fn scrollbar_thumb_range(
+    top_line: usize,
+    viewport_rows: usize,
+    total_lines: usize,
+) -> (usize, usize) {
+    let total_lines = total_lines.max(1);
+    let lowest = (top_line * viewport_rows) / total_lines;
+    let mut highest = lowest + (viewport_rows * viewport_rows) / total_lines;
+    if viewport_rows > total_lines {
+        // The whole buffer already fits without scrolling: the thumb
+        // covers the entire bar.
+        highest = viewport_rows;
+    }
+    (lowest, highest)
+}
+
+/// `scrollercolor`'s resolved style for one cell of `set indicator`'s
+/// scrollbar column: unlike the other bars, its unset default is no color
+/// at all (matching `functioncolor`, not the usual reverse-video default),
+/// and the "thumb" (the portion representing the current viewport) is
+/// always additionally reverse-video, on top of whatever `scrollercolor`
+/// resolves to -- nano ORs `A_REVERSE` onto the color pair rather than
+/// treating it as a separate, mutually exclusive style. Confirmed against
+/// the installed nano's own escape-code output, unconfigured and with an
+/// explicit `set scrollercolor`.
+fn scrollbar_cell_style(cp: &crate::options::ColorPair, thumb: bool) -> Style {
+    Style {
+        fg: cp.fg.map(map_named_color),
+        bg: cp.bg.map(map_named_color),
+        modifiers: crate::theme::Modifiers::any(cp.bold, cp.italic, thumb),
+        ..Style::default()
     }
 }
 
@@ -4451,5 +4514,55 @@ mod tests {
             }
             _ => panic!("an explicit color pair should never fall back to the default"),
         }
+    }
+
+    // `set indicator` (the scrollbar)
+
+    #[test]
+    fn scrollbar_thumb_covers_the_whole_bar_when_the_buffer_fits_without_scrolling() {
+        assert_eq!(scrollbar_thumb_range(0, 26, 5), (0, 26));
+    }
+
+    #[test]
+    fn scrollbar_thumb_matches_nano_at_the_top_of_a_100_line_buffer() {
+        // 26-row viewport, 100-line buffer, scrolled to the top -- matches
+        // the installed nano's own escape-code output exactly (rows 0..6
+        // of the viewport highlighted).
+        assert_eq!(scrollbar_thumb_range(0, 26, 100), (0, 6));
+    }
+
+    #[test]
+    fn scrollbar_thumb_matches_nano_at_the_bottom_of_a_100_line_buffer() {
+        // Same buffer, scrolled all the way down (top_line = 74) -- matches
+        // the installed nano's own escape-code output exactly (rows 19..25).
+        assert_eq!(scrollbar_thumb_range(74, 26, 100), (19, 25));
+    }
+
+    #[test]
+    fn scrollercolor_default_is_plain_not_reverse_but_the_thumb_always_reverses() {
+        let unset = crate::options::ColorPair::default();
+        let track = scrollbar_cell_style(&unset, false);
+        assert_eq!(track.fg, None);
+        assert_eq!(track.bg, None);
+        assert!(!track.modifiers.contains(crate::theme::Modifiers::REVERSED));
+
+        let thumb = scrollbar_cell_style(&unset, true);
+        assert_eq!(thumb.fg, None);
+        assert_eq!(thumb.bg, None);
+        assert!(thumb.modifiers.contains(crate::theme::Modifiers::REVERSED));
+    }
+
+    #[test]
+    fn scrollercolor_configured_colors_both_track_and_thumb_reverse_added_to_thumb_only() {
+        let cp = crate::options::parse_color_pair("blue,yellow").unwrap();
+        let track = scrollbar_cell_style(&cp, false);
+        assert_eq!(track.fg, Some(Color::DarkBlue));
+        assert_eq!(track.bg, Some(Color::DarkYellow));
+        assert!(!track.modifiers.contains(crate::theme::Modifiers::REVERSED));
+
+        let thumb = scrollbar_cell_style(&cp, true);
+        assert_eq!(thumb.fg, Some(Color::DarkBlue));
+        assert_eq!(thumb.bg, Some(Color::DarkYellow));
+        assert!(thumb.modifiers.contains(crate::theme::Modifiers::REVERSED));
     }
 }
