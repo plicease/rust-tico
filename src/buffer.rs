@@ -36,6 +36,26 @@ pub fn display_width(line: &str, up_to_col: usize, tabsize: usize) -> usize {
     w
 }
 
+/// The inverse of `display_width`: the character offset whose on-screen
+/// cell contains display column `target_col` (or `line`'s length, if
+/// `target_col` is past the line's own display width) -- used to turn a
+/// mouse click's screen column back into a buffer column.
+pub fn char_col_for_display(line: &str, target_col: usize, tabsize: usize) -> usize {
+    let mut w = 0;
+    for (i, c) in line.chars().enumerate() {
+        let cw = if c == '\t' {
+            tabsize - (w % tabsize)
+        } else {
+            unicode_width::UnicodeWidthChar::width(c).unwrap_or(1)
+        };
+        if w + cw > target_col {
+            return i;
+        }
+        w += cw;
+    }
+    line.chars().count()
+}
+
 /// One undoable edit: replacing the text in `[start, end)` (in the buffer
 /// *before* the edit) with `inserted`. Undo restores `removed` at `start`;
 /// redo re-applies `inserted`.
@@ -615,5 +635,24 @@ mod tests {
         let empty = Buffer::from_text("", None);
         assert_eq!(empty.line_count(), 1);
         assert_eq!(empty.nano_line_count(), 0);
+    }
+
+    #[test]
+    fn char_col_for_display_inverts_display_width() {
+        assert_eq!(char_col_for_display("hello", 0, 8), 0);
+        assert_eq!(char_col_for_display("hello", 2, 8), 2);
+        assert_eq!(
+            char_col_for_display("hello", 100, 8),
+            5,
+            "past the end clamps to the line's length"
+        );
+
+        // A tab expands to the next 8-column stop: clicking anywhere within
+        // its cell (0..7) should land on the tab itself (char index 0), and
+        // column 8 is the first cell of the following character.
+        for col in 0..8 {
+            assert_eq!(char_col_for_display("\tx", col, 8), 0, "column {col}");
+        }
+        assert_eq!(char_col_for_display("\tx", 8, 8), 1);
     }
 }

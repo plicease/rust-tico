@@ -643,7 +643,15 @@ impl Editor {
             if Some(self.buf().cursor.line) != was_line {
                 self.also_the_last = false;
             }
-            self.scroll_to_cursor();
+            // `ScrollUp`/`ScrollDown` (`M-Up`/`M-Down`, `M--`/`M-+`, the
+            // mouse wheel) exist specifically to slide the viewport while
+            // "keeping the cursor in the same text position" (nanorc(5));
+            // an unconditional scroll_to_cursor() here would immediately
+            // clamp `top_line` right back, since the cursor itself never
+            // moves for these two.
+            if !matches!(action, ScrollUp | ScrollDown) {
+                self.scroll_to_cursor();
+            }
         }
     }
 

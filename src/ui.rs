@@ -8,7 +8,10 @@ use crate::buffer::Pos;
 use crate::keymap::{Action, Binding, Key as TKey, KeyMap, Menu};
 use crate::theme::Style;
 use crossterm::cursor::{Hide, MoveTo, Show};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::style::{
     Attribute, Color, Print, SetAttribute, SetBackgroundColor, SetForegroundColor,
     SetUnderlineColor,
@@ -33,7 +36,14 @@ impl RawModeGuard {
 
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
-        let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+        // Harmless even if mouse capture was never turned on -- terminals
+        // silently ignore a mode-reset escape they weren't in.
+        let _ = execute!(
+            io::stdout(),
+            DisableMouseCapture,
+            Show,
+            LeaveAlternateScreen
+        );
         let _ = disable_raw_mode();
     }
 }
@@ -76,6 +86,13 @@ pub fn run(editor: &mut Editor) -> io::Result<()> {
     // ever needs re-blanking (which is what caused the visible flicker:
     // clearing the whole screen before every redraw, even when idle).
     execute!(io::stdout(), Clear(ClearType::All))?;
+    // `set mouse` (`-m`, or `M-M` live): tracked separately from
+    // `editor.options.mouse` itself, since that's just a plain bool the
+    // rest of the editor toggles freely -- this is the one place that
+    // needs to know whether the *terminal* is currently in mouse-capture
+    // mode, so it can tell when to (de)activate it.
+    let mut mouse_capture_enabled = false;
+    sync_mouse_capture(editor, &mut mouse_capture_enabled)?;
     render_and_ring(editor)?;
 
     let mut disk_watch = DiskWatch::new();
@@ -91,6 +108,10 @@ pub fn run(editor: &mut Editor) -> io::Result<()> {
             match event::read()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     handle_key(editor, key);
+                    dirty = true;
+                }
+                Event::Mouse(mev) => {
+                    handle_mouse(editor, mev);
                     dirty = true;
                 }
                 Event::Resize(cols, rows) => {
@@ -130,10 +151,28 @@ pub fn run(editor: &mut Editor) -> io::Result<()> {
             break;
         }
 
+        sync_mouse_capture(editor, &mut mouse_capture_enabled)?;
+
         if dirty {
             render_and_ring(editor)?;
         }
     }
+    Ok(())
+}
+
+/// (De)activate the terminal's mouse-tracking mode to match
+/// `editor.options.mouse`, whenever it's just been toggled (`M-M`, or a
+/// nanorc/ticorc reload) -- a no-op otherwise.
+fn sync_mouse_capture(editor: &Editor, enabled: &mut bool) -> io::Result<()> {
+    if editor.options.mouse == *enabled {
+        return Ok(());
+    }
+    if editor.options.mouse {
+        execute!(io::stdout(), EnableMouseCapture)?;
+    } else {
+        execute!(io::stdout(), DisableMouseCapture)?;
+    }
+    *enabled = editor.options.mouse;
     Ok(())
 }
 
@@ -278,6 +317,226 @@ fn handle_key(editor: &mut Editor, key: KeyEvent) {
         Mode::Prompt(prompt) => handle_prompt_key(editor, prompt, key),
         Mode::Quit => editor.mode = Mode::Quit,
     }
+}
+
+// ---------------------------------------------------------------------
+// Mouse handling (`set mouse`)
+// ---------------------------------------------------------------------
+
+/// Handle a mouse event, matching nano's own `get_mouseinput`/
+/// `process_click` (confirmed against the installed nano's own source):
+/// left-clicks place the cursor (or toggle the mark, when the click
+/// resolves to the cursor's own position unchanged), clicks on the
+/// scrollbar (`set indicator`) jump proportionally, clicks on a shortcut
+/// in the two-line bar activate it, and the wheel scrolls two lines per
+/// notch. Everything else (drags, other buttons, plain motion, ...) is
+/// ignored, same as nano -- in particular, this leaves Shift+drag free for
+/// the terminal's own native text selection, which is how nano itself
+/// expects dragging to work (see `set mouse` in `nanorc(5)`): nano's own
+/// mouse handling has no drag/motion case at all.
+fn handle_mouse(editor: &mut Editor, mev: MouseEvent) {
+    if !editor.options.mouse {
+        return;
+    }
+    match mev.kind {
+        // "One bump of the mouse wheel should scroll two lines" (nano's
+        // own comment in get_mouseinput).
+        MouseEventKind::ScrollUp => {
+            editor.execute(Action::ScrollUp);
+            editor.execute(Action::ScrollUp);
+        }
+        MouseEventKind::ScrollDown => {
+            editor.execute(Action::ScrollDown);
+            editor.execute(Action::ScrollDown);
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            handle_click(editor, mev.row as usize, mev.column as usize);
+        }
+        _ => {}
+    }
+}
+
+/// Dispatch a left-click at 0-based screen `(row, col)` to whichever
+/// region it landed in. The main editing screen and every prompt share one
+/// layout (`main_screen_layout`); the full-screen Help and Diff viewers
+/// only expose their own bottom shortcut bar.
+fn handle_click(editor: &mut Editor, row: usize, col: usize) {
+    if matches!(&editor.mode, Mode::Editing | Mode::Prompt(_)) {
+        handle_main_screen_click(editor, row, col);
+        return;
+    }
+    let bar_row = editor.screen_rows.saturating_sub(2);
+    if row < bar_row {
+        return;
+    }
+    let entries = match &editor.mode {
+        Mode::Help { .. } => resolve_shortcuts(&editor.keymap, Menu::Help, HELP_SHORTCUTS),
+        Mode::Diff { outcome, .. } => diff_shortcut_entries(outcome),
+        _ => return,
+    };
+    activate_shortcut_click(editor, &entries, row - bar_row, col);
+}
+
+/// A click within the main editing screen's own layout (shared by
+/// `Mode::Editing` and every `Mode::Prompt`, since a prompt overlays only
+/// the status row -- clicking the buffer or the shortcut bar still works
+/// while one is open, matching nano's own `process_click`, which only
+/// special-cases the prompt row itself into a no-op).
+fn handle_main_screen_click(editor: &mut Editor, row: usize, col: usize) {
+    if editor.options.zero {
+        handle_buffer_click(editor, row, col, editor.screen_rows);
+        return;
+    }
+    let layout = main_screen_layout(editor);
+    if row >= layout.text_start_row && row < layout.text_start_row + layout.text_rows {
+        handle_buffer_click(editor, row - layout.text_start_row, col, layout.text_rows);
+    } else if layout.help_rows > 0 && row > layout.status_row {
+        let row_in_bar = row - layout.status_row - 1;
+        let prompt = if let Mode::Prompt(p) = &editor.mode {
+            Some(p)
+        } else {
+            None
+        };
+        let entries = shortcut_bar_entries(&editor.keymap, prompt);
+        activate_shortcut_click(editor, &entries, row_in_bar, col);
+    }
+    // A click on the title row or the status/prompt row itself is a
+    // no-op, matching nano exactly.
+}
+
+/// A click within the buffer area proper (0-based `row_in_buffer` counts
+/// from the top of the visible text, not the whole screen). `editwinrows`
+/// is however many rows that area has, matching what `render_buffer` was
+/// given -- needed for the scrollbar's own proportion math.
+fn handle_buffer_click(editor: &mut Editor, row_in_buffer: usize, col: usize, editwinrows: usize) {
+    let cols = editor.screen_cols;
+    let sidebar = usize::from(editor.options.indicator && cols > 9 && editor.screen_rows > 5);
+
+    if sidebar == 1 && col + 1 == cols {
+        // Clicking the scrollbar jumps to the roughly corresponding line,
+        // matching nano's own click-to-scrollbar math exactly (`row 0` ->
+        // the very top; any other row rounds up by one first).
+        let total = editor.buf().line_count().max(1);
+        let adjusted_row = if row_in_buffer == 0 {
+            0
+        } else {
+            row_in_buffer + 1
+        };
+        let target_line = (total * adjusted_row / editwinrows.max(1)).min(total - 1);
+        editor.buf_mut().cursor.line = target_line;
+        let len = editor.buf().line(target_line).chars().count();
+        editor.buf_mut().cursor.col = editor.buf().cursor.col.min(len);
+        editor.scroll_to_cursor_centered();
+        return;
+    }
+
+    let gutter = editor.gutter_width();
+    let tabsize = editor.options.tabsize as usize;
+    let buf = editor.buf();
+    let line_idx = (buf.top_line + row_in_buffer).min(buf.line_count().saturating_sub(1));
+    let is_cursor_line = line_idx == buf.cursor.line;
+    // Only the cursor's own line is ever horizontally scrolled (see
+    // `render_buffer`), so a click on any other row starts counting
+    // columns from display column 0.
+    let content_col = col.saturating_sub(gutter);
+    let target_display_col = if is_cursor_line {
+        buf.left_col + content_col
+    } else {
+        content_col
+    };
+    let raw = buf.line(line_idx);
+    let char_col = crate::buffer::char_col_for_display(&raw, target_display_col, tabsize);
+    let was_line = buf.cursor.line;
+    let was_col = buf.cursor.col;
+
+    editor.buf_mut().cursor = Pos::new(line_idx, char_col);
+    editor.scroll_to_cursor();
+
+    // Clicking exactly where the cursor already was toggles the mark,
+    // matching nano's own `process_click` (it's not click-timing based —
+    // literally just "the click didn't move the cursor").
+    if line_idx == was_line && char_col == was_col {
+        editor.execute(Action::Mark);
+    }
+}
+
+/// Resolve a click at `(row_in_bar, col)` -- 0-based, relative to the
+/// shortcut bar's own top-left corner -- against `entries`, and, if it
+/// lands on a real one, activate it by converting its displayed key label
+/// back into the equivalent keystroke and dispatching that through the
+/// exact same path a real keypress would take (matching nano's own
+/// "put the keystroke back" mechanism).
+fn activate_shortcut_click(
+    editor: &mut Editor,
+    entries: &[(String, &str)],
+    row_in_bar: usize,
+    col: usize,
+) {
+    let cols = editor.screen_cols;
+    if let Some(idx) = shortcut_bar_click_index(cols, entries, row_in_bar, col)
+        && let Some(kev) = synthetic_key_event_for_label(&entries[idx].0)
+    {
+        handle_key(editor, kev);
+    }
+}
+
+/// The crossterm `KeyEvent` that, fed through `handle_key`, has the same
+/// effect as the shortcut bar's displayed label for one entry -- either a
+/// real `Key` spec (`^G`, `M-U`, `F1`, ...; parsed the same way a nanorc
+/// `bind` line would be, then converted with `key_to_event`) or a bare
+/// single character (`Y`, `N`, `A`, ...), which the Y/N/A-style
+/// confirmation prompts match directly as a raw keystroke, outside the
+/// rebindable keymap entirely.
+fn synthetic_key_event_for_label(label: &str) -> Option<KeyEvent> {
+    let mut chars = label.chars();
+    let first = chars.next()?;
+    if chars.next().is_none() && first != '^' {
+        return Some(KeyEvent::new(KeyCode::Char(first), KeyModifiers::NONE));
+    }
+    TKey::parse(label).map(key_to_event)
+}
+
+/// The inverse of `normalize_key`: the crossterm `KeyEvent` that
+/// `normalize_key` would turn back into `key`. Needed to replay a
+/// shortcut-bar click as the keystroke it represents.
+fn key_to_event(key: TKey) -> KeyEvent {
+    let (code, modifiers) = match key {
+        TKey::Ctrl(c) => (KeyCode::Char(c.to_ascii_lowercase()), KeyModifiers::CONTROL),
+        TKey::Meta(c) => (KeyCode::Char(c), KeyModifiers::ALT),
+        TKey::ShiftMeta(c) => (KeyCode::Char(c), KeyModifiers::ALT | KeyModifiers::SHIFT),
+        TKey::F(n) => (KeyCode::F(n), KeyModifiers::NONE),
+        TKey::Ins => (KeyCode::Insert, KeyModifiers::NONE),
+        TKey::Del => (KeyCode::Delete, KeyModifiers::NONE),
+        TKey::Backspace => (KeyCode::Backspace, KeyModifiers::NONE),
+        TKey::ShiftTab => (KeyCode::BackTab, KeyModifiers::NONE),
+        TKey::Left => (KeyCode::Left, KeyModifiers::NONE),
+        TKey::Right => (KeyCode::Right, KeyModifiers::NONE),
+        TKey::Up => (KeyCode::Up, KeyModifiers::NONE),
+        TKey::Down => (KeyCode::Down, KeyModifiers::NONE),
+        TKey::Home => (KeyCode::Home, KeyModifiers::NONE),
+        TKey::End => (KeyCode::End, KeyModifiers::NONE),
+        TKey::PageUp => (KeyCode::PageUp, KeyModifiers::NONE),
+        TKey::PageDown => (KeyCode::PageDown, KeyModifiers::NONE),
+        TKey::CtrlLeft => (KeyCode::Left, KeyModifiers::CONTROL),
+        TKey::CtrlRight => (KeyCode::Right, KeyModifiers::CONTROL),
+        TKey::CtrlUp => (KeyCode::Up, KeyModifiers::CONTROL),
+        TKey::CtrlDown => (KeyCode::Down, KeyModifiers::CONTROL),
+        TKey::CtrlHome => (KeyCode::Home, KeyModifiers::CONTROL),
+        TKey::CtrlEnd => (KeyCode::End, KeyModifiers::CONTROL),
+        TKey::CtrlDel => (KeyCode::Delete, KeyModifiers::CONTROL),
+        TKey::ShiftCtrlDel => (KeyCode::Delete, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        TKey::MetaLeft => (KeyCode::Left, KeyModifiers::ALT),
+        TKey::MetaRight => (KeyCode::Right, KeyModifiers::ALT),
+        TKey::MetaUp => (KeyCode::Up, KeyModifiers::ALT),
+        TKey::MetaDown => (KeyCode::Down, KeyModifiers::ALT),
+        TKey::MetaHome => (KeyCode::Home, KeyModifiers::ALT),
+        TKey::MetaEnd => (KeyCode::End, KeyModifiers::ALT),
+        TKey::MetaPgUp => (KeyCode::PageUp, KeyModifiers::ALT),
+        TKey::MetaPgDn => (KeyCode::PageDown, KeyModifiers::ALT),
+        TKey::MetaIns => (KeyCode::Insert, KeyModifiers::ALT),
+        TKey::MetaDel => (KeyCode::Delete, KeyModifiers::ALT),
+    };
+    KeyEvent::new(code, modifiers)
 }
 
 /// Handle a keystroke while the `^G` help viewer is open: scroll its body,
@@ -2089,36 +2348,32 @@ fn render(editor: &Editor) -> io::Result<()> {
     }
 
     let cols = editor.screen_cols;
-    let rows = editor.screen_rows;
     if editor.options.zero {
-        render_buffer(editor, &mut out, 0, rows)?;
+        render_buffer(editor, &mut out, 0, editor.screen_rows)?;
         finish_cursor(editor, &mut out, 0)?;
         return out.flush();
     }
 
+    let layout = main_screen_layout(editor);
+    let text_start_row = layout.text_start_row as u16;
     // `set minibar` suppresses the title bar entirely -- its own summary
     // takes over the status row instead (see `render_minibar`), so the
     // buffer gets that row back.
-    let text_start_row = if editor.options.minibar {
-        0u16
-    } else {
+    if text_start_row > 0 {
         queue!(out, MoveTo(0, 0))?;
         render_title_bar(editor, &mut out, cols)?;
-        1u16
-    };
-
-    let help_rows = if editor.options.nohelp { 0 } else { 2 };
-    let text_rows = rows.saturating_sub(text_start_row as usize + 1 + help_rows);
-    if let Some(matches) = &editor.file_completions {
-        render_completions_grid(&mut out, text_start_row, text_rows, cols, matches)?;
-    } else {
-        render_buffer(editor, &mut out, text_start_row, text_rows)?;
     }
 
-    let status_row = text_start_row + text_rows as u16;
+    if let Some(matches) = &editor.file_completions {
+        render_completions_grid(&mut out, text_start_row, layout.text_rows, cols, matches)?;
+    } else {
+        render_buffer(editor, &mut out, text_start_row, layout.text_rows)?;
+    }
+
+    let status_row = layout.status_row as u16;
     render_status_line(editor, &mut out, status_row, cols)?;
 
-    if help_rows > 0 {
+    if layout.help_rows > 0 {
         let prompt = if let Mode::Prompt(p) = &editor.mode {
             Some(p)
         } else {
@@ -2130,6 +2385,39 @@ fn render(editor: &Editor) -> io::Result<()> {
 
     finish_cursor(editor, &mut out, text_start_row)?;
     out.flush()
+}
+
+/// The main editing screen's row layout (everything but `Mode::Help` /
+/// `Mode::Diff`, which have their own bespoke full-screen layout, and
+/// `set zero`, which hides all chrome and just needs `screen_rows`):
+/// shared by `render` and by mouse click resolution (`handle_mouse`), so
+/// the two can never drift the way `Editor::text_rows` and `render`'s own
+/// row math once did.
+struct MainLayout {
+    /// 0 normally, 1 when `set minibar` drops the title bar.
+    text_start_row: usize,
+    /// Rows available to the buffer (or the `^R` tab-completion grid).
+    text_rows: usize,
+    /// The status/prompt/minibar row, directly below the buffer.
+    status_row: usize,
+    /// 0 under `set nohelp`, else 2 (the shortcut bar's own two rows,
+    /// directly below `status_row`).
+    help_rows: usize,
+}
+
+fn main_screen_layout(editor: &Editor) -> MainLayout {
+    let text_start_row = if editor.options.minibar { 0 } else { 1 };
+    let help_rows = if editor.options.nohelp { 0 } else { 2 };
+    let text_rows = editor
+        .screen_rows
+        .saturating_sub(text_start_row + 1 + help_rows);
+    let status_row = text_start_row + text_rows;
+    MainLayout {
+        text_start_row,
+        text_rows,
+        status_row,
+        help_rows,
+    }
 }
 
 /// Number of rows available for the help viewer's scrollable body: the
@@ -2205,6 +2493,15 @@ fn render_diff_screen(
         styles.as_deref(),
     )?;
 
+    let entries = diff_shortcut_entries(outcome);
+    render_shortcut_bar(editor, out, rows.saturating_sub(2) as u16, cols, &entries)
+}
+
+/// The merge-diff viewer's bottom-bar entries for the given outcome --
+/// shared by `render_diff_screen` and mouse click resolution
+/// (`handle_click`), so the two can never disagree about what a click
+/// lands on.
+fn diff_shortcut_entries(outcome: &DiffOutcome) -> Vec<(String, &'static str)> {
     let shortcuts: &[(&str, &str)] = match outcome {
         DiffOutcome::ApplyMerge { .. } => &[
             ("A", "Apply merge"),
@@ -2216,8 +2513,7 @@ fn render_diff_screen(
         ],
         DiffOutcome::Conflict => &[("(any key)", "Continue")],
     };
-    let entries: Vec<(String, &str)> = shortcuts.iter().map(|&(k, d)| (k.to_string(), d)).collect();
-    render_shortcut_bar(editor, out, rows.saturating_sub(2) as u16, cols, &entries)
+    shortcuts.iter().map(|&(k, d)| (k.to_string(), d)).collect()
 }
 
 /// Center `title` on its own title-bar-colored row at the top of the
@@ -2789,15 +3085,20 @@ fn key_label_for(keymap: &KeyMap, menu: Menu, action: Action) -> String {
         .unwrap_or_default()
 }
 
-fn render_shortcut_bar(
-    editor: &Editor,
-    out: &mut impl Write,
-    row: u16,
-    cols: usize,
-    entries: &[(String, &str)],
-) -> io::Result<()> {
-    let key_style = bar_style(&editor.options.keycolor, BarStyle::Reverse);
-    let desc_style = bar_style(&editor.options.functioncolor, BarStyle::Plain);
+/// The shortcut bar's column grid: shared by the renderer and by mouse
+/// click resolution, so the two can never drift apart the way `text_rows`
+/// and `render`'s own row math once did (see `note_buffer_linecount`'s
+/// history). `col_width` is the width, in columns, of one (key, desc)
+/// cell; `n_pairs` is how many such cells fit across `cols`, each holding
+/// up to two entries (one per row of the two-line bar).
+struct ShortcutBarLayout {
+    max_label: usize,
+    max_desc: usize,
+    col_width: usize,
+    n_pairs: usize,
+}
+
+fn shortcut_bar_layout(cols: usize, entries: &[(String, &str)]) -> ShortcutBarLayout {
     let max_label = entries
         .iter()
         .map(|(k, _)| k.chars().count())
@@ -2811,6 +3112,57 @@ fn render_shortcut_bar(
     let col_width = max_label + 1 + max_desc + 2;
     let n_cols = (cols / col_width).max(1);
     let n_pairs = n_cols.min(entries.len().div_ceil(2));
+    ShortcutBarLayout {
+        max_label,
+        max_desc,
+        col_width,
+        n_pairs,
+    }
+}
+
+/// The entry (if any) a mouse click at `(row_in_bar, col)` -- 0-based
+/// coordinates relative to the shortcut bar's own top-left corner -- would
+/// activate, matching nano's own `get_mouseinput`'s shortcut-click math
+/// (adapted to tico's own column layout, which sizes columns to the
+/// longest label/description rather than nano's fixed `COLS /
+/// ((number+1)/2)` grid).
+fn shortcut_bar_click_index(
+    cols: usize,
+    entries: &[(String, &str)],
+    row_in_bar: usize,
+    col: usize,
+) -> Option<usize> {
+    if row_in_bar > 1 {
+        return None;
+    }
+    let layout = shortcut_bar_layout(cols, entries);
+    let c = col / layout.col_width;
+    if c >= layout.n_pairs {
+        return None;
+    }
+    let idx = c * 2 + row_in_bar;
+    let (key, _) = entries.get(idx)?;
+    if key.is_empty() {
+        return None;
+    }
+    Some(idx)
+}
+
+fn render_shortcut_bar(
+    editor: &Editor,
+    out: &mut impl Write,
+    row: u16,
+    cols: usize,
+    entries: &[(String, &str)],
+) -> io::Result<()> {
+    let key_style = bar_style(&editor.options.keycolor, BarStyle::Reverse);
+    let desc_style = bar_style(&editor.options.functioncolor, BarStyle::Plain);
+    let ShortcutBarLayout {
+        max_label,
+        max_desc,
+        col_width,
+        n_pairs,
+    } = shortcut_bar_layout(cols, entries);
 
     for r in 0..2u16 {
         queue!(out, MoveTo(0, row + r))?;
@@ -4564,5 +4916,150 @@ mod tests {
         assert_eq!(thumb.fg, Some(Color::DarkBlue));
         assert_eq!(thumb.bg, Some(Color::DarkYellow));
         assert!(thumb.modifiers.contains(crate::theme::Modifiers::REVERSED));
+    }
+
+    // `set mouse`
+
+    fn mev(kind: MouseEventKind, row: u16, column: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn mouse_events_are_ignored_when_the_option_is_off() {
+        let mut ed = test_editor("hello\n");
+        ed.options.mouse = false;
+        handle_mouse(&mut ed, mev(MouseEventKind::Down(MouseButton::Left), 1, 3));
+        assert_eq!(ed.buf().cursor, Pos::new(0, 0), "click had no effect");
+    }
+
+    #[test]
+    fn mouse_click_in_the_buffer_places_the_cursor() {
+        let mut ed = test_editor("line one\nline two\nline three\n");
+        ed.options.mouse = true;
+        // Row 0 is the title bar; row 1 + n is buffer line n.
+        handle_mouse(&mut ed, mev(MouseEventKind::Down(MouseButton::Left), 3, 3));
+        assert_eq!(ed.buf().cursor, Pos::new(2, 3));
+    }
+
+    #[test]
+    fn mouse_click_at_the_cursors_own_position_toggles_the_mark() {
+        // Matches nano's own process_click: not click-timing based, just
+        // "the click didn't move the cursor".
+        let mut ed = test_editor("hello world\n");
+        ed.options.mouse = true;
+        ed.buf_mut().cursor = Pos::new(0, 3);
+        assert!(ed.buf().mark.is_none());
+
+        handle_click(&mut ed, 1, 3);
+        assert_eq!(ed.buf().cursor, Pos::new(0, 3), "cursor shouldn't move");
+        assert_eq!(
+            ed.buf().mark,
+            Some(Pos::new(0, 3)),
+            "click-in-place toggles the mark on"
+        );
+
+        handle_click(&mut ed, 1, 3);
+        assert!(
+            ed.buf().mark.is_none(),
+            "clicking again toggles it back off"
+        );
+    }
+
+    #[test]
+    fn mouse_click_on_the_scrollbar_jumps_proportionally() {
+        let text: String = (1..=100).map(|n| format!("line {n}\n")).collect();
+        let mut ed = test_editor(&text);
+        ed.options.mouse = true;
+        ed.options.indicator = true;
+        ed.screen_cols = 80;
+        ed.screen_rows = 24;
+        // editwinrows = 24 - title(1) - status(1) - help(2) = 20; clicking
+        // the scrollbar's very last row (and very last column) should jump
+        // at or near the end of the buffer.
+        handle_click(&mut ed, 1 + 19, 79);
+        assert_eq!(ed.buf().cursor.line, 100);
+    }
+
+    #[test]
+    fn mouse_click_on_a_shortcut_activates_it() {
+        let mut ed = test_editor("hello\n");
+        ed.options.mouse = true;
+        let bar_row = main_screen_layout(&ed).status_row + 1;
+        // Column 2 lands within the bar's first cell ("^G Help").
+        handle_click(&mut ed, bar_row, 2);
+        assert!(matches!(ed.mode, Mode::Help { .. }));
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_two_lines_without_moving_the_cursor() {
+        let text: String = (1..=50).map(|n| format!("line {n}\n")).collect();
+        let mut ed = test_editor(&text);
+        ed.options.mouse = true;
+        let before = ed.buf().cursor;
+        handle_mouse(&mut ed, mev(MouseEventKind::ScrollDown, 0, 0));
+        assert_eq!(ed.buf().top_line, 2, "one wheel notch scrolls two lines");
+        assert_eq!(ed.buf().cursor, before, "the cursor doesn't move");
+        handle_mouse(&mut ed, mev(MouseEventKind::ScrollUp, 0, 0));
+        assert_eq!(ed.buf().top_line, 0);
+    }
+
+    #[test]
+    fn shortcut_bar_click_index_matches_the_rendered_grid() {
+        let entries: Vec<(String, &str)> = vec![
+            ("^A".into(), "Aaa"),
+            ("^B".into(), "Bbb"),
+            ("^C".into(), "Ccc"),
+            ("^D".into(), "Ddd"),
+        ];
+        // max_label=2, max_desc=3 -> col_width = 2+1+3+2 = 8;
+        // cols=20 -> n_cols=2 -> n_pairs=min(2, 4.div_ceil(2)=2)=2.
+        assert_eq!(shortcut_bar_click_index(20, &entries, 0, 0), Some(0));
+        assert_eq!(shortcut_bar_click_index(20, &entries, 1, 0), Some(1));
+        assert_eq!(shortcut_bar_click_index(20, &entries, 0, 8), Some(2));
+        assert_eq!(shortcut_bar_click_index(20, &entries, 1, 8), Some(3));
+        assert_eq!(
+            shortcut_bar_click_index(20, &entries, 2, 0),
+            None,
+            "only 2 rows exist"
+        );
+        assert_eq!(
+            shortcut_bar_click_index(20, &entries, 0, 16),
+            None,
+            "beyond the last column"
+        );
+    }
+
+    #[test]
+    fn key_to_event_round_trips_through_normalize_key() {
+        for key in [
+            TKey::Ctrl('G'),
+            TKey::Meta('U'),
+            TKey::ShiftMeta('A'),
+            TKey::F(1),
+            TKey::Backspace,
+            TKey::ShiftTab,
+            TKey::Ins,
+        ] {
+            let ev = key_to_event(key);
+            assert_eq!(normalize_key(ev), Some(key), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn synthetic_key_event_for_label_handles_bare_chars_and_key_specs() {
+        assert_eq!(synthetic_key_event_for_label(""), None);
+        assert_eq!(
+            synthetic_key_event_for_label("Y"),
+            Some(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::NONE))
+        );
+        let ev = synthetic_key_event_for_label("^G").unwrap();
+        assert_eq!(normalize_key(ev), Some(TKey::Ctrl('G')));
+        let ev = synthetic_key_event_for_label("M-U").unwrap();
+        assert_eq!(normalize_key(ev), Some(TKey::Meta('U')));
     }
 }

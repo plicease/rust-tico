@@ -80,7 +80,3 @@ unimplemented (see "Display" above):
 - [ ] `colonparsing`
 - [ ] `rebinddelete`
 - [ ] `preserve`
-
-### Input
-
-- [ ] `mouse` — toggle exists but no mouse events are captured
