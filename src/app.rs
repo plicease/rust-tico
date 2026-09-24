@@ -586,7 +586,6 @@ impl Editor {
             Cycle => {}
             ScrollUp => self.scroll_view(-1),
             ScrollDown => self.scroll_view(1),
-            ScrollLeft | ScrollRight => {}
             BeginPara => self.move_para_begin(),
             EndPara => self.move_para_end(),
             PrevBlock | NextBlock | TopRow | BottomRow => {

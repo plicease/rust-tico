@@ -123,11 +123,6 @@ pub enum Action {
     BreakLongLines,
     TabsToSpaces,
     Mouse,
-    // Internal-only actions not exposed as nano `bind` function names but
-    // reachable via a hardcoded default key (nano does not document a name
-    // for these; they cannot be rebound by name).
-    ScrollLeft,
-    ScrollRight,
 }
 
 impl Action {
@@ -360,8 +355,6 @@ impl Action {
             BreakLongLines => "Toggle whether the overlong part of a line is hard-wrapped",
             TabsToSpaces => "Toggle whether typed tabs are converted to spaces",
             Mouse => "Toggle mouse support",
-            ScrollLeft => "Scroll the viewport a tabsize to the left",
-            ScrollRight => "Scroll the viewport a tabsize to the right",
         }
     }
 }
@@ -830,9 +823,9 @@ impl KeyMap {
         b(K::MetaPgDn, A::NextAnchor);
         b(K::Meta('\''), A::NextAnchor);
         b(K::MetaLeft, A::PrevBuf);
-        b(K::Meta(','), A::PrevBuf);
+        b(K::Meta('<'), A::PrevBuf);
         b(K::MetaRight, A::NextBuf);
-        b(K::Meta('.'), A::NextBuf);
+        b(K::Meta('>'), A::NextBuf);
         b(K::Meta('V'), A::Verbatim);
         b(K::Ctrl('I'), A::Tab);
         b(K::Ctrl('M'), A::Enter);
@@ -850,8 +843,6 @@ impl KeyMap {
         b(K::Ctrl('C'), A::Location);
         b(K::F(11), A::Location);
         b(K::Meta('D'), A::WordCount);
-        b(K::Meta('<'), A::ScrollLeft);
-        b(K::Meta('>'), A::ScrollRight);
         b(K::Meta('Z'), A::Zero);
         b(K::Meta('X'), A::NoHelp);
         b(K::Meta('C'), A::ConstantShow);
@@ -1190,5 +1181,23 @@ mod tests {
     fn key_parse_recognizes_bsp() {
         assert_eq!(Key::parse("Bsp"), Some(Key::Backspace));
         assert_eq!(Key::parse("bsp"), Some(Key::Backspace));
+    }
+
+    #[test]
+    fn buffer_switch_uses_the_shifted_m_less_greater_keys_not_unshifted_comma_period() {
+        // Confirmed against the installed nano: M-, and M-. do NOT switch
+        // buffers there -- only the shifted M-< / M-> (plus the M-Left /
+        // M-Right arrow-key aliases) do.
+        let km = KeyMap::defaults(false);
+        assert_eq!(
+            km.lookup(Menu::Main, Key::Meta('<')),
+            Some(&Binding::Action(Action::PrevBuf))
+        );
+        assert_eq!(
+            km.lookup(Menu::Main, Key::Meta('>')),
+            Some(&Binding::Action(Action::NextBuf))
+        );
+        assert_eq!(km.lookup(Menu::Main, Key::Meta(',')), None);
+        assert_eq!(km.lookup(Menu::Main, Key::Meta('.')), None);
     }
 }

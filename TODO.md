@@ -27,7 +27,6 @@ here.
 
 - [ ] Verbatim input (`M-V`)
 - [ ] Center (`^L`) / Cycle (`M-%`)
-- [ ] Scroll left / right (`M-<` / `M->`)
 - [ ] The other `M-` toggles (`M-S` soft wrap, `M-N` line numbers, `M-X`
       help lines, ...) flip their option but don't show nano's
       "<Feature> enabled/disabled" message; only `M-P` whitespace display
