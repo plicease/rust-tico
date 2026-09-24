@@ -3238,6 +3238,9 @@ fn map_named_color(nc: crate::options::NamedColor) -> Color {
         }
         OC::Normal => Color::Reset,
         OC::Rgb(r, g, b) => Color::Rgb { r, g, b },
+        // nano's extended hue names (`lime`, `pink`, ...) are already a
+        // literal 256-color palette index; `light` doesn't apply to them.
+        OC::Indexed(i) => Color::AnsiValue(i),
     }
 }
 
@@ -4282,5 +4285,23 @@ mod tests {
             bar_style(&unset, BarStyle::Plain),
             BarStyle::Plain
         ));
+    }
+
+    #[test]
+    fn an_extended_256_color_hue_name_like_lime_is_not_rendered_invisibly() {
+        // Regression test: `set titlecolor black,lime` used to render as
+        // black-on-black, because `lime` failed to parse and left the
+        // background unset (-> the terminal's own default, typically
+        // black) instead of the lime-green 256-color background nano
+        // itself shows.
+        let cp = crate::options::parse_color_pair("black,lime").unwrap();
+        match bar_style(&cp, BarStyle::Reverse) {
+            BarStyle::Colored { fg, bg, .. } => {
+                assert_eq!(fg, Color::Black);
+                assert_eq!(bg, Color::AnsiValue(148));
+                assert_ne!(fg, bg, "must not resolve to the same color");
+            }
+            _ => panic!("an explicit color pair should never fall back to the default"),
+        }
     }
 }
