@@ -58,17 +58,15 @@ here.
 
 ### Colors
 
-Only `selectedcolor`, `spotlightcolor` and `promptcolor` are honored.
+`selectedcolor`, `spotlightcolor`, `titlecolor`, `statuscolor`,
+`promptcolor`, `numbercolor`, `keycolor`, `functioncolor` and
+`errorcolor` are honored. The remaining three have nothing to paint yet,
+since the display feature they color is itself unimplemented (see
+"Display" above):
 
-- [ ] `titlecolor`
-- [ ] `statuscolor`
-- [ ] `numbercolor`
-- [ ] `keycolor`
-- [ ] `functioncolor`
-- [ ] `minicolor`
-- [ ] `errorcolor`
-- [ ] `stripecolor`
-- [ ] `scrollercolor`
+- [ ] `minicolor` — blocked on `minibar` actually being drawn
+- [ ] `stripecolor` — blocked on `guidestripe` actually being drawn
+- [ ] `scrollercolor` — blocked on `indicator` actually being drawn
 
 ### Files and safety
 

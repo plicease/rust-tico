@@ -119,6 +119,20 @@ impl Modifiers {
         self.0 |= other.0;
     }
 
+    pub fn any(bold: bool, italic: bool, reversed: bool) -> Modifiers {
+        let mut m = Modifiers::default();
+        if bold {
+            m.insert(Modifiers::BOLD);
+        }
+        if italic {
+            m.insert(Modifiers::ITALIC);
+        }
+        if reversed {
+            m.insert(Modifiers::REVERSED);
+        }
+        m
+    }
+
     fn parse(name: &str) -> Option<Modifiers> {
         Some(match name {
             "bold" => Self::BOLD,

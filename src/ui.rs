@@ -2095,7 +2095,7 @@ fn render(editor: &Editor) -> io::Result<()> {
             None
         };
         let entries = shortcut_bar_entries(&editor.keymap, prompt);
-        render_shortcut_bar(&mut out, status_row + 1, cols, &entries)?;
+        render_shortcut_bar(editor, &mut out, status_row + 1, cols, &entries)?;
     }
 
     finish_cursor(editor, &mut out, text_start_row)?;
@@ -2123,6 +2123,7 @@ fn render_help_screen(
     let rows = editor.screen_rows;
 
     render_centered_title_row(
+        editor,
         out,
         cols,
         lines.first().map(|s| s.as_str()).unwrap_or("Help"),
@@ -2136,7 +2137,7 @@ fn render_help_screen(
         None,
     )?;
     let entries = resolve_shortcuts(&editor.keymap, Menu::Help, HELP_SHORTCUTS);
-    render_shortcut_bar(out, rows.saturating_sub(2) as u16, cols, &entries)
+    render_shortcut_bar(editor, out, rows.saturating_sub(2) as u16, cols, &entries)
 }
 
 /// The merge-diff viewer (`Mode::Diff`): same full-screen layout as the
@@ -2154,6 +2155,7 @@ fn render_diff_screen(
     let rows = editor.screen_rows;
 
     render_centered_title_row(
+        editor,
         out,
         cols,
         lines.first().map(|s| s.as_str()).unwrap_or("Diff"),
@@ -2185,12 +2187,19 @@ fn render_diff_screen(
         DiffOutcome::Conflict => &[("(any key)", "Continue")],
     };
     let entries: Vec<(String, &str)> = shortcuts.iter().map(|&(k, d)| (k.to_string(), d)).collect();
-    render_shortcut_bar(out, rows.saturating_sub(2) as u16, cols, &entries)
+    render_shortcut_bar(editor, out, rows.saturating_sub(2) as u16, cols, &entries)
 }
 
-/// Center `title` on its own reverse-video row at the top of the screen —
-/// shared by the help and merge-diff full-screen viewers.
-fn render_centered_title_row(out: &mut impl Write, cols: usize, title: &str) -> io::Result<()> {
+/// Center `title` on its own title-bar-colored row at the top of the
+/// screen — shared by the help and merge-diff full-screen viewers, and
+/// confirmed against the installed nano to follow `titlecolor` exactly the
+/// same as the ordinary title bar does.
+fn render_centered_title_row(
+    editor: &Editor,
+    out: &mut impl Write,
+    cols: usize,
+    title: &str,
+) -> io::Result<()> {
     queue!(out, MoveTo(0, 0))?;
     let mut title_row = vec![' '; cols];
     let start = cols.saturating_sub(title.chars().count()) / 2;
@@ -2200,12 +2209,8 @@ fn render_centered_title_row(out: &mut impl Write, cols: usize, title: &str) -> 
         }
     }
     let title_line: String = title_row.into_iter().collect();
-    queue!(
-        out,
-        SetAttribute(Attribute::Reverse),
-        Print(title_line),
-        SetAttribute(Attribute::Reset)
-    )
+    let style = title_bar_style(editor);
+    queue_bar_segment(out, style, &title_line)
 }
 
 /// Draw `body_rows` rows of `body` starting at `top`, one screen row per
@@ -2372,12 +2377,15 @@ fn render_title_bar(editor: &Editor, out: &mut impl Write, cols: usize) -> io::R
         }
     }
     let s: String = line.into_iter().collect();
-    queue!(
-        out,
-        SetAttribute(Attribute::Reverse),
-        Print(s),
-        SetAttribute(Attribute::Reset)
-    )
+    let style = bar_style(&editor.options.titlecolor, BarStyle::Reverse);
+    queue_bar_segment(out, style, &s)
+}
+
+/// The resolved style for the title bar, used directly by the title bar
+/// itself and as the fallback for `promptcolor`/`minicolor` when those are
+/// unset (nano: "the colors of the title bar are used").
+fn title_bar_style(editor: &Editor) -> BarStyle {
+    bar_style(&editor.options.titlecolor, BarStyle::Reverse)
 }
 
 fn render_status_line(
@@ -2389,8 +2397,10 @@ fn render_status_line(
     queue!(out, MoveTo(0, row))?;
     if let Mode::Prompt(prompt) = &editor.mode {
         // nano's promptcolor defaults to the title bar's colors (reverse
-        // video), confirmed against the installed nano's own escape-code
-        // output for both the Search and WriteOut prompts.
+        // video unless titlecolor is set), confirmed against the installed
+        // nano's own escape-code output for both the Search and WriteOut
+        // prompts.
+        let style = bar_style(&editor.options.promptcolor, title_bar_style(editor));
         let text = format!(
             "{}: {}",
             prompt.label,
@@ -2400,17 +2410,13 @@ fn render_status_line(
         while s.chars().count() < cols {
             s.push(' ');
         }
-        queue!(
-            out,
-            SetAttribute(Attribute::Reverse),
-            Print(s),
-            SetAttribute(Attribute::Reset)
-        )
+        queue_bar_segment(out, style, &s)
     } else if let Some(msg) = &editor.status {
-        // nano shows ordinary status-bar messages in reverse video, and
-        // Alert-level ones (unwritable file, "is a directory", ...) bold
-        // white-on-red instead (confirmed against the installed nano's own
-        // escape-code output for both cases).
+        // nano shows ordinary status-bar messages in reverse video by
+        // default, and Alert/Mild-level ones (unwritable file, "is a
+        // directory", ...) in `errorcolor` (bold white-on-red by default)
+        // instead, confirmed against the installed nano's own escape-code
+        // output for both cases.
         let bracketed = format!("[ {msg} ]");
         let pad = cols.saturating_sub(bracketed.chars().count()) / 2;
         if pad > 0 {
@@ -2421,29 +2427,15 @@ fn render_status_line(
         let shown_len = shown.chars().count();
         match editor.status_level {
             crate::app::StatusLevel::Normal => {
-                queue!(
-                    out,
-                    SetAttribute(Attribute::Reverse),
-                    Print(shown),
-                    SetAttribute(Attribute::Reset)
-                )?;
+                let style = bar_style(&editor.options.statuscolor, BarStyle::Reverse);
+                queue_bar_segment(out, style, &shown)?;
             }
             crate::app::StatusLevel::Mild | crate::app::StatusLevel::Alert => {
-                // Matches nano's captured escape codes exactly: ESC[1m
-                // ESC[37m ESC[41m — bold, *standard* white (crossterm's
-                // `Grey`, not `White`, which is bright/ANSI-97), on
-                // standard (non-bright) red. nano uses this same
-                // ERROR_MESSAGE color for both MILD and ALERT messages;
-                // only ALERT also rings the bell (handled via
-                // `bell_pending`, which `set_status_mild` never sets).
-                queue!(
-                    out,
-                    SetAttribute(Attribute::Bold),
-                    SetForegroundColor(Color::Grey),
-                    SetBackgroundColor(Color::DarkRed),
-                    Print(shown),
-                    SetAttribute(Attribute::Reset)
-                )?;
+                // nano uses this same ERROR_MESSAGE color for both MILD and
+                // ALERT messages; only ALERT also rings the bell (handled
+                // via `bell_pending`, which `set_status_mild` never sets).
+                let style = bar_style(&editor.options.errorcolor, BarStyle::Reverse);
+                queue_bar_segment(out, style, &shown)?;
             }
         }
         let used = pad + shown_len;
@@ -2707,11 +2699,14 @@ fn key_label_for(keymap: &KeyMap, menu: Menu, action: Action) -> String {
 }
 
 fn render_shortcut_bar(
+    editor: &Editor,
     out: &mut impl Write,
     row: u16,
     cols: usize,
     entries: &[(String, &str)],
 ) -> io::Result<()> {
+    let key_style = bar_style(&editor.options.keycolor, BarStyle::Reverse);
+    let desc_style = bar_style(&editor.options.functioncolor, BarStyle::Plain);
     let max_label = entries
         .iter()
         .map(|(k, _)| k.chars().count())
@@ -2732,17 +2727,13 @@ fn render_shortcut_bar(
         for c in 0..n_pairs {
             let idx = c * 2 + r as usize;
             if let Some((key, desc)) = entries.get(idx).filter(|(k, _)| !k.is_empty()) {
-                // As in nano: the key combo is shown in reverse video, the
-                // description in the terminal's normal colors.
+                // As in nano: the key combo is shown in `keycolor` (reverse
+                // video by default), the description in `functioncolor`
+                // (the terminal's normal colors by default).
                 let key_padded = format!("{key:<lw$}", lw = max_label);
-                queue!(
-                    out,
-                    SetAttribute(Attribute::Reverse),
-                    Print(&key_padded),
-                    SetAttribute(Attribute::Reset)
-                )?;
+                queue_bar_segment(out, key_style, &key_padded)?;
                 let rest = format!(" {desc:<dw$}  ", dw = max_desc);
-                queue!(out, Print(&rest))?;
+                queue_bar_segment(out, desc_style, &rest)?;
                 written += key_padded.chars().count() + rest.chars().count();
             } else {
                 let pad = " ".repeat(col_width);
@@ -2853,6 +2844,7 @@ fn render_buffer(
             Vec::new()
         };
     let selection = editor.selection_range();
+    let number_style = numbercolor_style(&editor.options.numbercolor);
 
     for r in 0..rows {
         queue!(out, MoveTo(0, start_row + r as u16))?;
@@ -2875,7 +2867,7 @@ fn render_buffer(
         if is_real_line {
             if gutter > 0 {
                 let prefix = format!("{:>width$} ", line_idx + 1, width = gutter - 1);
-                styles.extend(prefix.chars().map(|_| None));
+                styles.extend(prefix.chars().map(|_| Some(number_style)));
                 rendered.push_str(&prefix);
             }
             let raw = buf.line(line_idx);
@@ -3070,6 +3062,26 @@ fn print_styled(out: &mut impl Write, segment: &str, style: Option<Style>) -> io
     queue!(out, Print(segment), SetAttribute(Attribute::Reset))
 }
 
+/// `numbercolor`'s resolved style, for the per-character `styles` vector
+/// `render_buffer` paints the gutter with: nano's own default (unset) is
+/// plain reverse video, confirmed against the installed nano's own
+/// escape-code output for the line-number margin (`set linenumbers`).
+fn numbercolor_style(cp: &crate::options::ColorPair) -> Style {
+    if cp.fg.is_none() && cp.bg.is_none() {
+        Style {
+            modifiers: crate::theme::Modifiers::any(false, false, true),
+            ..Style::default()
+        }
+    } else {
+        Style {
+            fg: cp.fg.map(map_named_color),
+            bg: cp.bg.map(map_named_color),
+            modifiers: crate::theme::Modifiers::any(cp.bold, cp.italic, false),
+            ..Style::default()
+        }
+    }
+}
+
 /// Map a nanorc color spec to the crossterm colors that produce the same
 /// escape codes as nano itself (crossterm's naming is inverted from
 /// nano's: `Color::Red` is bright/light red, `Color::DarkRed` is the
@@ -3079,6 +3091,71 @@ fn spotlight_colors(cp: &crate::options::ColorPair) -> (Color, Color) {
     let fg = cp.fg.map(map_named_color).unwrap_or(Color::Black);
     let bg = cp.bg.map(map_named_color).unwrap_or(Color::Yellow);
     (fg, bg)
+}
+
+/// How to paint a title/status/prompt bar, an error message, or the
+/// key-combo half of a shortcut-bar entry. nano's own default, whenever the
+/// corresponding `set XXXcolor` is unset, is plain reverse video (confirmed
+/// against the installed nano's own escape-code output); an explicit
+/// setting instead paints with exactly the given colors, bold and italic.
+/// `functioncolor`'s unset default is no color at all (`Plain`), matching
+/// nano's own behavior for the shortcut bar's descriptions.
+#[derive(Clone, Copy)]
+enum BarStyle {
+    Reverse,
+    Plain,
+    Colored {
+        fg: Color,
+        bg: Color,
+        bold: bool,
+        italic: bool,
+    },
+}
+
+/// Resolve a `set XXXcolor` option to how it should actually be painted,
+/// falling back to `default` (nano's own per-option default: `Reverse` for
+/// most bars, `Plain` for `functioncolor`, or another bar's already-resolved
+/// style for `promptcolor`/`minicolor`, which fall back to `titlecolor`)
+/// when the option was never configured.
+fn bar_style(cp: &crate::options::ColorPair, default: BarStyle) -> BarStyle {
+    if cp.fg.is_none() && cp.bg.is_none() {
+        default
+    } else {
+        BarStyle::Colored {
+            fg: cp.fg.map(map_named_color).unwrap_or(Color::Reset),
+            bg: cp.bg.map(map_named_color).unwrap_or(Color::Reset),
+            bold: cp.bold,
+            italic: cp.italic,
+        }
+    }
+}
+
+/// Print `text` in `style`, resetting afterwards (a no-op for `Plain`).
+fn queue_bar_segment(out: &mut impl Write, style: BarStyle, text: &str) -> io::Result<()> {
+    match style {
+        BarStyle::Plain => queue!(out, Print(text)),
+        BarStyle::Reverse => queue!(
+            out,
+            SetAttribute(Attribute::Reverse),
+            Print(text),
+            SetAttribute(Attribute::Reset)
+        ),
+        BarStyle::Colored {
+            fg,
+            bg,
+            bold,
+            italic,
+        } => {
+            queue!(out, SetForegroundColor(fg), SetBackgroundColor(bg))?;
+            if bold {
+                queue!(out, SetAttribute(Attribute::Bold))?;
+            }
+            if italic {
+                queue!(out, SetAttribute(Attribute::Italic))?;
+            }
+            queue!(out, Print(text), SetAttribute(Attribute::Reset))
+        }
+    }
 }
 
 /// How to paint the marked selection (`buf.mark`).
@@ -4105,5 +4182,105 @@ mod tests {
         assert_eq!(prompt_input_for_display(&ed, "a b"), "a b");
         ed.options.whitespacedisplay = true;
         assert_eq!(prompt_input_for_display(&ed, "a b"), "a\u{b7}b");
+    }
+
+    // Color settings (`set titlecolor` and friends): defaults and fallbacks
+    // confirmed against the installed nano 8.6's own escape-code output.
+
+    #[test]
+    fn bar_style_falls_back_to_the_given_default_when_unconfigured() {
+        let unset = crate::options::ColorPair::default();
+        assert!(matches!(
+            bar_style(&unset, BarStyle::Reverse),
+            BarStyle::Reverse
+        ));
+        assert!(matches!(
+            bar_style(&unset, BarStyle::Plain),
+            BarStyle::Plain
+        ));
+    }
+
+    #[test]
+    fn bar_style_uses_the_configured_colors_and_attributes() {
+        let cp = crate::options::parse_color_pair("bold,yellow,magenta").unwrap();
+        match bar_style(&cp, BarStyle::Reverse) {
+            BarStyle::Colored {
+                fg,
+                bg,
+                bold,
+                italic,
+            } => {
+                assert_eq!(fg, Color::DarkYellow);
+                assert_eq!(bg, Color::DarkMagenta);
+                assert!(bold);
+                assert!(!italic);
+            }
+            _ => panic!("expected a configured color pair to resolve to Colored"),
+        }
+    }
+
+    #[test]
+    fn errorcolor_default_matches_nanos_bold_white_on_red() {
+        // nano's own default ERROR_MESSAGE color, captured directly from
+        // the installed binary opening a directory as a file.
+        let cp = crate::options::Options::default().errorcolor;
+        match bar_style(&cp, BarStyle::Reverse) {
+            BarStyle::Colored {
+                fg,
+                bg,
+                bold,
+                italic,
+            } => {
+                assert_eq!(fg, Color::Grey);
+                assert_eq!(bg, Color::DarkRed);
+                assert!(bold);
+                assert!(!italic);
+            }
+            _ => panic!("errorcolor always has fg/bg set, even by default"),
+        }
+    }
+
+    #[test]
+    fn promptcolor_and_minicolor_fall_back_to_titlecolor() {
+        let mut ed = test_editor("");
+        ed.options.titlecolor = crate::options::parse_color_pair("bold,green,blue").unwrap();
+        let title_style = title_bar_style(&ed);
+        let prompt_style = bar_style(&ed.options.promptcolor, title_style);
+        match prompt_style {
+            BarStyle::Colored { fg, bg, bold, .. } => {
+                assert_eq!(fg, Color::DarkGreen);
+                assert_eq!(bg, Color::DarkBlue);
+                assert!(bold);
+            }
+            _ => panic!("promptcolor should inherit titlecolor when unset"),
+        }
+    }
+
+    #[test]
+    fn numbercolor_defaults_to_reverse_video() {
+        let unset = crate::options::ColorPair::default();
+        let style = numbercolor_style(&unset);
+        assert_eq!(style.fg, None);
+        assert_eq!(style.bg, None);
+        assert!(style.modifiers.contains(crate::theme::Modifiers::REVERSED));
+    }
+
+    #[test]
+    fn numbercolor_configured_uses_its_own_colors_not_reverse() {
+        let cp = crate::options::parse_color_pair("italic,cyan").unwrap();
+        let style = numbercolor_style(&cp);
+        assert_eq!(style.fg, Some(Color::DarkCyan));
+        assert_eq!(style.bg, None);
+        assert!(style.modifiers.contains(crate::theme::Modifiers::ITALIC));
+        assert!(!style.modifiers.contains(crate::theme::Modifiers::REVERSED));
+    }
+
+    #[test]
+    fn functioncolor_defaults_to_plain_not_reverse() {
+        let unset = crate::options::ColorPair::default();
+        assert!(matches!(
+            bar_style(&unset, BarStyle::Plain),
+            BarStyle::Plain
+        ));
     }
 }
