@@ -43,7 +43,6 @@ here.
 - [ ] `constantshow`
 - [ ] `matchbrackets`
 - [ ] `stateflags`
-- [ ] `guidestripe`
 - [ ] `showcursor`
 - [ ] `boldtext`
 - [ ] `bookstyle`
@@ -57,11 +56,7 @@ here.
 
 `selectedcolor`, `spotlightcolor`, `titlecolor`, `statuscolor`,
 `promptcolor`, `numbercolor`, `keycolor`, `functioncolor`, `errorcolor`,
-`minicolor` and `scrollercolor` are honored. The remaining one has
-nothing to paint yet, since the display feature it colors is itself
-unimplemented (see "Display" above):
-
-- [ ] `stripecolor` — blocked on `guidestripe` actually being drawn
+`minicolor`, `scrollercolor` and `stripecolor` are all honored.
 
 ### Files and safety
 

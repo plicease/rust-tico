@@ -3300,6 +3300,14 @@ fn render_buffer(
     };
     let scrollbar_track_style = scrollbar_cell_style(&editor.options.scrollercolor, false);
     let scrollbar_thumb_style = scrollbar_cell_style(&editor.options.scrollercolor, true);
+    // `set guidestripe`: a one-column vertical guide recoloring whatever
+    // character (or blank) already sits at that column, so it moves with
+    // horizontal scroll -- the given column number is 1-based.
+    let stripe_col = editor
+        .options
+        .guidestripe
+        .map(|n| (n as usize).saturating_sub(1));
+    let stripe_style = stripecolor_style(&editor.options.stripecolor);
 
     for r in 0..rows {
         queue!(out, MoveTo(0, start_row + r as u16))?;
@@ -3409,7 +3417,7 @@ fn render_buffer(
         if show_right {
             windowed_styles.push(None);
         }
-        let styles = windowed_styles;
+        let mut styles = windowed_styles;
         let marker_shift = gutter_chars + if show_left { 1 } else { 0 };
         let clamp_to_view = |(s, e): (usize, usize)| {
             let clamp = |x: usize| marker_shift + x.clamp(vis_start, vis_end) - vis_start;
@@ -3417,6 +3425,23 @@ fn render_buffer(
         };
         let highlight = highlight.map(clamp_to_view);
         let selected = selected.map(clamp_to_view);
+
+        // The stripe recolors whatever's already at its column, so it
+        // scrolls along with the line -- hidden once scrolled past it
+        // (`stripe_col < left`) or off the right edge of the content area.
+        // It can land past the line's actual text (a short line, or past
+        // end-of-buffer's own blank rows), in which case `chars`/`styles`
+        // are extended with a plain space to carry it, matching nano's own
+        // fallback of painting a space there.
+        let stripe_idx = stripe_col
+            .and_then(|col| stripe_content_offset(col, left, content_width))
+            .map(|offset| marker_shift + offset);
+        if let Some(idx) = stripe_idx
+            && idx >= chars.len()
+        {
+            chars.resize(idx + 1, ' ');
+            styles.resize(idx + 1, None);
+        }
 
         let len = chars.len();
         let spot = highlight
@@ -3432,7 +3457,8 @@ fn render_buffer(
         while i < len {
             let in_spot = spot.is_some_and(|(s, e)| i >= s && i < e);
             let in_sel = !in_spot && sel.is_some_and(|(s, e)| i >= s && i < e);
-            let style = if in_spot || in_sel {
+            let in_stripe = !in_spot && !in_sel && stripe_idx == Some(i);
+            let style = if in_spot || in_sel || in_stripe {
                 None
             } else {
                 styles.get(i).copied().flatten()
@@ -3441,10 +3467,11 @@ fn render_buffer(
             while j < len {
                 let j_in_spot = spot.is_some_and(|(s, e)| j >= s && j < e);
                 let j_in_sel = !j_in_spot && sel.is_some_and(|(s, e)| j >= s && j < e);
-                if j_in_spot != in_spot || j_in_sel != in_sel {
+                let j_in_stripe = !j_in_spot && !j_in_sel && stripe_idx == Some(j);
+                if j_in_spot != in_spot || j_in_sel != in_sel || j_in_stripe != in_stripe {
                     break;
                 }
-                let j_style = if j_in_spot || j_in_sel {
+                let j_style = if j_in_spot || j_in_sel || j_in_stripe {
                     None
                 } else {
                     styles.get(j).copied().flatten()
@@ -3483,6 +3510,8 @@ fn render_buffer(
                         )?;
                     }
                 }
+            } else if in_stripe {
+                print_styled(out, &segment, Some(stripe_style))?;
             } else {
                 print_styled(out, &segment, style)?;
             }
@@ -3527,11 +3556,14 @@ fn print_styled(out: &mut impl Write, segment: &str, style: Option<Style>) -> io
     queue!(out, Print(segment), SetAttribute(Attribute::Reset))
 }
 
-/// `numbercolor`'s resolved style, for the per-character `styles` vector
-/// `render_buffer` paints the gutter with: nano's own default (unset) is
-/// plain reverse video, confirmed against the installed nano's own
-/// escape-code output for the line-number margin (`set linenumbers`).
-fn numbercolor_style(cp: &crate::options::ColorPair) -> Style {
+/// The "plain reverse video by default, `cp`'s own colors when configured"
+/// pattern shared by `numbercolor` and `stripecolor`: confirmed against the
+/// installed nano's own escape-code output for both the line-number margin
+/// (`set linenumbers`) and the vertical guide (`set guidestripe`) -- nano's
+/// own color-pair setup gives both LINE_NUMBER and GUIDE_STRIPE plain
+/// `A_REVERSE` when unconfigured, unlike `scrollercolor`/`functioncolor`'s
+/// `A_NORMAL` default.
+fn reverse_default_style(cp: &crate::options::ColorPair) -> Style {
     if cp.fg.is_none() && cp.bg.is_none() {
         Style {
             modifiers: crate::theme::Modifiers::any(false, false, true),
@@ -3545,6 +3577,29 @@ fn numbercolor_style(cp: &crate::options::ColorPair) -> Style {
             ..Style::default()
         }
     }
+}
+
+fn numbercolor_style(cp: &crate::options::ColorPair) -> Style {
+    reverse_default_style(cp)
+}
+
+/// `stripecolor`'s resolved style for `set guidestripe`'s vertical guide.
+fn stripecolor_style(cp: &crate::options::ColorPair) -> Style {
+    reverse_default_style(cp)
+}
+
+/// Where `set guidestripe`'s vertical guide falls within one row's visible
+/// content, if at all -- `stripe_col` and `left` (the row's horizontal
+/// scroll offset) are both 0-based display columns, and `content_width` is
+/// how many display columns the content area itself has. The result is an
+/// offset from the content area's own start (so a caller windowing the row
+/// still needs to add its own left-marker shift) -- `None` when the
+/// configured column has been scrolled past on either side, matching
+/// nano's own `draw_row`'s bounds check exactly (confirmed against the
+/// installed nano's own escape-code output at both edges).
+fn stripe_content_offset(stripe_col: usize, left: usize, content_width: usize) -> Option<usize> {
+    let offset = stripe_col.checked_sub(left)?;
+    (offset < content_width).then_some(offset)
 }
 
 /// The row range (inclusive, 0-based within the viewport) of `set
@@ -4916,6 +4971,91 @@ mod tests {
         assert_eq!(thumb.fg, Some(Color::DarkBlue));
         assert_eq!(thumb.bg, Some(Color::DarkYellow));
         assert!(thumb.modifiers.contains(crate::theme::Modifiers::REVERSED));
+    }
+
+    // `set guidestripe` / `stripecolor`
+
+    #[test]
+    fn stripe_content_offset_is_visible_within_bounds() {
+        assert_eq!(stripe_content_offset(9, 0, 20), Some(9));
+        // Scrolled so the stripe's column is now the content area's first
+        // visible column.
+        assert_eq!(stripe_content_offset(9, 9, 20), Some(0));
+    }
+
+    #[test]
+    fn stripe_content_offset_hides_once_scrolled_past_on_either_side() {
+        // Scrolled past it to the left.
+        assert_eq!(stripe_content_offset(9, 10, 20), None);
+        // Past the right edge of a narrow content area.
+        assert_eq!(stripe_content_offset(25, 0, 20), None);
+        // Exactly at the last visible column is still shown.
+        assert_eq!(stripe_content_offset(19, 0, 20), Some(19));
+    }
+
+    #[test]
+    fn stripecolor_defaults_to_reverse_video_like_numbercolor() {
+        let unset = crate::options::ColorPair::default();
+        let style = stripecolor_style(&unset);
+        assert_eq!(style.fg, None);
+        assert_eq!(style.bg, None);
+        assert!(style.modifiers.contains(crate::theme::Modifiers::REVERSED));
+    }
+
+    #[test]
+    fn stripecolor_configured_uses_its_own_colors_not_reverse() {
+        let cp = crate::options::parse_color_pair("blue,yellow").unwrap();
+        let style = stripecolor_style(&cp);
+        assert_eq!(style.fg, Some(Color::DarkBlue));
+        assert_eq!(style.bg, Some(Color::DarkYellow));
+        assert!(!style.modifiers.contains(crate::theme::Modifiers::REVERSED));
+    }
+
+    #[test]
+    fn guidestripe_recolors_the_configured_column_in_reverse_by_default() {
+        // Confirmed against the installed nano's own escape-code output:
+        // column 10 recolors the character already there, in plain
+        // reverse video, when stripecolor is unset.
+        let mut ed = test_editor("xxxxxxxxxxxxxxxxxxxx\n");
+        ed.options.guidestripe = Some(10);
+        ed.screen_cols = 80;
+        let mut out = Vec::new();
+        render_buffer(&ed, &mut out, 0, 1).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            text.contains("\x1b[7mx\x1b[0m"),
+            "expected a lone reverse-video 'x' at the stripe column: {text:?}"
+        );
+    }
+
+    #[test]
+    fn guidestripe_paints_a_space_past_a_short_lines_own_text() {
+        let mut ed = test_editor("short\n");
+        ed.options.guidestripe = Some(10);
+        ed.screen_cols = 80;
+        let mut out = Vec::new();
+        render_buffer(&ed, &mut out, 0, 1).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            text.contains("\x1b[7m \x1b[0m"),
+            "expected a reverse-video space past the end of the line: {text:?}"
+        );
+    }
+
+    #[test]
+    fn selection_takes_priority_over_the_guidestripe_at_the_same_column() {
+        let mut ed = test_editor("xxxxxxxxxxxxxxxxxxxx\n");
+        ed.options.guidestripe = Some(10);
+        ed.screen_cols = 80;
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(0, 20);
+        let mut out = Vec::new();
+        render_buffer(&ed, &mut out, 0, 1).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            !text.contains("\x1b[7mx\x1b[0m"),
+            "the whole line is selected, so no lone reverse 'x' should appear: {text:?}"
+        );
     }
 
     // `set mouse`
