@@ -161,6 +161,9 @@ pub fn highlight(text: &str, lang: &'static LanguageDef) -> Vec<HighlightSpan> {
     inject_perl_heredocs(&heredocs, text, lang.name, &mut spans);
     inject_tree_heredocs(&tree, text, &mut spans);
 
+    // Perl `use Inline C => q{ ... }`: the string is C.
+    inject_inline_strings(&tree, text, &heredocs, &mut spans);
+
     // Perl `__DATA__` laid out as `@@ name` parts: highlight each part with
     // the language its name would get as a file.
     inject_data_sections(&tree, text, &mut spans);
@@ -262,8 +265,11 @@ fn inject_tree_heredocs(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<Hi
 /// One Perl heredoc, located by `perl_heredocs`. All offsets are into the
 /// original buffer text.
 struct PerlHeredoc {
-    /// The heredoc's bare name (`SQL` for `<<~'SQL'`).
-    name: String,
+    /// The language to highlight the body with: named by an enclosing
+    /// `use Inline LANG => <<'END'` when there is one, else by the
+    /// heredoc's bare name (`SQL` for `<<~'SQL'`); `None` when neither
+    /// names a language tico knows.
+    language: Option<&'static LanguageDef>,
     /// The `<<~'SQL'` marker, from its `<<` (when the grammar gave the
     /// marker a node of its own; otherwise from the identifier).
     marker_start: usize,
@@ -322,7 +328,8 @@ fn perl_heredocs(tree: &tree_sitter::Tree, text: &str) -> Vec<PerlHeredoc> {
             _ => start_id.start_byte(),
         };
         heredocs.push(PerlHeredoc {
-            name: name.to_string(),
+            language: inline_language_before(start_id, text)
+                .or_else(|| languages::find_by_name(name)),
             marker_start,
             marker_end: start_id.end_byte(),
             body_start,
@@ -427,7 +434,8 @@ fn inject_perl_heredocs(
     }
     let string = Scope::intern("string");
     for h in heredocs {
-        let injected = languages::find_by_name(&h.name)
+        let injected = h
+            .language
             .is_some_and(|lang| inject_range(text, spans, h.body_start, h.body_end, lang));
         if !injected {
             spans.retain(|s| !(s.start < h.body_end && s.end > h.body_start));
@@ -485,17 +493,109 @@ fn find_heredoc_terminator(
     }
     None
 }
+/// The language a `use Inline LANG => ...` statement names for the
+/// source `node` that follows the `=>`, when there is one. The Perl
+/// grammar makes nothing of that statement: it emits a `use Inline` node
+/// and then the `LANG`, the `=>` and the source as its siblings, so this
+/// walks back over those. `LANG` is Inline's name for the language (`C`,
+/// `CPP`, `Python`), matched case-insensitively against tico's.
+fn inline_language_before(node: tree_sitter::Node, text: &str) -> Option<&'static LanguageDef> {
+    let node = match node.kind() {
+        "heredoc_start_identifier" => node.parent()?,
+        _ => node,
+    };
+    let comma = node.prev_named_sibling()?;
+    if comma.kind() != "fat_comma" {
+        return None;
+    }
+    let lang = comma.prev_named_sibling()?;
+    let name = match lang.kind() {
+        "call_expression_with_bareword" => &text[lang.byte_range()],
+        "string_single_quoted" | "string_double_quoted" => {
+            text[lang.byte_range()].trim_matches(['\'', '"'])
+        }
+        _ => return None,
+    };
+    let use_stmt = lang.prev_named_sibling()?;
+    if use_stmt.kind() != "use_no_statement" {
+        return None;
+    }
+    let package = use_stmt.child_by_field_name("package_name")?;
+    if &text[package.byte_range()] != "Inline" {
+        return None;
+    }
+    languages::find_by_name(name)
+}
+
+/// Perl `use Inline C => q{ ... }` and the like: the string after the
+/// `=>` is source in that language, so highlight it as such. A `q{}` or
+/// `qq{}` string always is; a `'...'` or `"..."` string only when it
+/// spans lines, since a one-line one names a file, or `DATA` (whose
+/// code `inject_data_sections` finds under its `__C__` marker). Perl
+/// heredocs are handled by `inject_perl_heredocs`; the placeholder
+/// strings standing in for their markers are skipped here.
+fn inject_inline_strings(
+    tree: &tree_sitter::Tree,
+    text: &str,
+    heredocs: &[PerlHeredoc],
+    spans: &mut Vec<HighlightSpan>,
+) {
+    let mut strings = Vec::new();
+    for kind in [
+        "string_q_quoted",
+        "string_qq_quoted",
+        "string_single_quoted",
+        "string_double_quoted",
+    ] {
+        collect_by_kind(tree.root_node(), kind, &mut strings);
+    }
+    for node in strings {
+        let (start, end) = (node.start_byte(), node.end_byte());
+        if heredocs
+            .iter()
+            .any(|h| h.marker_start == start && h.marker_end == end)
+        {
+            continue;
+        }
+        let Some(lang) = inline_language_before(node, text) else {
+            continue;
+        };
+        let (body_start, body_end) = if node.kind().starts_with("string_q") {
+            let mut cursor = node.walk();
+            let children: Vec<_> = node.children(&mut cursor).collect();
+            let Some(open) = children.iter().find(|c| c.kind() == "start_delimiter") else {
+                continue;
+            };
+            let Some(close) = children.iter().rfind(|c| c.kind() == "end_delimiter") else {
+                continue;
+            };
+            (open.end_byte(), close.start_byte())
+        } else {
+            if !text[start..end].contains('\n') {
+                continue;
+            }
+            (start + 1, end - 1)
+        };
+        inject_range(text, spans, body_start, body_end, lang);
+    }
+}
+
 /// Perl `__DATA__`/`__END__` sections (`data_not_for_compiler`; no other
-/// vendored grammar produces that kind, so this is a no-op elsewhere) in
-/// the layout Mojo::Loader, Data::Section::Simple and
-/// Data::Section::Pluggable read: each `@@ name` line starts a named part
-/// that runs to the next such line. A part is highlighted with whatever
-/// language its name would get as a file (`@@ hello.json` as JSON), or
-/// left plain when the name says nothing, or when it carries a `(base64)`
-/// encoding as in `@@ hello.bin (base64)`, since the text isn't the data.
-/// Text before the first `@@` line is plain, and an `__END__` line ends
-/// the data section as it does for those modules. The `@@`, the name and
-/// the encoding are colored as the markers they are.
+/// vendored grammar produces that kind, so this is a no-op elsewhere),
+/// in either of the two layouts that put code there:
+///
+/// - Mojo::Loader, Data::Section::Simple and Data::Section::Pluggable:
+///   each `@@ name` line starts a named part that runs to the next such
+///   line. A part is highlighted with whatever language its name would
+///   get as a file (`@@ hello.json` as JSON), or left plain when the name
+///   says nothing, or when it carries a `(base64)` encoding as in
+///   `@@ hello.bin (base64)`, since the text isn't the data. The `@@`,
+///   the name and the encoding are colored as the markers they are.
+/// - Inline (`use Inline C => 'DATA'`): each `__C__` line, the language's
+///   Inline name in double underscores, starts a part in that language.
+///
+/// Text before the first marker is plain, and an `__END__` line ends the
+/// data section as it does for all of those modules.
 fn inject_data_sections(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<HighlightSpan>) {
     let mut sections = Vec::new();
     collect_by_kind(tree.root_node(), "data_not_for_compiler", &mut sections);
@@ -504,7 +604,7 @@ fn inject_data_sections(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<Hi
     }
     let marker = Scope::intern("punctuation.special");
     let path = Scope::intern("string.special.path");
-    let encoding = Scope::intern("keyword.directive");
+    let directive = Scope::intern("keyword.directive");
     for section in sections {
         let (start, end) = (section.start_byte(), section.end_byte().min(text.len()));
         if end <= start {
@@ -513,54 +613,70 @@ fn inject_data_sections(tree: &tree_sitter::Tree, text: &str, spans: &mut Vec<Hi
         let parts = data_section_parts(text, start, end);
         for (i, part) in parts.iter().enumerate() {
             let body_end = parts.get(i + 1).map_or(part.end, |next| next.line_start);
-            spans.push(HighlightSpan {
-                start: part.line_start,
-                end: part.line_start + 2,
-                scope: marker,
-                language: "perl",
-            });
-            spans.push(HighlightSpan {
-                start: part.name_start,
-                end: part.name_end,
-                scope: path,
-                language: "perl",
-            });
-            if let Some((enc_start, enc_end)) = part.encoding {
+            let name = &text[part.name_start..part.name_end];
+            let lang = if part.inline {
                 spans.push(HighlightSpan {
-                    start: enc_start,
-                    end: enc_end,
-                    scope: encoding,
+                    start: part.line_start,
+                    end: part.name_end + 2,
+                    scope: directive,
                     language: "perl",
                 });
-                continue;
-            }
-            let name = std::path::Path::new(&text[part.name_start..part.name_end]);
-            let body = &text[part.body_start..body_end];
-            if let Some(lang) = languages::detect(Some(name), body) {
+                languages::find_by_name(name)
+            } else {
+                spans.push(HighlightSpan {
+                    start: part.line_start,
+                    end: part.line_start + 2,
+                    scope: marker,
+                    language: "perl",
+                });
+                spans.push(HighlightSpan {
+                    start: part.name_start,
+                    end: part.name_end,
+                    scope: path,
+                    language: "perl",
+                });
+                if let Some((enc_start, enc_end)) = part.encoding {
+                    spans.push(HighlightSpan {
+                        start: enc_start,
+                        end: enc_end,
+                        scope: directive,
+                        language: "perl",
+                    });
+                    continue;
+                }
+                let body = &text[part.body_start..body_end];
+                languages::detect(Some(std::path::Path::new(name)), body)
+            };
+            if let Some(lang) = lang {
                 inject_range(text, spans, part.body_start, body_end, lang);
             }
         }
     }
 }
 
-/// One `@@ name` part of a data section, as byte offsets into the buffer.
+/// One part of a data section, as byte offsets into the buffer: an
+/// `@@ name` part, or (`inline`) an Inline `__LANG__` part.
 struct DataSectionPart {
-    /// Where the `@@ name` line starts (its `@@`).
+    /// Whether this is an Inline `__LANG__` marker rather than `@@ name`.
+    inline: bool,
+    /// Where the marker line starts (its `@@` or `__`).
     line_start: usize,
+    /// The name after `@@`, or the `LANG` between the underscores.
     name_start: usize,
     name_end: usize,
-    /// The `(base64)` after the name, when present.
+    /// The `(base64)` after an `@@` name, when present.
     encoding: Option<(usize, usize)>,
-    /// The line after the header; the body runs from here to the next
+    /// The line after the marker; the body runs from here to the next
     /// part's `line_start`, or to `end` for the last part.
     body_start: usize,
     end: usize,
 }
 
-/// The `@@ name` parts of `text[start..end]`, following
+/// The parts of `text[start..end]`: `@@ name` lines, following
 /// Data::Section::Pluggable's `^@@\s+(.+?)\s*\r?\n` split and its
-/// `^(.*)\s+\((.*?)\)$` split of the name from an encoding. The parts
-/// stop at a line that is exactly `__END__`.
+/// `^(.*)\s+\((.*?)\)$` split of the name from an encoding, and Inline's
+/// `__LANG__` marker lines. The parts stop at a line that is exactly
+/// `__END__`.
 fn data_section_parts(text: &str, start: usize, end: usize) -> Vec<DataSectionPart> {
     let mut parts = Vec::new();
     let mut end = end;
@@ -575,7 +691,20 @@ fn data_section_parts(text: &str, start: usize, end: usize) -> Vec<DataSectionPa
             end = pos;
             break;
         }
-        if let Some(rest) = line.strip_prefix("@@")
+        if let Some(name) = line.strip_prefix("__").and_then(|l| l.strip_suffix("__"))
+            && !name.is_empty()
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '+')
+        {
+            parts.push(DataSectionPart {
+                inline: true,
+                line_start: pos,
+                name_start: pos + 2,
+                name_end: pos + 2 + name.len(),
+                encoding: None,
+                body_start: next,
+                end,
+            });
+        } else if let Some(rest) = line.strip_prefix("@@")
             && rest.starts_with(char::is_whitespace)
         {
             let name_all = rest.trim();
@@ -597,6 +726,7 @@ fn data_section_parts(text: &str, start: usize, end: usize) -> Vec<DataSectionPa
                 None => (name_all_end, None),
             };
             parts.push(DataSectionPart {
+                inline: false,
                 line_start: pos,
                 name_start,
                 name_end,
@@ -1645,6 +1775,100 @@ mod tests {
             !spans.iter().any(|s| s.start >= after),
             "nothing after the inner __END__ is part of the data: {spans:?}"
         );
+    }
+
+    /// `use Inline LANG => ...` names the language of the source that
+    /// follows the `=>`, whatever form it takes: a heredoc (whose
+    /// terminator, `END` here, names no language by itself), a `q{}`
+    /// string, or code in `__DATA__` under Inline's `__LANG__` marker.
+    #[test]
+    fn inline_source_is_highlighted_in_its_language() {
+        let src = concat!(
+            "use Inline C => <<'END';\n",
+            "int f() { return 1; }\n",
+            "END\n",
+            "use Inline C => q{ int g(void); }, libs => \"-lm\";\n",
+            "use Inline C => 'DATA';\n",
+            "use Inline Python => <<END;\n",
+            "def p(): pass\n",
+            "END\n",
+            "my $x = <<'END';\n",
+            "int not_c() {}\n",
+            "END\n",
+            "__DATA__\n",
+            "__C__\n",
+            "int h() { return 2; }\n",
+            "__Python__\n",
+            "def q(): pass\n",
+            "__CPP__\n",
+            "namespace n { int y = 0; }\n",
+        );
+        let lang = languages::detect(Some(std::path::Path::new("a.pl")), src).unwrap();
+        let spans = highlight(src, lang);
+        let exact = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| (s.scope.name().to_string(), s.language))
+                .next_back()
+        };
+        let at = |needle: &str, n: usize| {
+            let start = src.match_indices(needle).nth(n).unwrap().0;
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| (s.scope.name().to_string(), s.language))
+                .next_back()
+        };
+        // The heredoc after `C =>`.
+        assert_eq!(at("int", 0), Some(("type".to_string(), "c")));
+        assert_eq!(at("return", 0), Some(("keyword".to_string(), "c")));
+        // The q{} string; the `libs` option after it is still Perl.
+        assert_eq!(exact("void"), Some(("type".to_string(), "c")));
+        assert_eq!(exact("libs"), Some(("function".to_string(), "perl")));
+        assert_eq!(exact("\"-lm\""), Some(("string".to_string(), "perl")));
+        // 'DATA' is a one-line string: not source.
+        assert_eq!(exact("'DATA'"), Some(("string".to_string(), "perl")));
+        // A different Inline language, and a heredoc that isn't Inline's
+        // at all (its terminator names no language): one Perl string.
+        assert_eq!(at("def", 0), Some(("keyword".to_string(), "python")));
+        let not_c = src.find("int not_c").unwrap();
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.start == not_c && s.scope.name() == "string" && s.language == "perl"),
+            "a plain <<'END' heredoc stays a Perl string: {spans:?}"
+        );
+        assert!(
+            !spans.iter().any(|s| s.language == "c" && s.start == not_c),
+            "{spans:?}"
+        );
+        // The __DATA__ markers and the parts under them.
+        assert_eq!(
+            exact("__C__"),
+            Some(("keyword.directive".to_string(), "perl"))
+        );
+        assert_eq!(
+            exact("__Python__"),
+            Some(("keyword.directive".to_string(), "perl"))
+        );
+        assert_eq!(at("return", 1), Some(("keyword".to_string(), "c")));
+        assert_eq!(at("def", 1), Some(("keyword".to_string(), "python")));
+        let python_part = src.find("__Python__").unwrap();
+        assert!(
+            spans
+                .iter()
+                .filter(|s| s.language == "c")
+                .all(|s| s.end <= python_part),
+            "C spans stop at the __Python__ marker: {spans:?}"
+        );
+        // Inline's `CPP` is tico's `cpp`, matched case-insensitively.
+        assert_eq!(
+            exact("__CPP__"),
+            Some(("keyword.directive".to_string(), "perl"))
+        );
+        assert_eq!(exact("namespace"), Some(("keyword".to_string(), "cpp")));
     }
 
     #[test]
