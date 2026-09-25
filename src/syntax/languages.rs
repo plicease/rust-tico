@@ -737,7 +737,7 @@ fn parse_emacs_modeline(line: &str) -> Option<String> {
 
 /// The canonical name of every registered language, sorted alphabetically —
 /// for `-z`/`--listsyntaxes`.
-pub(crate) fn names() -> Vec<&'static str> {
+pub fn names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = LANGUAGES.iter().map(|l| l.name).collect();
     names.sort_unstable();
     names
@@ -747,7 +747,7 @@ pub(crate) fn names() -> Vec<&'static str> {
 /// `modeline_aliases`, case-insensitively. Used for modeline detection, for
 /// matching a heredoc terminator (e.g. `<<SQL`) to a language, and for the
 /// `-Y`/`--syntax` CLI override.
-pub(crate) fn find_by_name(name: &str) -> Option<&'static LanguageDef> {
+pub fn find_by_name(name: &str) -> Option<&'static LanguageDef> {
     let name = name.to_ascii_lowercase();
     LANGUAGES
         .iter()

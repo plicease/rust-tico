@@ -17,4 +17,5 @@ jobs:
     uses: uperl/action-rust-release-bin/.github/workflows/release.yml@v1
     with:
       publisher: "plicease"
+      extra-bin-names: "tcat ttee"
 
