@@ -1009,6 +1009,23 @@ fn apply_prompt_action(editor: &mut Editor, prompt: &mut Prompt, action: Action)
             editor.set_status("File Browser: not yet implemented");
             true
         }
+        // Same treatment as `Browser` just above: recognized (bound, shown
+        // in the Write Out shortcut bar) but not actually implemented yet.
+        Action::Append => {
+            editor.mode = Mode::Editing;
+            editor.set_status("Append: not yet implemented");
+            true
+        }
+        Action::Prepend => {
+            editor.mode = Mode::Editing;
+            editor.set_status("Prepend: not yet implemented");
+            true
+        }
+        Action::Backup => {
+            editor.mode = Mode::Editing;
+            editor.set_status("Backup File: not yet implemented");
+            true
+        }
         // `^T`/`^Y`/`^O` from within the Insert-File/Execute-Command
         // prompt run the tool immediately, ignoring whatever was typed —
         // matches nano's `ran_a_tool` flag, which makes `insert_a_file_or`
@@ -4391,6 +4408,35 @@ mod tests {
         {
             let mut ed = test_editor("x");
             let mut prompt = insert_prompt(false, "");
+            assert!(
+                apply_prompt_action(&mut ed, &mut prompt, action),
+                "{action:?}"
+            );
+            assert!(
+                matches!(ed.mode, Mode::Editing),
+                "{action:?} should close the prompt"
+            );
+            assert_eq!(ed.status.as_deref(), Some(expected), "{action:?}");
+        }
+    }
+
+    #[test]
+    fn unimplemented_write_out_actions_report_plainly_and_close_the_prompt() {
+        for (action, expected) in [
+            (Action::Append, "Append: not yet implemented"),
+            (Action::Prepend, "Prepend: not yet implemented"),
+            (Action::Backup, "Backup File: not yet implemented"),
+        ] {
+            let mut ed = test_editor("x");
+            let mut prompt = Prompt {
+                kind: PromptKind::WriteOut { exiting: false },
+                menu: Menu::WriteOut,
+                label: "Write Out".to_string(),
+                input: String::new(),
+                cursor: 0,
+                history_pos: None,
+                saved_input: None,
+            };
             assert!(
                 apply_prompt_action(&mut ed, &mut prompt, action),
                 "{action:?}"

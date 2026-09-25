@@ -582,8 +582,8 @@ impl Editor {
             Indent => self.do_indent(),
             Unindent => self.do_unindent(),
             Comment => self.do_comment(),
-            Center => {}
-            Cycle => {}
+            Center => self.set_status("center: not yet implemented"),
+            Cycle => self.set_status("cycle: not yet implemented"),
             ScrollUp => self.scroll_view(-1),
             ScrollDown => self.scroll_view(1),
             BeginPara => self.move_para_begin(),
@@ -595,7 +595,7 @@ impl Editor {
             Anchor | PrevAnchor | NextAnchor => self.set_status("anchors: not yet implemented"),
             PrevBuf => self.switch_buffer(-1),
             NextBuf => self.switch_buffer(1),
-            Verbatim => {}
+            Verbatim => self.set_status("verbatim input: not yet implemented"),
             RecordMacro | RunMacro => self.set_status("macros: not yet implemented"),
             Refresh => {}
             SuggestSuspend => self.suggest_ctrl_t_ctrl_z(),
@@ -3101,6 +3101,19 @@ mod tests {
         ed.execute(Action::WhitespaceDisplay);
         assert!(!ed.options.whitespacedisplay);
         assert_eq!(ed.status.as_deref(), Some("Whitespace display disabled"));
+    }
+
+    #[test]
+    fn genuinely_inert_actions_report_plainly_instead_of_doing_nothing() {
+        for (action, expected) in [
+            (Action::Center, "center: not yet implemented"),
+            (Action::Cycle, "cycle: not yet implemented"),
+            (Action::Verbatim, "verbatim input: not yet implemented"),
+        ] {
+            let mut ed = test_editor("hello");
+            ed.execute(action);
+            assert_eq!(ed.status.as_deref(), Some(expected), "{action:?}");
+        }
     }
 
     // `set minibar`

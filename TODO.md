@@ -22,18 +22,17 @@ here.
 - [ ] Cut Till End (`^V`) from the Execute menu
 - [ ] Full Justify (`^J`) from the Execute menu — main-menu `M-J` already
       works; this path is stubbed separately in `src/ui.rs`
-
-## Bound keys that silently do nothing
-
 - [ ] Verbatim input (`M-V`)
 - [ ] Center (`^L`) / Cycle (`M-%`)
+- [ ] Write Out prompt toggles: Append (`M-A`), Prepend (`M-P`), Backup
+      (`M-B`)
+
+## Bound keys that work but give no feedback
+
 - [ ] The other `M-` toggles (`M-S` soft wrap, `M-N` line numbers, `M-X`
       help lines, ...) flip their option but don't show nano's
       "<Feature> enabled/disabled" message; only `M-P` whitespace display
       reports
-- [ ] Write Out prompt toggles: Append (`M-A`), Prepend (`M-P`), Backup
-      (`M-B`) — bound and shown in the bar but no handler in
-      `apply_prompt_action`
 
 ## Options parsed but never consulted
 
