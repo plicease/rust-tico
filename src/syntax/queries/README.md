@@ -26,6 +26,7 @@ doesn't land in a Helix top-level scope fails
 | `tt2.scm` | The [Template Toolkit Zed extension](https://github.com/RuvimSypa/template-toolkit-zed), commit `93854ef`, `languages/template-toolkit/highlights.scm`, unmodified (the grammar itself is vendored under `grammars/tree-sitter-template-toolkit/`) | MIT |
 | `batch.scm` | The `tree-sitter-batch` crate (v0.11.1, [wharflab/tree-sitter-batch](https://github.com/wharflab/tree-sitter-batch)) `queries/highlights.scm`, with two patterns reordered as noted in its header | MIT |
 | `cue.scm` | [eonpatapon/tree-sitter-cue](https://github.com/eonpatapon/tree-sitter-cue) commit `dd7b90e`, `queries/highlights.scm`, with two patterns moved earlier as noted in its header (the grammar itself is vendored under `grammars/tree-sitter-cue/`) | MIT |
+| `pascal.scm` | [Helix](https://github.com/helix-editor/helix) `runtime/queries/pascal/highlights.scm`, commit `33c18b3`, reordered and extended as noted in its header (the grammar is tico's fork under `grammars/tree-sitter-pascal/`) | **MPL-2.0** — see `LICENSE-MPL-2.0` in the repository root |
 | `hcl.scm` | [Helix](https://github.com/helix-editor/helix) `runtime/queries/hcl/highlights.scm`, commit `90b126d` (the `tree-sitter-hcl` crate ships no query) | **MPL-2.0** — see `LICENSE-MPL-2.0` in the repository root |
 | everything else | The corresponding `tree-sitter-<lang>` crate's `queries/highlights.scm`, unmodified except where noted in a file's header | That grammar's license (MIT for all current ones) |
 

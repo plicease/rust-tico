@@ -1,0 +1,420 @@
+==================
+Program parameters (tico)
+==================
+
+program Demo(input, output);
+begin
+end.
+
+---
+
+(root
+  (program
+    (kProgram)
+    (moduleName
+      (identifier))
+    (identifier)
+    (identifier)
+    (block
+      (kBegin)
+      (kEnd))
+    (kEndDot)))
+
+==================
+Subrange types (tico)
+==================
+
+program P;
+type
+  TRange = 1..10;
+  TDigits = set of '0'..'9';
+  TSigned = -MaxInt..MaxInt;
+  TIdx = Low(TRange)..High(TRange);
+  TChars = #65..#90;
+  PInt = ^Integer;
+  TQual = Unit.TFoo;
+  TEnum = (Red, Green);
+begin
+end.
+
+---
+
+(root
+  (program
+    (kProgram)
+    (moduleName
+      (identifier))
+    (declTypes
+      (kType)
+      (declType
+        (identifier)
+        (kEq)
+        (type
+          (declSubrange
+            (subrangeBound
+              (literalNumber))
+            (subrangeBound
+              (literalNumber)))))
+      (declType
+        (identifier)
+        (kEq)
+        (type
+          (declSet
+            (kSet)
+            (kOf)
+            (type
+              (declSubrange
+                (subrangeBound
+                  (literalString))
+                (subrangeBound
+                  (literalString)))))))
+      (declType
+        (identifier)
+        (kEq)
+        (type
+          (declSubrange
+            (subrangeBound
+              (kSub)
+              (identifier))
+            (subrangeBound
+              (identifier)))))
+      (declType
+        (identifier)
+        (kEq)
+        (type
+          (declSubrange
+            (subrangeBound
+              (identifier)
+              (identifier))
+            (subrangeBound
+              (identifier)
+              (identifier)))))
+      (declType
+        (identifier)
+        (kEq)
+        (type
+          (declSubrange
+            (subrangeBound
+              (literalString))
+            (subrangeBound
+              (literalString)))))
+      (declType
+        (identifier)
+        (kEq)
+        (type
+          (typeref
+            (typerefPtr
+              (kHat)
+              (identifier)))))
+      (declType
+        (identifier)
+        (kEq)
+        (type
+          (typeref
+            (typerefDot
+              (identifier)
+              (kDot)
+              (identifier)))))
+      (declType
+        (identifier)
+        (kEq)
+        (type
+          (declEnum
+            (declEnumValue
+              (identifier))
+            (declEnumValue
+              (identifier))))))
+    (block
+      (kBegin)
+      (kEnd))
+    (kEndDot)))
+
+==================
+Control-character literals (tico)
+==================
+
+program P;
+const
+  Bell = ^G;
+  Esc = ^[;
+  Msg = 'x'^M^J'y';
+var
+  P: ^Integer;
+  A: ^Integer;
+begin
+  Write(^G, #7);
+  P^ := P^ + 1;
+  A^[1] := 0;
+end.
+
+---
+
+(root
+  (program
+    (kProgram)
+    (moduleName
+      (identifier))
+    (declConsts
+      (kConst)
+      (declConst
+        (identifier)
+        (defaultValue
+          (kEq)
+          (literalString
+            (literalCaret))))
+      (declConst
+        (identifier)
+        (defaultValue
+          (kEq)
+          (literalString
+            (literalCaret))))
+      (declConst
+        (identifier)
+        (defaultValue
+          (kEq)
+          (literalString
+            (literalCaret)
+            (literalCaret)))))
+    (declVars
+      (kVar)
+      (declVar
+        (identifier)
+        (type
+          (typeref
+            (typerefPtr
+              (kHat)
+              (identifier)))))
+      (declVar
+        (identifier)
+        (type
+          (typeref
+            (typerefPtr
+              (kHat)
+              (identifier))))))
+    (block
+      (kBegin)
+      (statement
+        (exprCall
+          (identifier)
+          (exprArgs
+            (literalString
+              (literalCaret))
+            (literalString
+              (literalChar)))))
+      (assignment
+        (exprUnary
+          (identifier)
+          (kHat))
+        (kAssign)
+        (exprBinary
+          (exprUnary
+            (identifier)
+            (kHat))
+          (kAdd)
+          (literalNumber)))
+      (assignment
+        (exprSubscript
+          (exprUnary
+            (identifier)
+            (kHat))
+          (exprArgs
+            (literalNumber)))
+        (kAssign)
+        (literalNumber))
+      (kEnd))
+    (kEndDot)))
+
+==================
+Numeric literals (tico)
+==================
+
+program P;
+const
+  A = 1.5E10;
+  B = 1E3;
+  C = 1.5e-3;
+  D = $FF;
+  E = %1010;
+  F = &777;
+begin
+end.
+
+---
+
+(root
+  (program
+    (kProgram)
+    (moduleName
+      (identifier))
+    (declConsts
+      (kConst)
+      (declConst
+        (identifier)
+        (defaultValue
+          (kEq)
+          (literalNumber)))
+      (declConst
+        (identifier)
+        (defaultValue
+          (kEq)
+          (literalNumber)))
+      (declConst
+        (identifier)
+        (defaultValue
+          (kEq)
+          (literalNumber)))
+      (declConst
+        (identifier)
+        (defaultValue
+          (kEq)
+          (literalNumber)))
+      (declConst
+        (identifier)
+        (defaultValue
+          (kEq)
+          (literalNumber)))
+      (declConst
+        (identifier)
+        (defaultValue
+          (kEq)
+          (literalNumber))))
+    (block
+      (kBegin)
+      (kEnd))
+    (kEndDot)))
+
+==================
+Absolute (tico)
+==================
+
+program P;
+var
+  Screen: array[0..3999] of Byte absolute $B800:$0000;
+  Shadow: Word absolute Hex;
+begin
+end.
+
+---
+
+(root
+  (program
+    (kProgram)
+    (moduleName
+      (identifier))
+    (declVars
+      (kVar)
+      (declVar
+        (identifier)
+        (type
+          (declArray
+            (kArray)
+            (range
+              (literalNumber)
+              (literalNumber))
+            (kOf)
+            (type
+              (typeref
+                (identifier)))))
+        (kAbsolute)
+        (literalNumber)
+        (literalNumber))
+      (declVar
+        (identifier)
+        (type
+          (typeref
+            (identifier)))
+        (kAbsolute)
+        (identifier)))
+    (block
+      (kBegin)
+      (kEnd))
+    (kEndDot)))
+
+==================
+Numeric labels and a label before end (tico)
+==================
+
+program P;
+label 10, Done;
+begin
+  goto 10;
+10:
+  goto Done;
+Done:
+end.
+
+---
+
+(root
+  (program
+    (kProgram)
+    (moduleName
+      (identifier))
+    (declLabels
+      (kLabel)
+      (declLabel
+        (literalNumber))
+      (declLabel
+        (identifier)))
+    (block
+      (kBegin)
+      (goto
+        (kGoto)
+        (literalNumber))
+      (label
+        (literalNumber))
+      (goto
+        (kGoto)
+        (identifier))
+      (label
+        (identifier))
+      (kEnd))
+    (kEndDot)))
+
+==================
+Case otherwise (tico)
+==================
+
+program P;
+begin
+  case I of
+    1: ;
+  otherwise
+    ;
+  end;
+  case I of
+    1: ;
+  else
+    ;
+  end;
+end.
+
+---
+
+(root
+  (program
+    (kProgram)
+    (moduleName
+      (identifier))
+    (block
+      (kBegin)
+      (case
+        (kCase)
+        (identifier)
+        (kOf)
+        (caseCase
+          (caseLabel
+            (literalNumber)))
+        (kOtherwise)
+        (kEnd))
+      (case
+        (kCase)
+        (identifier)
+        (kOf)
+        (caseCase
+          (caseLabel
+            (literalNumber)))
+        (kElse)
+        (kEnd))
+      (kEnd))
+    (kEndDot)))

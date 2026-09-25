@@ -16,8 +16,8 @@
 //!    Example: `TICO_SYSCONFDIR=/usr/local/etc cargo build --release`
 //!
 //! 2. Compile the tree-sitter grammars vendored under `grammars/` (VCL,
-//!    Template Toolkit and CUE; every other grammar comes from a crate
-//!    that compiles itself). See the `README.md` in each grammar's
+//!    Template Toolkit, CUE and Pascal; every other grammar comes from a
+//!    crate that compiles itself). See the `README.md` in each grammar's
 //!    directory.
 
 fn main() {
@@ -55,4 +55,13 @@ fn main() {
         .compile("tree-sitter-cue");
     println!("cargo:rerun-if-changed=grammars/tree-sitter-cue/src/parser.c");
     println!("cargo:rerun-if-changed=grammars/tree-sitter-cue/src/scanner.c");
+
+    let pascal = std::path::Path::new("grammars/tree-sitter-pascal/src");
+    cc::Build::new()
+        .std("c11")
+        .include(pascal)
+        .file(pascal.join("parser.c"))
+        .warnings(false)
+        .compile("tree-sitter-pascal");
+    println!("cargo:rerun-if-changed=grammars/tree-sitter-pascal/src/parser.c");
 }
