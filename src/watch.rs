@@ -384,7 +384,9 @@ mod platform {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+    };
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_LIST_DIRECTORY,
         FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_NOTIFY_CHANGE_CREATION, FILE_NOTIFY_CHANGE_DIR_NAME,
@@ -420,7 +422,10 @@ mod platform {
         | FILE_NOTIFY_CHANGE_CREATION;
 
     fn wide(path: &Path) -> Vec<u16> {
-        path.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
     }
 
     /// NTFS/ReFS names are case-insensitive-but-preserving, so this can't
@@ -534,14 +539,16 @@ mod platform {
 
                 let mut offset = 0usize;
                 loop {
-                    let info = unsafe {
-                        &*(buf.as_ptr().add(offset) as *const FILE_NOTIFY_INFORMATION)
-                    };
+                    let info =
+                        unsafe { &*(buf.as_ptr().add(offset) as *const FILE_NOTIFY_INFORMATION) };
                     let name_offset =
                         offset + std::mem::offset_of!(FILE_NOTIFY_INFORMATION, FileName);
                     let name_len = info.FileNameLength as usize / 2;
                     let name = unsafe {
-                        std::slice::from_raw_parts(buf.as_ptr().add(name_offset) as *const u16, name_len)
+                        std::slice::from_raw_parts(
+                            buf.as_ptr().add(name_offset) as *const u16,
+                            name_len,
+                        )
                     };
                     if names_match(&OsString::from_wide(name), &filename) {
                         changed2.store(true, Ordering::SeqCst);
