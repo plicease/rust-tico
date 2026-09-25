@@ -141,6 +141,17 @@ fn lang_cue() -> tree_sitter::Language {
     CUE_LANGUAGE.into()
 }
 
+// And Pascal, from `grammars/tree-sitter-pascal/` (a fork of
+// Isopod/tree-sitter-pascal extended for Turbo Pascal).
+unsafe extern "C" {
+    fn tree_sitter_pascal() -> *const ();
+}
+const PASCAL_LANGUAGE: tree_sitter_language::LanguageFn =
+    unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_pascal) };
+fn lang_pascal() -> tree_sitter::Language {
+    PASCAL_LANGUAGE.into()
+}
+
 const LANGUAGES: &[LanguageDef] = &[
     LanguageDef {
         name: "perl",
@@ -783,6 +794,24 @@ const LANGUAGES: &[LanguageDef] = &[
         formatter: None,
         comment: "#",
     },
+    LanguageDef {
+        // Turbo Pascal, Free Pascal and Delphi. `.inc` include files are
+        // not claimed by extension (assembler, PHP and C use it too); a
+        // `.inc` whose first line looks like Pascal is sniffed instead,
+        // see `detect_by_content`. Brace comments are the toggle because
+        // Turbo Pascal has no `//` line comment; every dialect accepts
+        // `{ }`.
+        name: "pascal",
+        extensions: &["pas", "pp", "dpr", "lpr", "dpk"],
+        filenames: &[],
+        shebangs: &[],
+        modeline_aliases: &["delphi"],
+        language: lang_pascal,
+        highlights_query: include_str!("queries/pascal.scm"),
+        linter: None,
+        formatter: None,
+        comment: "{|}",
+    },
 ];
 
 /// Detect a buffer's language: by filename extension or exact filename
@@ -792,7 +821,8 @@ const LANGUAGES: &[LanguageDef] = &[
 /// most-specific (and cheapest to check) first. The content sniff is the
 /// counterpart of nano's `header` directive: it only gets a say when the
 /// filename told us nothing, so `foo.conf` holding JSON is highlighted
-/// as JSON while `foo.ini` never is.
+/// as JSON while `foo.ini` never is. One sniff is extension-specific:
+/// only a `.inc` file is checked for Pascal.
 pub fn detect(path: Option<&Path>, text: &str) -> Option<&'static LanguageDef> {
     if let Some(path) = path
         && let Some(lang) = detect_by_filename(path)
@@ -806,7 +836,7 @@ pub fn detect(path: Option<&Path>, text: &str) -> Option<&'static LanguageDef> {
     if let Some(lang) = detect_by_modeline(text) {
         return Some(lang);
     }
-    if let Some(lang) = detect_by_content(text) {
+    if let Some(lang) = detect_by_content(path, text) {
         return Some(lang);
     }
     None
@@ -814,17 +844,59 @@ pub fn detect(path: Option<&Path>, text: &str) -> Option<&'static LanguageDef> {
 
 /// Guess from the first line or two, without parsing anything. Only
 /// formats with a distinctive opening are sniffed, the way nano's
-/// `header` lines do it.
-fn detect_by_content(text: &str) -> Option<&'static LanguageDef> {
+/// `header` lines do it. The Pascal sniff is the one that looks at the
+/// filename: `.inc` is shared with assembler, PHP and C includes, so it
+/// isn't registered as a Pascal extension, but a `.inc` that opens like
+/// Pascal is Pascal.
+fn detect_by_content(path: Option<&Path>, text: &str) -> Option<&'static LanguageDef> {
     let text = text.trim_start_matches('\u{feff}');
+    let is_inc = path
+        .and_then(Path::extension)
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("inc"));
     if looks_like_json(text) {
         find_by_name("json")
     } else if looks_like_diff(text) {
         find_by_name("diff")
     } else if looks_like_yaml(text) {
         find_by_name("yaml")
+    } else if is_inc && looks_like_pascal(text) {
+        find_by_name("pascal")
     } else {
         None
+    }
+}
+
+/// The first non-blank line opens a compiler directive (`{$mode ...}`,
+/// `{$ifdef ...}`, `{$I ...}`: how nearly every Free Pascal include
+/// starts), a comment (`(*`, or `{` followed by a letter or a space; JSON's
+/// `{"` was ruled out before this runs), a section header standing alone
+/// on its line (`const`, `type`, `var`, which tells a Pascal `const`
+/// section from a JavaScript `const x = 1`), a module-level keyword or
+/// `label`, or a routine header (`function` only when the line ends in
+/// `;`, since a JavaScript or PHP `function` line ends in `{`).
+fn looks_like_pascal(text: &str) -> bool {
+    let Some(line) = text.lines().map(str::trim).find(|l| !l.is_empty()) else {
+        return false;
+    };
+    if line.starts_with("{$") || line.starts_with("(*") {
+        return true;
+    }
+    if let Some(rest) = line.strip_prefix('{')
+        && rest.starts_with(|c: char| c.is_ascii_alphabetic() || c == ' ')
+    {
+        return true;
+    }
+    let mut words = line.split_whitespace();
+    let Some(first) = words.next() else {
+        return false;
+    };
+    let alone = words.next().is_none();
+    match first.to_ascii_lowercase().as_str() {
+        "unit" | "program" | "library" | "uses" | "label" | "resourcestring" | "procedure"
+        | "constructor" | "destructor" => true,
+        "const" | "type" | "var" | "interface" | "implementation" => alone,
+        "function" => line.ends_with(';'),
+        _ => false,
     }
 }
 

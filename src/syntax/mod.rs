@@ -861,6 +861,111 @@ mod tests {
     /// for Fastly's dialect (see `grammars/tree-sitter-vcl/README.md`).
     /// Every Fastly-only construct here must parse without an ERROR node,
     /// and the query must color the ones with dedicated captures.
+    /// The Turbo Pascal constructs tico's fork of tree-sitter-pascal adds
+    /// (see `grammars/tree-sitter-pascal/README.md`) parse without a
+    /// single ERROR node, and the query paints them sensibly.
+    #[test]
+    fn pascal_turbo_pascal_dialect_parses_and_highlights() {
+        let source = concat!(
+            "{$M 16384,0,655360}\n",
+            "{$I-}\n",
+            "(* block comment *)\n",
+            "program Demo(input, output);\n",
+            "uses Crt;\n",
+            "const\n",
+            "  Hex = $FF;\n",
+            "  Bell = ^G;\n",
+            "  Big = 1.5E10;\n",
+            "  Bin = %1010;\n",
+            "  Oct = &777;\n",
+            "  Msg = 'It''s'^M^J;\n",
+            "type\n",
+            "  TRange = 1..10;\n",
+            "  TDigits = set of '0'..'9';\n",
+            "  TSigned = -MaxInt..MaxInt;\n",
+            "  TIdx = Low(TRange)..High(TRange);\n",
+            "  PInt = ^Integer;\n",
+            "var\n",
+            "  Screen: array[0..3999] of Byte absolute $B800:$0000;\n",
+            "  Shadow: Word absolute Hex;\n",
+            "  P: PInt;\n",
+            "  I: Integer;\n",
+            "label 10, Done;\n",
+            "procedure Handler; interrupt;\n",
+            "begin\n",
+            "  Port[$20] := $20;\n",
+            "end;\n",
+            "begin\n",
+            "  { brace comment }\n",
+            "  P^ := P^ + 1;\n",
+            "  for I := 1 to 10 do\n",
+            "    if I mod 2 = 0 then goto 10;\n",
+            "  case I of\n",
+            "    1..9: WriteLn('small');\n",
+            "  otherwise\n",
+            "    Exit;\n",
+            "  end;\n",
+            "  goto Done;\n",
+            "10:\n",
+            "  Write(^G, #7);\n",
+            "Done:\n",
+            "end.\n",
+        );
+        let lang = languages::find_by_name("pascal").unwrap();
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&(lang.language)()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "Turbo Pascal failed to parse:\n{}",
+            tree.root_node().to_sexp()
+        );
+
+        let spans = highlight(source, lang);
+        let scope_of = |needle: &str| {
+            let start = source.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| s.scope.name().to_string())
+                .next_back()
+        };
+        assert_eq!(
+            scope_of("{$M 16384,0,655360}").as_deref(),
+            Some("keyword.directive")
+        );
+        assert_eq!(scope_of("(* block comment *)").as_deref(), Some("comment"));
+        assert_eq!(scope_of("{ brace comment }").as_deref(), Some("comment"));
+        assert_eq!(scope_of("program").as_deref(), Some("keyword"));
+        assert_eq!(scope_of("$FF").as_deref(), Some("constant.numeric"));
+        assert_eq!(scope_of("1.5E10").as_deref(), Some("constant.numeric"));
+        assert_eq!(scope_of("%1010").as_deref(), Some("constant.numeric"));
+        assert_eq!(scope_of("&777").as_deref(), Some("constant.numeric"));
+        assert_eq!(scope_of("^G").as_deref(), Some("string"));
+        assert_eq!(scope_of("'It''s'^M^J").as_deref(), Some("string"));
+        assert_eq!(scope_of("TRange").as_deref(), Some("type"));
+        assert_eq!(scope_of("MaxInt").as_deref(), Some("constant"));
+        assert_eq!(scope_of("Byte").as_deref(), Some("type"));
+        assert_eq!(scope_of("absolute").as_deref(), Some("keyword"));
+        assert_eq!(scope_of("$B800").as_deref(), Some("constant.numeric"));
+        assert_eq!(scope_of("Handler").as_deref(), Some("function"));
+        assert_eq!(scope_of("interrupt").as_deref(), Some("attribute"));
+        assert_eq!(scope_of("for").as_deref(), Some("keyword.control.repeat"));
+        assert_eq!(
+            scope_of("if").as_deref(),
+            Some("keyword.control.conditional")
+        );
+        assert_eq!(scope_of("mod").as_deref(), Some("keyword.operator"));
+        assert_eq!(scope_of("WriteLn").as_deref(), Some("function"));
+        assert_eq!(
+            scope_of("otherwise").as_deref(),
+            Some("keyword.control.conditional")
+        );
+        assert_eq!(scope_of("Exit").as_deref(), Some("keyword.control.return"));
+        assert_eq!(scope_of("10:").as_deref(), Some("constant"));
+        assert_eq!(scope_of("Done:").as_deref(), Some("constant"));
+    }
+
     #[test]
     fn vcl_fastly_dialect_parses_and_highlights() {
         let source = concat!(
@@ -2046,6 +2151,95 @@ mod tests {
             detect(conf, "{\"a\": 1}\n# vim: ft=yaml\n").unwrap().name,
             "yaml"
         );
+    }
+
+    /// `.inc` is not registered as a Pascal extension (assembler, PHP and
+    /// C includes use it too), so a `.inc` file is sniffed: it's Pascal
+    /// when its first non-blank line opens a compiler directive, a
+    /// comment, a section header or a routine. No other filename is.
+    #[test]
+    fn pascal_inc_content_sniffing() {
+        let inc = Some(std::path::Path::new("defines.inc"));
+        let pascal_texts = [
+            "{$mode objfpc}\n",
+            "  {$ifdef FPC}\nconst X = 1;\n{$endif}\n",
+            "{$I-}",
+            "\n\n{$IFDEF VER70}\n",
+            "(* block comment *)\nvar\n  I: Integer;\n",
+            "{ brace comment }\n",
+            "{comment}\n",
+            "unit Foo;\n",
+            "Program Foo;",
+            "uses Crt, Dos;",
+            "interface\n",
+            "implementation\n",
+            "procedure Foo;\nbegin\nend;\n",
+            "function Foo: Integer;\n",
+            "function Foo(A: Integer): Integer; far;\n",
+            "constructor TFoo.Init;\n",
+            "destructor TFoo.Done;\n",
+            "const\n  X = 1;\n",
+            "type\n  T = Integer;\n",
+            "var\n  I: Integer;\n",
+            "  Var\n",
+            "label 10;\n",
+            "resourcestring\n  S = 'x';\n",
+        ];
+        for text in pascal_texts {
+            assert_eq!(
+                detect(inc, text).map(|l| l.name),
+                Some("pascal"),
+                "{text:?} should be detected as pascal"
+            );
+            // The sniff is specific to `.inc`: the same content under any
+            // other unregistered name, or no name, is not sniffed.
+            for path in [Some(std::path::Path::new("app.conf")), None] {
+                assert!(
+                    detect(path, text).is_none(),
+                    "{text:?} should only be sniffed as pascal in a .inc file"
+                );
+            }
+        }
+        let not_pascal = [
+            "",
+            "   \n",
+            "<?php\nfunction foo() {}\n",
+            "<?\n",
+            "; nasm include\n%macro X 1\n",
+            "section .text\n",
+            "#include <stdio.h>\n",
+            "#ifndef FOO_H\n",
+            "# shell fragment\nFOO=1\n",
+            "const x = 1;\n",
+            "type Foo struct {}\n",
+            "interface Foo {\n",
+            "function foo() {\n",
+            "var x = 1;\n",
+            "server {\n  listen 80;\n}\n",
+            "<Directory />\n",
+            "{\n  int x;\n}\n",
+            "{\"a\": 1}",
+            "---\nkey: value\n",
+            "begin\n",
+            "WriteLn('x');\n",
+        ];
+        for text in not_pascal {
+            assert_ne!(
+                detect(inc, text).map(|l| l.name),
+                Some("pascal"),
+                "{text:?} should not be detected as pascal"
+            );
+        }
+        // Registered extensions need no sniffing, whatever the content
+        // (and DOS-era files are often upper-case).
+        for name in ["x.pas", "X.PAS", "x.pp", "x.dpr", "x.lpr", "x.dpk"] {
+            assert_eq!(
+                detect(Some(std::path::Path::new(name)), "").unwrap().name,
+                "pascal",
+                "{name}"
+            );
+        }
+        assert!(detect(Some(std::path::Path::new("x.inc")), "").is_none());
     }
 
     /// nano's yaml `header` rule (`^%YAML |^---( |$)`) on the first

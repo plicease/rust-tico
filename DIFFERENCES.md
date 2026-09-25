@@ -21,8 +21,10 @@ syntax files where nano has one. Language detection is likewise built
 in: filename, then shebang, then a vim/Emacs modeline, then a peek at
 the leading lines (a `.conf` file that opens with `{ "` or a JSON array
 is highlighted as JSON, one that opens with `---` or `%YAML` as YAML,
-and a `--- `/`+++ ` pair as a diff), which stands in for nano's `header`
-and `magic` lines but is not configurable.
+a `--- `/`+++ ` pair as a diff, and a `.inc` file that opens with a
+`{$...}` directive, a Pascal comment, a section header or a routine
+header as Pascal), which stands in for nano's `header` and `magic` lines
+but is not configurable.
 
 Colors come from a theme in Helix's format (`src/theme.rs`), selected in
 `~/.ticorc` or with `--tico-theme`, and only the syntax scopes of a theme

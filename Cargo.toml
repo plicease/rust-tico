@@ -5,9 +5,11 @@ edition = "2024"
 description = "Yet Another Text Editor"
 repository = "https://github.com/tico-edit/tico"
 # MIT, except the files copied from Helix (MPL-2.0): src/syntax/queries/diff.scm,
-# src/syntax/queries/hcl.scm and the built-in themes under themes/; see README.md.
-# grammars/tree-sitter-vcl/ is a vendored MIT grammar (copyright ntsk), so
-# it adds no license term; see its README.
+# src/syntax/queries/hcl.scm, src/syntax/queries/pascal.scm and the built-in
+# themes under themes/; see README.md.
+# grammars/tree-sitter-vcl/ and grammars/tree-sitter-pascal/ are vendored MIT
+# grammars (copyright ntsk and Philip Zander respectively), so they add no
+# license term; see their READMEs.
 license = "MIT AND MPL-2.0"
 
 [dependencies]
