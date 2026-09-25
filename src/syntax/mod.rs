@@ -1700,6 +1700,41 @@ mod tests {
     }
 
     #[test]
+    fn filename_prefix_patterns() {
+        let cases = [
+            ("cpanfile", "perl"),
+            ("lib/cpanfile.dev", "perl"),
+            ("Makefile.PL", "perl"),
+            ("Makefile.in", "make"),
+            ("Makefile.am", "make"),
+            ("src/Makefile.inc", "make"),
+            ("makefile.unix", "make"),
+            ("GNUmakefile.local", "make"),
+        ];
+        for (path, expected) in cases {
+            let lang = detect(Some(std::path::Path::new(path)), "")
+                .unwrap_or_else(|| panic!("{path} should be detected"));
+            assert_eq!(lang.name, expected, "{path}");
+        }
+        // Only `NAME.` prefixes match: a bare prefix without the dot, or a
+        // different file that merely contains the name, stays plain.
+        // `cpanfile.snapshot` is Carton's lockfile, not Perl.
+        for path in [
+            "Makefiles",
+            "cpanfiles",
+            "notcpanfile.x",
+            "MyMakefile.in",
+            "cpanfile.snapshot",
+            "dir/cpanfile.snapshot",
+        ] {
+            assert!(
+                detect(Some(std::path::Path::new(path)), "").is_none(),
+                "{path} should not be detected"
+            );
+        }
+    }
+
+    #[test]
     fn all_languages_query_compiles_and_highlights() {
         let cases: &[(&str, &str, &str)] = &[
             (

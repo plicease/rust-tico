@@ -9,6 +9,11 @@ use std::path::Path;
 pub struct LanguageDef {
     pub name: &'static str,
     pub extensions: &'static [&'static str],
+    /// Exact basenames (`Makefile`, `cpanfile`), plus `NAME.*` entries
+    /// that match any basename starting with `NAME.` (`Makefile.in`,
+    /// `cpanfile.dev`). A `NAME.*` entry is consulted only after the
+    /// extension table, so `Makefile.PL` stays Perl rather than makefile;
+    /// see `FILENAME_EXCEPTIONS` for basenames carved out of a pattern.
     pub filenames: &'static [&'static str],
     pub shebangs: &'static [&'static str],
     /// Extra names recognized in a modeline besides `name` itself.
@@ -110,7 +115,7 @@ const LANGUAGES: &[LanguageDef] = &[
     LanguageDef {
         name: "perl",
         extensions: &["pl", "pm", "t", "xs"],
-        filenames: &[],
+        filenames: &["cpanfile", "cpanfile.*"],
         shebangs: &["perl", "perl5"],
         modeline_aliases: &["cperl"],
         language: lang_perl,
@@ -254,7 +259,14 @@ const LANGUAGES: &[LanguageDef] = &[
     LanguageDef {
         name: "make",
         extensions: &["mk", "mak"],
-        filenames: &["Makefile", "makefile", "GNUmakefile"],
+        filenames: &[
+            "Makefile",
+            "makefile",
+            "GNUmakefile",
+            "Makefile.*",
+            "makefile.*",
+            "GNUmakefile.*",
+        ],
         shebangs: &["make"],
         modeline_aliases: &["makefile"],
         language: lang_make,
@@ -645,19 +657,39 @@ pub fn detect(path: Option<&Path>, text: &str) -> Option<&'static LanguageDef> {
     None
 }
 
+/// Basenames that would match a `NAME.*` pattern below but aren't that
+/// language: `cpanfile.snapshot` is Carton's lockfile, not Perl source.
+const FILENAME_EXCEPTIONS: &[&str] = &["cpanfile.snapshot"];
+
 fn detect_by_filename(path: &Path) -> Option<&'static LanguageDef> {
     let filename = path.file_name().and_then(|f| f.to_str());
     if let Some(filename) = filename {
+        if FILENAME_EXCEPTIONS.contains(&filename) {
+            return None;
+        }
         for lang in LANGUAGES {
             if lang.filenames.contains(&filename) {
                 return Some(lang);
             }
         }
     }
-    let ext = path.extension().and_then(|e| e.to_str())?;
-    LANGUAGES
-        .iter()
-        .find(|lang| lang.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext)))
+    if let Some(ext) = path.extension().and_then(|e| e.to_str())
+        && let Some(lang) = LANGUAGES
+            .iter()
+            .find(|lang| lang.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext)))
+    {
+        return Some(lang);
+    }
+    // `NAME.*` patterns last, so a recognized extension wins over the
+    // family name: `Makefile.PL` is Perl, `Makefile.in` is a makefile.
+    let filename = filename?;
+    LANGUAGES.iter().find(|lang| {
+        lang.filenames.iter().any(|pattern| {
+            pattern
+                .strip_suffix('*')
+                .is_some_and(|prefix| prefix.ends_with('.') && filename.starts_with(prefix))
+        })
+    })
 }
 
 /// Parse a shebang line, following `env` indirection (e.g.
