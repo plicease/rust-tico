@@ -89,5 +89,6 @@ assets = [
     ["target/release/ttee", "usr/bin/", "755"],
     ["README.md", "usr/share/doc/tico/README.md", "644"],
     ["LICENSE", "usr/share/doc/tico/LICENSE", "644"],
+    ["LICENSE-MPL-2.0", "usr/share/doc/tico/LICENSE-MPL-2.0", "644"],
 ]
 
