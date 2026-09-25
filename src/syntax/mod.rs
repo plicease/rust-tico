@@ -714,6 +714,11 @@ fn normalize_capture(raw: &str) -> Option<String> {
     let exact = match name {
         "spell" | "nospell" | "none" | "error" | "embedded" | "clean" | "text.note"
         | "text.warning" | "text.danger" => return None,
+        // tree-sitter-powershell captures a whole array literal and a whole
+        // assignment's right-hand side under these; neither has a Helix
+        // scope, and painting a region that size one color would hide the
+        // real tokens inside it.
+        "array" | "assignvalue" => return None,
         "number" => "constant.numeric",
         "number.float" | "float" => "constant.numeric.float",
         "boolean" => "constant.builtin.boolean",
@@ -744,6 +749,7 @@ fn normalize_capture(raw: &str) -> Option<String> {
         "module" | "module.builtin" => "namespace",
         "type.definition" | "interface" | "union" => "type",
         "tag.attribute" => "attribute",
+        "symbol" => "string.special.symbol",
         "delimiter" => "punctuation.delimiter",
         "comment.doc" | "comment.doc.__attribute__" | "comment.documentation" => {
             "comment.block.documentation"
@@ -999,6 +1005,276 @@ mod tests {
     /// An ordinary rule with no standard target name must still get color:
     /// the crate's make query left `foo: bar` blank (only the `:` was
     /// captured), which read as "highlighting is off" in a two-line Makefile.
+    /// The Tcl query stacks captures (`@spell @comment`, `@repeat
+    /// @keyword`); the Helix-scope one must be what wins for each node.
+    #[test]
+    fn tcl_highlights() {
+        let src =
+            "# note\nproc greet {name} {\n    puts \"hi $name\"\n}\nforeach x $list { incr n }\n";
+        let lang = languages::detect(Some(std::path::Path::new("a.tcl")), src).unwrap();
+        assert_eq!(lang.name, "tcl");
+        let spans = highlight(src, lang);
+        let at = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| s.scope.name().to_string())
+                .next_back()
+        };
+        assert_eq!(at("# note").as_deref(), Some("comment"));
+        assert_eq!(at("proc").as_deref(), Some("keyword.function"));
+        assert_eq!(at("greet").as_deref(), Some("variable"));
+        assert_eq!(at("puts").as_deref(), Some("function.builtin"));
+        assert_eq!(at("\"hi $name\"").as_deref(), Some("string"));
+        assert_eq!(at("foreach").as_deref(), Some("keyword.control.repeat"));
+        assert_eq!(at("incr").as_deref(), Some("function.builtin"));
+    }
+
+    #[test]
+    fn dockerfile_highlights() {
+        let src = "# note\nFROM alpine:3.20 AS base\nARG VERSION=1\nENV APP_HOME=/app\nRUN echo \"$VERSION\"\nEXPOSE 80\n";
+        let lang = languages::detect(Some(std::path::Path::new("Dockerfile")), src).unwrap();
+        assert_eq!(lang.name, "dockerfile");
+        let spans = highlight(src, lang);
+        let at = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| s.scope.name().to_string())
+                .next_back()
+        };
+        // The grammar's comment node includes its newline.
+        assert_eq!(at("# note\n").as_deref(), Some("comment"));
+        assert_eq!(at("FROM").as_deref(), Some("keyword"));
+        assert_eq!(at("AS").as_deref(), Some("keyword"));
+        assert_eq!(at("ARG").as_deref(), Some("keyword"));
+        assert_eq!(at("VERSION").as_deref(), Some("variable.other.member"));
+        assert_eq!(at("APP_HOME").as_deref(), Some("variable.other.member"));
+        assert_eq!(at("80").as_deref(), Some("constant.numeric"));
+        // A RUN body is one opaque shell_command node in this grammar (the
+        // upstream query injects bash there, which tico doesn't do), so
+        // nothing inside it is colored.
+        assert!(
+            spans
+                .iter()
+                .all(|s| s.start < src.find("echo").unwrap()
+                    || s.start >= src.find("EXPOSE").unwrap())
+        );
+    }
+
+    /// Template Toolkit highlights only its own `[% ... %]` directives;
+    /// whatever the template generates (VCL here) is left plain.
+    #[test]
+    fn tt2_highlights_directives_only() {
+        let src = "[%# header %]\nsub vcl_recv {\n[% FOREACH b IN backends.sort('name') -%]\n  set req.http.B = \"[% b.name | html %]\";\n[% END %]\n}\n";
+        let lang = languages::detect(Some(std::path::Path::new("default.vcl.tt")), src).unwrap();
+        assert_eq!(lang.name, "tt2");
+        let spans = highlight(src, lang);
+        let at = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| s.scope.name().to_string())
+                .next_back()
+        };
+        assert_eq!(at("[%# header %]").as_deref(), Some("comment"));
+        assert_eq!(at("FOREACH").as_deref(), Some("keyword"));
+        assert_eq!(at("IN").as_deref(), Some("keyword"));
+        assert_eq!(at("backends").as_deref(), Some("variable"));
+        assert_eq!(at("sort").as_deref(), Some("function.method"));
+        assert_eq!(at("'name'").as_deref(), Some("string"));
+        assert_eq!(at("END").as_deref(), Some("keyword"));
+        // Nothing in the VCL content is colored, not even things that
+        // would be keywords or strings in VCL.
+        let plain = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .all(|s| s.end <= start || s.start >= start + needle.len())
+        };
+        assert!(plain("sub vcl_recv {"));
+        assert!(plain("set req.http.B = \""));
+    }
+
+    #[test]
+    fn powershell_highlights() {
+        let src = "# note\nfunction Get-Thing {\n    param([string]$Name)\n    $x = @(1, 2)\n    if ($Name -eq 'a') { Write-Host \"hi $Name\" }\n    return $x.Count\n}\n";
+        let lang = languages::detect(Some(std::path::Path::new("a.ps1")), src).unwrap();
+        assert_eq!(lang.name, "powershell");
+        let spans = highlight(src, lang);
+        let at = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| s.scope.name().to_string())
+                .next_back()
+        };
+        assert_eq!(at("# note").as_deref(), Some("comment"));
+        assert_eq!(at("function").as_deref(), Some("keyword"));
+        assert_eq!(at("Get-Thing").as_deref(), Some("function"));
+        assert_eq!(at("string").as_deref(), Some("type"));
+        assert_eq!(at("$Name").as_deref(), Some("variable"));
+        assert_eq!(at("-eq").as_deref(), Some("operator"));
+        assert_eq!(at("'a'").as_deref(), Some("string"));
+        assert_eq!(at("Write-Host").as_deref(), Some("function"));
+        assert_eq!(at("Count").as_deref(), Some("variable.other.member"));
+        // The query's `@array` / `@assignvalue` captures are dropped rather
+        // than painted: the array literal and the assignment's right-hand
+        // side get no span of their own, only their inner tokens do.
+        assert!(!spans.iter().any(|s| &src[s.start..s.end] == "@(1, 2)"));
+        assert_eq!(at("1").as_deref(), Some("constant.numeric"));
+    }
+
+    #[test]
+    fn batch_highlights() {
+        let src = "@echo off\nREM note\n:: also\nset NAME=world\nif \"%NAME%\"==\"world\" (\n  echo Hello %NAME% %ERRORLEVEL%\n)\nfor %%f in (*.txt) do call :sub %%f\n:sub\necho %1 > out.txt\n";
+        let lang = languages::detect(Some(std::path::Path::new("a.bat")), src).unwrap();
+        assert_eq!(lang.name, "batch");
+        for path in ["a.cmd", "a.BAT", "a.btm"] {
+            assert_eq!(
+                languages::detect(Some(std::path::Path::new(path)), "")
+                    .unwrap()
+                    .name,
+                "batch"
+            );
+        }
+        let spans = highlight(src, lang);
+        let at = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| s.scope.name().to_string())
+                .next_back()
+        };
+        // Like `at`, but locates the token by a longer unique context and
+        // takes the span covering its first `len` bytes.
+        let at_start_of = |context: &str, len: usize| {
+            let start = src.find(context).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + len)
+                .map(|s| s.scope.name().to_string())
+                .next_back()
+        };
+        assert_eq!(at("@echo off").as_deref(), Some("keyword"));
+        assert_eq!(at("REM note").as_deref(), Some("comment"));
+        assert_eq!(at(":: also").as_deref(), Some("comment"));
+        assert_eq!(at("set").as_deref(), Some("keyword"));
+        assert_eq!(at("NAME").as_deref(), Some("variable"));
+        assert_eq!(at("==").as_deref(), Some("operator"));
+        assert_eq!(at_start_of("echo Hello", 4).as_deref(), Some("function"));
+        assert_eq!(
+            at_start_of("%NAME% %ERRORLEVEL%", 6).as_deref(),
+            Some("variable")
+        );
+        // The reordered builtin pattern wins over the generic one.
+        assert_eq!(at("%ERRORLEVEL%").as_deref(), Some("variable.builtin"));
+        assert_eq!(at("%%f").as_deref(), Some("variable.parameter"));
+        assert_eq!(at_start_of(":sub\necho", 4).as_deref(), Some("label"));
+        assert_eq!(at("out.txt").as_deref(), Some("string.special"));
+    }
+
+    /// The vendored CUE query has its generic `(identifier) @variable`
+    /// pattern moved first so the specific field/type/function captures
+    /// survive tico's last-wins painting.
+    #[test]
+    fn cue_highlights() {
+        let src = "package app\n// A schema\n#Server: {\n\tname: string\n\tport: int & >0 | *8080\n\tmemory: 1.5Gi\n}\nservers: [for n in [\"web\"] { #Server & {name: strings.ToUpper(n)} }]\nif len(servers) > 1 { ha: true }\nnothing: null\n";
+        let lang = languages::detect(Some(std::path::Path::new("a.cue")), src).unwrap();
+        assert_eq!(lang.name, "cue");
+        let spans = highlight(src, lang);
+        let at = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| s.scope.name().to_string())
+                .next_back()
+        };
+        assert_eq!(at("package").as_deref(), Some("keyword.control.import"));
+        assert_eq!(at("app").as_deref(), Some("namespace"));
+        assert_eq!(at("// A schema").as_deref(), Some("comment"));
+        assert_eq!(at("#Server").as_deref(), Some("type"));
+        assert_eq!(at("name").as_deref(), Some("variable.other.member"));
+        assert_eq!(at("string").as_deref(), Some("type.builtin"));
+        assert_eq!(at(">").as_deref(), Some("operator"));
+        assert_eq!(at("8080").as_deref(), Some("constant.numeric"));
+        assert_eq!(at("1.5").as_deref(), Some("constant.numeric.float"));
+        assert_eq!(at("for").as_deref(), Some("keyword.control.repeat"));
+        {
+            // `in` also occurs inside `string`; find the keyword by context.
+            let start = src.find(" in [").unwrap() + 1;
+            let scope = spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + 2)
+                .map(|s| s.scope.name().to_string())
+                .next_back();
+            assert_eq!(scope.as_deref(), Some("keyword.operator"));
+        }
+        assert_eq!(at("ToUpper").as_deref(), Some("function"));
+        assert_eq!(at("len").as_deref(), Some("function.builtin"));
+        assert_eq!(at("if").as_deref(), Some("keyword.control.conditional"));
+        assert_eq!(at("true").as_deref(), Some("constant.builtin.boolean"));
+        assert_eq!(at("null").as_deref(), Some("constant.builtin"));
+    }
+
+    #[test]
+    fn hcl_terraform_highlights() {
+        let src = "# note\nvariable \"name\" {\n  type    = string\n  default = null\n}\nresource \"aws_instance\" \"web\" {\n  ami   = var.ami\n  count = 2\n  tags  = { Name = \"web-${count.index}\" }\n  ids   = [for s in local.subnets : s.id if s.public]\n  size  = max(1, 2)\n  user_data = <<-EOT\n    hello\n  EOT\n}\n";
+        let lang = languages::detect(Some(std::path::Path::new("main.tf")), src).unwrap();
+        assert_eq!(lang.name, "hcl");
+        for path in ["a.hcl", "terraform.tfvars", "job.nomad"] {
+            assert_eq!(
+                languages::detect(Some(std::path::Path::new(path)), "")
+                    .unwrap()
+                    .name,
+                "hcl"
+            );
+        }
+        let spans = highlight(src, lang);
+        let at = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| s.scope.name().to_string())
+                .next_back()
+        };
+        let at_start_of = |context: &str, len: usize| {
+            let start = src.find(context).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + len)
+                .map(|s| s.scope.name().to_string())
+                .next_back()
+        };
+        assert_eq!(at("# note").as_deref(), Some("comment"));
+        assert_eq!(at("variable").as_deref(), Some("type.builtin"));
+        assert_eq!(at("resource").as_deref(), Some("type.builtin"));
+        assert_eq!(at("aws_instance").as_deref(), Some("string"));
+        assert_eq!(at("string").as_deref(), Some("type.builtin"));
+        assert_eq!(at("null").as_deref(), Some("constant.builtin"));
+        assert_eq!(at("ami").as_deref(), Some("variable.other.member"));
+        assert_eq!(
+            at_start_of("var.ami", 3).as_deref(),
+            Some("variable.builtin")
+        );
+        assert_eq!(at("2").as_deref(), Some("constant.numeric"));
+        assert_eq!(at("${").as_deref(), Some("punctuation.special"));
+        assert_eq!(at("index").as_deref(), Some("variable.other.member"));
+        assert_eq!(at("for").as_deref(), Some("keyword.control.repeat"));
+        assert_eq!(at("local").as_deref(), Some("variable.builtin"));
+        assert_eq!(at("if").as_deref(), Some("keyword.control.conditional"));
+        assert_eq!(at("max").as_deref(), Some("function.method"));
+        assert_eq!(at("<<-").as_deref(), Some("punctuation.delimiter"));
+        assert_eq!(at("hello").as_deref(), Some("string"));
+    }
+
     #[test]
     fn make_plain_rule_is_colored() {
         let src = "foo: bar baz.o\n\tcc -o foo bar\n\nall: foo\n";
@@ -1699,6 +1975,197 @@ mod tests {
         }
     }
 
+    /// A file whose name says nothing (`foo.conf`, no name at all) is
+    /// sniffed for JSON's opening bytes, nano-`header` style; a
+    /// recognized name always wins over the sniff.
+    #[test]
+    fn json_content_sniffing() {
+        let conf = Some(std::path::Path::new("app.conf"));
+        let json_texts = [
+            "{\n  \"key\": 1\n}\n",
+            "{\"a\":1}",
+            "{}",
+            "  \n\t{ \"x\": [] }",
+            "\u{feff}{\"bom\": true}",
+            "[{\"a\": 1}]",
+            "[[1, 2], [3]]",
+            "[\"a\", \"b\"]",
+            "[1, 2, 3]",
+            "[-1]",
+            "[]",
+            "[true, false, null]",
+            "// jsonc comment\n{\"a\": 1}",
+            "/* block\n comment */ // line\n[1]",
+        ];
+        for text in json_texts {
+            for path in [conf, None] {
+                let lang = detect(path, text)
+                    .unwrap_or_else(|| panic!("{text:?} should be detected as json"));
+                assert_eq!(lang.name, "json", "{text:?}");
+            }
+        }
+        let not_json = [
+            "",
+            "   \n",
+            "# comment\n{\"a\": 1}",
+            "[section]\nkey = value\n",
+            "[ section ]",
+            "{ foo => 1 }",
+            "{\n  int x;\n}",
+            "{",
+            "server {\n  listen 80;\n}\n",
+            "key = value\n",
+            "<VirtualHost *:80>\n",
+            "/* unterminated",
+            "// only a comment\n",
+            "42",
+            "\"a string\"",
+        ];
+        for text in not_json {
+            assert!(
+                detect(conf, text).is_none(),
+                "{text:?} should not be detected as json"
+            );
+        }
+        // The filename wins: JSON content in an ini-named file is ini, and
+        // a `.json` extension is json regardless of what's inside.
+        assert_eq!(
+            detect(Some(std::path::Path::new("a.ini")), "{\"a\": 1}")
+                .unwrap()
+                .name,
+            "ini"
+        );
+        assert_eq!(
+            detect(Some(std::path::Path::new("a.json")), "[section]")
+                .unwrap()
+                .name,
+            "json"
+        );
+        // So does a modeline.
+        assert_eq!(
+            detect(conf, "{\"a\": 1}\n# vim: ft=yaml\n").unwrap().name,
+            "yaml"
+        );
+    }
+
+    /// nano's yaml `header` rule (`^%YAML |^---( |$)`) on the first
+    /// non-blank, non-comment line; a unified diff's `--- `/`+++ ` pair is
+    /// told apart and detected as diff instead.
+    #[test]
+    fn yaml_and_diff_content_sniffing() {
+        let conf = Some(std::path::Path::new("app.conf"));
+        let yaml_texts = [
+            "---\n",
+            "---",
+            "---\nkey: value\n",
+            "--- # doc\nkey: value\n",
+            "--- !tag\n",
+            "%YAML 1.2\n---\n",
+            "# comment\n\n# more\n---\nkey: value\n",
+            "\u{feff}---\nkey: value\n",
+            "--- a/file\n",
+        ];
+        for text in yaml_texts {
+            for path in [conf, None] {
+                let lang = detect(path, text)
+                    .unwrap_or_else(|| panic!("{text:?} should be detected as yaml"));
+                assert_eq!(lang.name, "yaml", "{text:?}");
+            }
+        }
+        let diff_texts = [
+            "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-x\n+y\n",
+            "--- old.txt\t2026-01-01\n+++ new.txt\t2026-01-02\n",
+        ];
+        for text in diff_texts {
+            for path in [conf, None] {
+                let lang = detect(path, text)
+                    .unwrap_or_else(|| panic!("{text:?} should be detected as diff"));
+                assert_eq!(lang.name, "diff", "{text:?}");
+            }
+        }
+        let neither = [
+            "----\n",
+            "---x\n",
+            " ---\n",
+            "key: value\n",
+            "# just a comment\n",
+            "%YAML\n",
+            "%YAMLX 1.2\n",
+            "-- sql comment\n",
+            "+++ b/file\n--- a/file\n",
+        ];
+        for text in neither {
+            assert!(
+                detect(conf, text).is_none(),
+                "{text:?} should not be detected"
+            );
+        }
+        // Filename still wins.
+        assert_eq!(
+            detect(Some(std::path::Path::new("a.ini")), "---\n")
+                .unwrap()
+                .name,
+            "ini"
+        );
+        // A JSON opening beats a later YAML marker check, since it's
+        // looked at first.
+        assert_eq!(detect(conf, "{\"a\": 1}\n---\n").unwrap().name, "json");
+    }
+
+    #[test]
+    fn filename_prefix_patterns() {
+        let cases = [
+            ("cpanfile", "perl"),
+            ("lib/cpanfile.dev", "perl"),
+            ("Makefile.PL", "perl"),
+            ("Makefile.in", "make"),
+            ("Makefile.am", "make"),
+            ("src/Makefile.inc", "make"),
+            ("makefile.unix", "make"),
+            ("GNUmakefile.local", "make"),
+            ("app.properties", "properties"),
+            ("org.eclipse.core.prefs", "properties"),
+            ("log4perl.conf", "properties"),
+            ("log4perl.debug.conf", "properties"),
+            ("etc/log4perl.prod.conf", "properties"),
+            ("log4j.properties", "properties"),
+            ("Dockerfile", "dockerfile"),
+            ("dockerfile", "dockerfile"),
+            ("Dockerfile.dev", "dockerfile"),
+            ("docker/Dockerfile.alpine", "dockerfile"),
+            ("Containerfile", "dockerfile"),
+            ("Containerfile.build", "dockerfile"),
+            ("app.dockerfile", "dockerfile"),
+            ("app.Dockerfile", "dockerfile"),
+        ];
+        for (path, expected) in cases {
+            let lang = detect(Some(std::path::Path::new(path)), "")
+                .unwrap_or_else(|| panic!("{path} should be detected"));
+            assert_eq!(lang.name, expected, "{path}");
+        }
+        // Only `NAME.` prefixes match: a bare prefix without the dot, or a
+        // different file that merely contains the name, stays plain.
+        // `cpanfile.snapshot` is Carton's lockfile, not Perl.
+        for path in [
+            "Makefiles",
+            "cpanfiles",
+            "notcpanfile.x",
+            "MyMakefile.in",
+            "cpanfile.snapshot",
+            "dir/cpanfile.snapshot",
+            "log4perl.conf.bak",
+            "mylog4perl.x.conf",
+            "log4perlconf",
+            "Dockerfiles",
+            "MyDockerfile",
+        ] {
+            assert!(
+                detect(Some(std::path::Path::new(path)), "").is_none(),
+                "{path} should not be detected"
+            );
+        }
+    }
+
     #[test]
     fn all_languages_query_compiles_and_highlights() {
         let cases: &[(&str, &str, &str)] = &[
@@ -1793,6 +2260,42 @@ mod tests {
                 "groovy",
                 "a.groovy",
                 "class Foo {\n    def bar() { return 1 } // hi\n}\n",
+            ),
+            (
+                "tcl",
+                "a.tcl",
+                "#!/usr/bin/env tclsh\nproc greet {name} { puts \"hi $name\" } ;# hi\nset x [expr {1 + 2}]\n",
+            ),
+            (
+                "dockerfile",
+                "Dockerfile",
+                "# hi\nFROM alpine:3.20 AS base\nARG VERSION=1\nRUN echo $VERSION\nEXPOSE 80\n",
+            ),
+            (
+                "tt2",
+                "default.vcl.tt",
+                "sub vcl_recv {\n[% IF debug %]  set req.http.X = \"[% name %]\";\n[% END %]}\n",
+            ),
+            (
+                "powershell",
+                "a.ps1",
+                "# hi\nfunction Foo { param($x) Write-Output $x }\n",
+            ),
+            ("batch", "a.cmd", "@echo off\nREM hi\nset X=1\necho %X%\n"),
+            (
+                "cue",
+                "a.cue",
+                "package p\n// hi\n#S: { name: string, n: int | *1 }\nx: #S & { name: \"a\" }\n",
+            ),
+            (
+                "hcl",
+                "main.tf",
+                "# hi\nresource \"aws_instance\" \"web\" {\n  ami = var.ami\n  count = 2\n}\n",
+            ),
+            (
+                "properties",
+                "log4perl.conf",
+                "# hi\nlog4perl.rootLogger=INFO, Screen\nlog4perl.appender.Screen.layout.ConversionPattern=[%5p] %m%n\n",
             ),
         ];
         for (name, path, source) in cases {

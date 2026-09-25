@@ -1,6 +1,7 @@
 //! The language registry and detection cascade: filename extension (or
 //! exact filename, for things like `Makefile`) -> shebang line -> modeline
-//! (vim- or Emacs-style), matching the priority order other editors use.
+//! (vim- or Emacs-style) -> a peek at the leading lines (JSON's `{ "`,
+//! YAML's `---`), matching the priority order other editors use.
 //! All on by default; see `crate::options::Options::syntax_highlighting`
 //! for the master on/off toggle.
 
@@ -9,6 +10,12 @@ use std::path::Path;
 pub struct LanguageDef {
     pub name: &'static str,
     pub extensions: &'static [&'static str],
+    /// Exact basenames (`Makefile`, `cpanfile`), plus glob-style entries
+    /// with a single `*` standing for any run of characters: `Makefile.*`
+    /// matches `Makefile.in`, `log4perl.*.conf` matches `log4perl.debug.conf`.
+    /// Glob entries are consulted only after the extension table, so
+    /// `Makefile.PL` stays Perl rather than makefile; see
+    /// `FILENAME_EXCEPTIONS` for basenames carved out of a glob.
     pub filenames: &'static [&'static str],
     pub shebangs: &'static [&'static str],
     /// Extra names recognized in a modeline besides `name` itself.
@@ -93,6 +100,12 @@ lang_fn_old_api!(lang_vim, tree_sitter_vim);
 lang_fn!(lang_lua, tree_sitter_lua);
 lang_fn!(lang_markdown, tree_sitter_md);
 lang_fn!(lang_groovy, dekobon_tree_sitter_groovy);
+lang_fn!(lang_properties, tree_sitter_properties);
+lang_fn!(lang_tcl, tree_sitter_tcl);
+lang_fn!(lang_dockerfile, tree_sitter_containerfile);
+lang_fn!(lang_powershell, tree_sitter_powershell);
+lang_fn!(lang_batch, tree_sitter_batch);
+lang_fn!(lang_hcl, tree_sitter_hcl);
 
 // The VCL grammar is not a crate: build.rs compiles it from
 // `grammars/tree-sitter-vcl/` (a fork of ntsk/tree-sitter-vcl extended for
@@ -106,11 +119,33 @@ fn lang_vcl() -> tree_sitter::Language {
     VCL_LANGUAGE.into()
 }
 
+// Likewise Template Toolkit, from `grammars/tree-sitter-template-toolkit/`
+// (upstream ships no crate).
+unsafe extern "C" {
+    fn tree_sitter_template_toolkit() -> *const ();
+}
+const TT2_LANGUAGE: tree_sitter_language::LanguageFn =
+    unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_template_toolkit) };
+fn lang_tt2() -> tree_sitter::Language {
+    TT2_LANGUAGE.into()
+}
+
+// And CUE, from `grammars/tree-sitter-cue/` (upstream's Rust bindings
+// still pin tree-sitter 0.20).
+unsafe extern "C" {
+    fn tree_sitter_cue() -> *const ();
+}
+const CUE_LANGUAGE: tree_sitter_language::LanguageFn =
+    unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_cue) };
+fn lang_cue() -> tree_sitter::Language {
+    CUE_LANGUAGE.into()
+}
+
 const LANGUAGES: &[LanguageDef] = &[
     LanguageDef {
         name: "perl",
         extensions: &["pl", "pm", "t", "xs"],
-        filenames: &[],
+        filenames: &["cpanfile", "cpanfile.*"],
         shebangs: &["perl", "perl5"],
         modeline_aliases: &["cperl"],
         language: lang_perl,
@@ -254,7 +289,14 @@ const LANGUAGES: &[LanguageDef] = &[
     LanguageDef {
         name: "make",
         extensions: &["mk", "mak"],
-        filenames: &["Makefile", "makefile", "GNUmakefile"],
+        filenames: &[
+            "Makefile",
+            "makefile",
+            "GNUmakefile",
+            "Makefile.*",
+            "makefile.*",
+            "GNUmakefile.*",
+        ],
         shebangs: &["make"],
         modeline_aliases: &["makefile"],
         language: lang_make,
@@ -612,6 +654,124 @@ const LANGUAGES: &[LanguageDef] = &[
         comment: "//",
     },
     LanguageDef {
+        name: "properties",
+        extensions: &["properties", "prefs"],
+        filenames: &["log4perl.conf", "log4perl.*.conf", "log4j.properties"],
+        shebangs: &[],
+        modeline_aliases: &["jproperties"],
+        language: lang_properties,
+        highlights_query: include_str!("queries/properties.scm"),
+        linter: None,
+        formatter: None,
+        comment: "#",
+    },
+    LanguageDef {
+        name: "tcl",
+        extensions: &["tcl", "exp"],
+        filenames: &[],
+        shebangs: &["tclsh", "wish", "expect"],
+        modeline_aliases: &["expect"],
+        language: lang_tcl,
+        highlights_query: include_str!("queries/tcl.scm"),
+        linter: None,
+        formatter: None,
+        comment: "#",
+    },
+    LanguageDef {
+        // The names Helix and Neovim both recognize: the bare file, a
+        // suffixed variant (`Dockerfile.dev`), Podman's `Containerfile`
+        // spelling, and a `.dockerfile` extension (`app.Dockerfile` too,
+        // since extensions match case-insensitively).
+        name: "dockerfile",
+        extensions: &["dockerfile"],
+        filenames: &[
+            "Dockerfile",
+            "dockerfile",
+            "Containerfile",
+            "containerfile",
+            "Dockerfile.*",
+            "dockerfile.*",
+            "Containerfile.*",
+            "containerfile.*",
+        ],
+        shebangs: &[],
+        modeline_aliases: &["docker", "containerfile"],
+        language: lang_dockerfile,
+        highlights_query: include_str!("queries/dockerfile.scm"),
+        linter: None,
+        formatter: None,
+        comment: "#",
+    },
+    LanguageDef {
+        // Only the `[% ... %]` directives are highlighted; the text between
+        // them stays plain whatever it is (HTML, VCL, config), since a
+        // template's output language isn't knowable from its name.
+        name: "tt2",
+        extensions: &["tt", "tt2", "tmpl"],
+        filenames: &[],
+        shebangs: &[],
+        modeline_aliases: &["tt", "tt2html", "template-toolkit"],
+        language: lang_tt2,
+        highlights_query: include_str!("queries/tt2.scm"),
+        linter: None,
+        formatter: None,
+        comment: "[%#|%]",
+    },
+    LanguageDef {
+        name: "powershell",
+        extensions: &["ps1", "psm1", "psd1", "pscc", "psrc"],
+        filenames: &[],
+        shebangs: &["pwsh", "powershell"],
+        modeline_aliases: &["ps1", "pwsh"],
+        language: lang_powershell,
+        highlights_query: include_str!("queries/powershell.scm"),
+        linter: None,
+        formatter: None,
+        comment: "#",
+    },
+    LanguageDef {
+        // `.btm` is JP Software's (4DOS/4NT/Take Command) extended batch;
+        // the core syntax is CMD's, so it gets the same grammar, as in
+        // Helix. `REM ` rather than `::` for M-3: `::` is a label trick
+        // that misbehaves inside parenthesized blocks.
+        name: "batch",
+        extensions: &["bat", "cmd", "btm"],
+        filenames: &[],
+        shebangs: &[],
+        modeline_aliases: &["dosbatch", "bat", "cmd"],
+        language: lang_batch,
+        highlights_query: include_str!("queries/batch.scm"),
+        linter: None,
+        formatter: None,
+        comment: "REM ",
+    },
+    LanguageDef {
+        name: "cue",
+        extensions: &["cue"],
+        filenames: &[],
+        shebangs: &[],
+        modeline_aliases: &[],
+        language: lang_cue,
+        highlights_query: include_str!("queries/cue.scm"),
+        linter: None,
+        formatter: None,
+        comment: "//",
+    },
+    LanguageDef {
+        // Terraform (.tf/.tfvars) and Nomad job files are HCL; upstream's
+        // "terraform" dialect is the same grammar under another name.
+        name: "hcl",
+        extensions: &["hcl", "tf", "tfvars", "nomad"],
+        filenames: &[],
+        shebangs: &[],
+        modeline_aliases: &["terraform", "tf", "tfvars"],
+        language: lang_hcl,
+        highlights_query: include_str!("queries/hcl.scm"),
+        linter: None,
+        formatter: None,
+        comment: "#",
+    },
+    LanguageDef {
         name: "vcl",
         extensions: &["vcl"],
         filenames: &[],
@@ -627,8 +787,12 @@ const LANGUAGES: &[LanguageDef] = &[
 
 /// Detect a buffer's language: by filename extension or exact filename
 /// first, then by shebang line, then by a vim- or Emacs-style modeline
-/// found in the first or last few lines — matching how other editors
-/// layer these signals, most-specific (and cheapest to check) first.
+/// found in the first or last few lines, and finally by sniffing the
+/// leading bytes — matching how other editors layer these signals,
+/// most-specific (and cheapest to check) first. The content sniff is the
+/// counterpart of nano's `header` directive: it only gets a say when the
+/// filename told us nothing, so `foo.conf` holding JSON is highlighted
+/// as JSON while `foo.ini` never is.
 pub fn detect(path: Option<&Path>, text: &str) -> Option<&'static LanguageDef> {
     if let Some(path) = path
         && let Some(lang) = detect_by_filename(path)
@@ -642,22 +806,130 @@ pub fn detect(path: Option<&Path>, text: &str) -> Option<&'static LanguageDef> {
     if let Some(lang) = detect_by_modeline(text) {
         return Some(lang);
     }
+    if let Some(lang) = detect_by_content(text) {
+        return Some(lang);
+    }
     None
 }
+
+/// Guess from the first line or two, without parsing anything. Only
+/// formats with a distinctive opening are sniffed, the way nano's
+/// `header` lines do it.
+fn detect_by_content(text: &str) -> Option<&'static LanguageDef> {
+    let text = text.trim_start_matches('\u{feff}');
+    if looks_like_json(text) {
+        find_by_name("json")
+    } else if looks_like_diff(text) {
+        find_by_name("diff")
+    } else if looks_like_yaml(text) {
+        find_by_name("yaml")
+    } else {
+        None
+    }
+}
+
+/// `{` followed by `"` or `}` (objects must have string keys, which
+/// rules out C blocks, Perl hashes and Tcl), or `[` followed by the
+/// start of a JSON value (which rules out an ini `[section]` header, the
+/// one real collision among common `.conf` formats). Leading `//` and
+/// `/* */` comments are skipped so JSONC qualifies; a `#` comment is not,
+/// since that's the strongest sign a file isn't JSON.
+fn looks_like_json(text: &str) -> bool {
+    let rest = skip_c_style_comments(text);
+    let mut chars = rest.chars().skip_while(|c| c.is_whitespace());
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    let second = chars.find(|c| !c.is_whitespace()).unwrap_or('\0');
+    match first {
+        '{' => matches!(second, '"' | '}'),
+        '[' => {
+            matches!(second, '{' | '[' | '"' | ']' | '-' | 't' | 'f' | 'n')
+                || second.is_ascii_digit()
+        }
+        _ => false,
+    }
+}
+
+/// A unified diff's `--- old` / `+++ new` header pair. Checked before
+/// YAML because `--- a/file` also satisfies nano's YAML header rule.
+fn looks_like_diff(text: &str) -> bool {
+    let mut lines = text.lines();
+    lines.next().is_some_and(|l| l.starts_with("--- "))
+        && lines.next().is_some_and(|l| l.starts_with("+++ "))
+}
+
+/// nano's yaml.nanorc header rule, `^%YAML |^---( |$)`, applied to the
+/// first line that isn't blank or a `#` comment (YAML files routinely
+/// open with a comment block before the document marker).
+fn looks_like_yaml(text: &str) -> bool {
+    text.lines()
+        .map(str::trim_end)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+        .is_some_and(|l| l.starts_with("%YAML ") || l == "---" || l.starts_with("--- "))
+}
+
+/// Skip any run of leading whitespace and `//` or `/* ... */` comments.
+fn skip_c_style_comments(mut text: &str) -> &str {
+    loop {
+        text = text.trim_start();
+        if let Some(rest) = text.strip_prefix("//") {
+            text = rest.split_once('\n').map_or("", |(_, after)| after);
+        } else if let Some(rest) = text.strip_prefix("/*") {
+            let Some((_, after)) = rest.split_once("*/") else {
+                return "";
+            };
+            text = after;
+        } else {
+            return text;
+        }
+    }
+}
+
+/// Basenames that would match a `NAME.*` pattern below but aren't that
+/// language: `cpanfile.snapshot` is Carton's lockfile, not Perl source.
+const FILENAME_EXCEPTIONS: &[&str] = &["cpanfile.snapshot"];
 
 fn detect_by_filename(path: &Path) -> Option<&'static LanguageDef> {
     let filename = path.file_name().and_then(|f| f.to_str());
     if let Some(filename) = filename {
+        if FILENAME_EXCEPTIONS.contains(&filename) {
+            return None;
+        }
         for lang in LANGUAGES {
             if lang.filenames.contains(&filename) {
                 return Some(lang);
             }
         }
     }
-    let ext = path.extension().and_then(|e| e.to_str())?;
-    LANGUAGES
-        .iter()
-        .find(|lang| lang.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext)))
+    if let Some(ext) = path.extension().and_then(|e| e.to_str())
+        && let Some(lang) = LANGUAGES
+            .iter()
+            .find(|lang| lang.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext)))
+    {
+        return Some(lang);
+    }
+    // Glob patterns last, so a recognized extension wins over the family
+    // name: `Makefile.PL` is Perl, `Makefile.in` is a makefile.
+    let filename = filename?;
+    LANGUAGES.iter().find(|lang| {
+        lang.filenames
+            .iter()
+            .any(|pattern| glob_matches(pattern, filename))
+    })
+}
+
+/// Match a `filenames` entry containing one `*` against a basename: the
+/// text before the star must be a prefix and the text after it a suffix,
+/// without overlapping. An entry with no `*` never matches here (exact
+/// names are handled separately).
+fn glob_matches(pattern: &str, filename: &str) -> bool {
+    let Some((prefix, suffix)) = pattern.split_once('*') else {
+        return false;
+    };
+    filename.len() >= prefix.len() + suffix.len()
+        && filename.starts_with(prefix)
+        && filename.ends_with(suffix)
 }
 
 /// Parse a shebang line, following `env` indirection (e.g.
