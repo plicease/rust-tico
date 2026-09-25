@@ -25,6 +25,7 @@ doesn't land in a Helix top-level scope fails
 | `dockerfile.scm` | The `tree-sitter-containerfile` crate (v0.9.2, [wharflab/tree-sitter-containerfile](https://github.com/wharflab/tree-sitter-containerfile), a maintained fork of camdencheek's tree-sitter-dockerfile) `queries/highlights.scm`, unmodified | MIT |
 | `tt2.scm` | The [Template Toolkit Zed extension](https://github.com/RuvimSypa/template-toolkit-zed), commit `93854ef`, `languages/template-toolkit/highlights.scm`, unmodified (the grammar itself is vendored under `grammars/tree-sitter-template-toolkit/`) | MIT |
 | `batch.scm` | The `tree-sitter-batch` crate (v0.11.1, [wharflab/tree-sitter-batch](https://github.com/wharflab/tree-sitter-batch)) `queries/highlights.scm`, with two patterns reordered as noted in its header | MIT |
+| `cue.scm` | [eonpatapon/tree-sitter-cue](https://github.com/eonpatapon/tree-sitter-cue) commit `dd7b90e`, `queries/highlights.scm`, with two patterns moved earlier as noted in its header (the grammar itself is vendored under `grammars/tree-sitter-cue/`) | MIT |
 | everything else | The corresponding `tree-sitter-<lang>` crate's `queries/highlights.scm`, unmodified except where noted in a file's header | That grammar's license (MIT for all current ones) |
 
 `diff.scm` is the one file here not under tico's MIT license. MPL-2.0 is a

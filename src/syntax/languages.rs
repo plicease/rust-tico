@@ -129,6 +129,17 @@ fn lang_tt2() -> tree_sitter::Language {
     TT2_LANGUAGE.into()
 }
 
+// And CUE, from `grammars/tree-sitter-cue/` (upstream's Rust bindings
+// still pin tree-sitter 0.20).
+unsafe extern "C" {
+    fn tree_sitter_cue() -> *const ();
+}
+const CUE_LANGUAGE: tree_sitter_language::LanguageFn =
+    unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_cue) };
+fn lang_cue() -> tree_sitter::Language {
+    CUE_LANGUAGE.into()
+}
+
 const LANGUAGES: &[LanguageDef] = &[
     LanguageDef {
         name: "perl",
@@ -732,6 +743,18 @@ const LANGUAGES: &[LanguageDef] = &[
         linter: None,
         formatter: None,
         comment: "REM ",
+    },
+    LanguageDef {
+        name: "cue",
+        extensions: &["cue"],
+        filenames: &[],
+        shebangs: &[],
+        modeline_aliases: &[],
+        language: lang_cue,
+        highlights_query: include_str!("queries/cue.scm"),
+        linter: None,
+        formatter: None,
+        comment: "//",
     },
     LanguageDef {
         name: "vcl",

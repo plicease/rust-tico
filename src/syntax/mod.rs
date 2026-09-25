@@ -749,6 +749,7 @@ fn normalize_capture(raw: &str) -> Option<String> {
         "module" | "module.builtin" => "namespace",
         "type.definition" | "interface" | "union" => "type",
         "tag.attribute" => "attribute",
+        "symbol" => "string.special.symbol",
         "delimiter" => "punctuation.delimiter",
         "comment.doc" | "comment.doc.__attribute__" | "comment.documentation" => {
             "comment.block.documentation"
@@ -1176,6 +1177,50 @@ mod tests {
         assert_eq!(at("%%f").as_deref(), Some("variable.parameter"));
         assert_eq!(at_start_of(":sub\necho", 4).as_deref(), Some("label"));
         assert_eq!(at("out.txt").as_deref(), Some("string.special"));
+    }
+
+    /// The vendored CUE query has its generic `(identifier) @variable`
+    /// pattern moved first so the specific field/type/function captures
+    /// survive tico's last-wins painting.
+    #[test]
+    fn cue_highlights() {
+        let src = "package app\n// A schema\n#Server: {\n\tname: string\n\tport: int & >0 | *8080\n\tmemory: 1.5Gi\n}\nservers: [for n in [\"web\"] { #Server & {name: strings.ToUpper(n)} }]\nif len(servers) > 1 { ha: true }\nnothing: null\n";
+        let lang = languages::detect(Some(std::path::Path::new("a.cue")), src).unwrap();
+        assert_eq!(lang.name, "cue");
+        let spans = highlight(src, lang);
+        let at = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| s.scope.name().to_string())
+                .next_back()
+        };
+        assert_eq!(at("package").as_deref(), Some("keyword.control.import"));
+        assert_eq!(at("app").as_deref(), Some("namespace"));
+        assert_eq!(at("// A schema").as_deref(), Some("comment"));
+        assert_eq!(at("#Server").as_deref(), Some("type"));
+        assert_eq!(at("name").as_deref(), Some("variable.other.member"));
+        assert_eq!(at("string").as_deref(), Some("type.builtin"));
+        assert_eq!(at(">").as_deref(), Some("operator"));
+        assert_eq!(at("8080").as_deref(), Some("constant.numeric"));
+        assert_eq!(at("1.5").as_deref(), Some("constant.numeric.float"));
+        assert_eq!(at("for").as_deref(), Some("keyword.control.repeat"));
+        {
+            // `in` also occurs inside `string`; find the keyword by context.
+            let start = src.find(" in [").unwrap() + 1;
+            let scope = spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + 2)
+                .map(|s| s.scope.name().to_string())
+                .next_back();
+            assert_eq!(scope.as_deref(), Some("keyword.operator"));
+        }
+        assert_eq!(at("ToUpper").as_deref(), Some("function"));
+        assert_eq!(at("len").as_deref(), Some("function.builtin"));
+        assert_eq!(at("if").as_deref(), Some("keyword.control.conditional"));
+        assert_eq!(at("true").as_deref(), Some("constant.builtin.boolean"));
+        assert_eq!(at("null").as_deref(), Some("constant.builtin"));
     }
 
     #[test]
@@ -2185,6 +2230,11 @@ mod tests {
                 "# hi\nfunction Foo { param($x) Write-Output $x }\n",
             ),
             ("batch", "a.cmd", "@echo off\nREM hi\nset X=1\necho %X%\n"),
+            (
+                "cue",
+                "a.cue",
+                "package p\n// hi\n#S: { name: string, n: int | *1 }\nx: #S & { name: \"a\" }\n",
+            ),
             (
                 "properties",
                 "log4perl.conf",
