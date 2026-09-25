@@ -1026,6 +1026,39 @@ mod tests {
     }
 
     #[test]
+    fn dockerfile_highlights() {
+        let src = "# note\nFROM alpine:3.20 AS base\nARG VERSION=1\nENV APP_HOME=/app\nRUN echo \"$VERSION\"\nEXPOSE 80\n";
+        let lang = languages::detect(Some(std::path::Path::new("Dockerfile")), src).unwrap();
+        assert_eq!(lang.name, "dockerfile");
+        let spans = highlight(src, lang);
+        let at = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| s.scope.name().to_string())
+                .next_back()
+        };
+        // The grammar's comment node includes its newline.
+        assert_eq!(at("# note\n").as_deref(), Some("comment"));
+        assert_eq!(at("FROM").as_deref(), Some("keyword"));
+        assert_eq!(at("AS").as_deref(), Some("keyword"));
+        assert_eq!(at("ARG").as_deref(), Some("keyword"));
+        assert_eq!(at("VERSION").as_deref(), Some("variable.other.member"));
+        assert_eq!(at("APP_HOME").as_deref(), Some("variable.other.member"));
+        assert_eq!(at("80").as_deref(), Some("constant.numeric"));
+        // A RUN body is one opaque shell_command node in this grammar (the
+        // upstream query injects bash there, which tico doesn't do), so
+        // nothing inside it is colored.
+        assert!(
+            spans
+                .iter()
+                .all(|s| s.start < src.find("echo").unwrap()
+                    || s.start >= src.find("EXPOSE").unwrap())
+        );
+    }
+
+    #[test]
     fn make_plain_rule_is_colored() {
         let src = "foo: bar baz.o\n\tcc -o foo bar\n\nall: foo\n";
         let lang = languages::detect(Some(std::path::Path::new("Makefile")), src).unwrap();
@@ -1879,6 +1912,14 @@ mod tests {
             ("log4perl.debug.conf", "properties"),
             ("etc/log4perl.prod.conf", "properties"),
             ("log4j.properties", "properties"),
+            ("Dockerfile", "dockerfile"),
+            ("dockerfile", "dockerfile"),
+            ("Dockerfile.dev", "dockerfile"),
+            ("docker/Dockerfile.alpine", "dockerfile"),
+            ("Containerfile", "dockerfile"),
+            ("Containerfile.build", "dockerfile"),
+            ("app.dockerfile", "dockerfile"),
+            ("app.Dockerfile", "dockerfile"),
         ];
         for (path, expected) in cases {
             let lang = detect(Some(std::path::Path::new(path)), "")
@@ -1898,6 +1939,8 @@ mod tests {
             "log4perl.conf.bak",
             "mylog4perl.x.conf",
             "log4perlconf",
+            "Dockerfiles",
+            "MyDockerfile",
         ] {
             assert!(
                 detect(Some(std::path::Path::new(path)), "").is_none(),
@@ -2005,6 +2048,11 @@ mod tests {
                 "tcl",
                 "a.tcl",
                 "#!/usr/bin/env tclsh\nproc greet {name} { puts \"hi $name\" } ;# hi\nset x [expr {1 + 2}]\n",
+            ),
+            (
+                "dockerfile",
+                "Dockerfile",
+                "# hi\nFROM alpine:3.20 AS base\nARG VERSION=1\nRUN echo $VERSION\nEXPOSE 80\n",
             ),
             (
                 "properties",

@@ -102,6 +102,7 @@ lang_fn!(lang_markdown, tree_sitter_md);
 lang_fn!(lang_groovy, dekobon_tree_sitter_groovy);
 lang_fn!(lang_properties, tree_sitter_properties);
 lang_fn!(lang_tcl, tree_sitter_tcl);
+lang_fn!(lang_dockerfile, tree_sitter_containerfile);
 
 // The VCL grammar is not a crate: build.rs compiles it from
 // `grammars/tree-sitter-vcl/` (a fork of ntsk/tree-sitter-vcl extended for
@@ -647,6 +648,31 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &["expect"],
         language: lang_tcl,
         highlights_query: include_str!("queries/tcl.scm"),
+        linter: None,
+        formatter: None,
+        comment: "#",
+    },
+    LanguageDef {
+        // The names Helix and Neovim both recognize: the bare file, a
+        // suffixed variant (`Dockerfile.dev`), Podman's `Containerfile`
+        // spelling, and a `.dockerfile` extension (`app.Dockerfile` too,
+        // since extensions match case-insensitively).
+        name: "dockerfile",
+        extensions: &["dockerfile"],
+        filenames: &[
+            "Dockerfile",
+            "dockerfile",
+            "Containerfile",
+            "containerfile",
+            "Dockerfile.*",
+            "dockerfile.*",
+            "Containerfile.*",
+            "containerfile.*",
+        ],
+        shebangs: &[],
+        modeline_aliases: &["docker", "containerfile"],
+        language: lang_dockerfile,
+        highlights_query: include_str!("queries/dockerfile.scm"),
         linter: None,
         formatter: None,
         comment: "#",
