@@ -61,6 +61,11 @@ A typed `^Z` is unaffected: both editors disable the terminal's ISIG in
 raw mode, so it arrives as a keystroke (nano's "To suspend, type ^T^Z"
 hint, or the Execute menu's suspend) rather than as a signal.
 
+On Windows there is no SIGSTOP/process-group job control to hand off to
+a shell at all, so `^T^Z` there just reports "Could not suspend:
+suspend is not supported on this platform" and leaves the process
+running.
+
 ## Help listing order and contents
 
 nano's `^G` help lists a menu's functions in its fixed registration

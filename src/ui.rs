@@ -1793,7 +1793,12 @@ fn suspend_editor(editor: &mut Editor) {
     println!("\n\nUse \"fg\" to return to tico.");
     let _ = io::stdout().flush();
 
+    #[cfg(unix)]
     let stopped = rustix::process::kill_current_process_group(rustix::process::Signal::STOP);
+    // Windows has no SIGSTOP/process-group job control to hand off to a
+    // shell the way Unix does, so there's nothing to stop the process with.
+    #[cfg(not(unix))]
+    let stopped: Result<(), &str> = Err("suspend is not supported on this platform");
 
     let _ = enable_raw_mode();
     let _ = execute!(
