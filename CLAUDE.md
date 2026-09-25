@@ -31,6 +31,27 @@ user needs to merge it themselves. This one holds even with a direct,
 explicit instruction to merge; it isn't a "confirm once" situation like
 commit/push above.
 
+## Every package ships every binary
+
+This repo builds three binaries: `tico`, `tcat`, `ttee`. Whenever a
+release-worthy package is produced, all three must be in it — not just
+`tico`. That currently means two separate places, both of which need
+updating together when a new binary is added:
+
+- `Cargo.toml`'s `[package.metadata.deb]` `assets` list (drives the `.deb`
+  built by `cargo-deb`).
+- `.github/workflows/release.yml`'s `extra-bin-names` input (space-separated,
+  alongside the implicit primary `bin-name`), which drives the tar.gz/zip
+  archives and the Windows NSIS installer via the reusable
+  `uperl/action-rust-release-bin` workflow.
+
+`extra-bin-names` was added to that shared action specifically to support
+this (see its git history) — it doesn't need `--bin`-restricted builds or
+per-target special-casing, since `cargo build --release` already builds
+every binary in the crate in one pass. If you add a fourth binary, add it
+to both lists; don't let a new binary end up in `.deb` but missing from
+the tarball/zip/installer, or vice versa.
+
 ## Keep Mac (bare-CR) line-ending support
 
 nano dropped Mac format (bare-CR line endings, the `M-M Mac Format`
