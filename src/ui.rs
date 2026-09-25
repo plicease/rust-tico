@@ -104,22 +104,41 @@ pub fn run(editor: &mut Editor) -> io::Result<()> {
         let mut dirty = false;
 
         if event::poll(Duration::from_millis(600))? {
-            match event::read()? {
-                Event::Key(key) if key.kind != KeyEventKind::Release => {
-                    handle_key(editor, key);
-                    dirty = true;
+            // A terminal delivers a clipboard paste as a burst of individual
+            // synthetic keystrokes, not one chunk (nano has no bracketed-paste
+            // support to ask it to do otherwise). Redrawing after every single
+            // one made a paste of any size crawl, especially on Windows where
+            // each terminal write costs more than on a Unix pty. So drain
+            // whatever's already queued and render once for the whole batch,
+            // capped so a very long paste (or a held-down repeating key)
+            // still redraws periodically instead of looking frozen.
+            const MAX_BATCHED_EVENTS: u32 = 512;
+            let mut batched = 0u32;
+            loop {
+                match event::read()? {
+                    Event::Key(key) if key.kind != KeyEventKind::Release => {
+                        handle_key(editor, key);
+                        dirty = true;
+                    }
+                    Event::Mouse(mev) => {
+                        handle_mouse(editor, mev);
+                        dirty = true;
+                    }
+                    Event::Resize(cols, rows) => {
+                        editor.screen_cols = cols as usize;
+                        editor.screen_rows = rows as usize;
+                        execute!(io::stdout(), Clear(ClearType::All))?;
+                        dirty = true;
+                    }
+                    _ => {}
                 }
-                Event::Mouse(mev) => {
-                    handle_mouse(editor, mev);
-                    dirty = true;
+                if matches!(editor.mode, Mode::Quit) {
+                    break;
                 }
-                Event::Resize(cols, rows) => {
-                    editor.screen_cols = cols as usize;
-                    editor.screen_rows = rows as usize;
-                    execute!(io::stdout(), Clear(ClearType::All))?;
-                    dirty = true;
+                batched += 1;
+                if batched >= MAX_BATCHED_EVENTS || !event::poll(Duration::from_millis(0))? {
+                    break;
                 }
-                _ => {}
             }
         } else if matches!(editor.mode, Mode::Editing) {
             let watched_path = if editor.buf().ignore_external_changes {
@@ -1793,7 +1812,12 @@ fn suspend_editor(editor: &mut Editor) {
     println!("\n\nUse \"fg\" to return to tico.");
     let _ = io::stdout().flush();
 
+    #[cfg(unix)]
     let stopped = rustix::process::kill_current_process_group(rustix::process::Signal::STOP);
+    // Windows has no SIGSTOP/process-group job control to hand off to a
+    // shell the way Unix does, so there's nothing to stop the process with.
+    #[cfg(not(unix))]
+    let stopped: Result<(), &str> = Err("suspend is not supported on this platform");
 
     let _ = enable_raw_mode();
     let _ = execute!(

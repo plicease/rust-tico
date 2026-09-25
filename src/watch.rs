@@ -2,9 +2,10 @@
 //! checker (`fileio::check_external_change`) instead of its own periodic
 //! `stat()` polling when the current platform supports it: inotify
 //! (via `poll(2)`, so a background thread can still shut down cleanly) on
-//! Linux, kqueue on macOS/BSD. Anywhere else — Windows included, for now
-//! — `FileWatcher::new` returns `None` and the caller falls back to the
-//! existing periodic-poll behavior unchanged.
+//! Linux, kqueue on macOS/BSD, `ReadDirectoryChangesW` (via overlapped I/O
+//! and `WaitForMultipleObjects`, for the same clean-shutdown reason) on
+//! Windows. Anywhere else, `FileWatcher::new` returns `None` and the
+//! caller falls back to the existing periodic-poll behavior unchanged.
 //!
 //! Every implementation watches the file's *parent directory* rather than
 //! the file's own inode/handle: that is what makes it notice not only
@@ -25,6 +26,12 @@ pub struct FileWatcher {
     /// 1s) used to make switching buffers, and exiting, visibly pause.
     #[cfg(unix)]
     wake_write_fd: std::os::raw::c_int,
+    /// Windows equivalent of `wake_write_fd`: a manual-reset event the
+    /// background thread also waits on (alongside the overlapped I/O
+    /// completion event) via `WaitForMultipleObjects`, so `Drop` can wake
+    /// it immediately by signaling it instead of waiting for a change.
+    #[cfg(windows)]
+    wake_event: platform::WakeHandle,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -52,8 +59,20 @@ impl Drop for FileWatcher {
             libc::write(self.wake_write_fd, byte.as_ptr() as *const libc::c_void, 1);
             libc::close(self.wake_write_fd);
         }
+        #[cfg(windows)]
+        unsafe {
+            windows_sys::Win32::System::Threading::SetEvent(self.wake_event.0);
+        }
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
+        }
+        // The background thread only ever *waits* on wake_event; it never
+        // closes it (unlike its own dir/IO handles), so it's still valid
+        // here and Drop -- the sole owner -- is the right place to do it,
+        // now that `join` above guarantees the thread is done with it.
+        #[cfg(windows)]
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.wake_event.0);
         }
     }
 }
@@ -355,13 +374,214 @@ mod platform {
     }
 }
 
+#[cfg(windows)]
+mod platform {
+    use super::{FileWatcher, watch_dir};
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::path::Path;
+    use std::ptr;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_LIST_DIRECTORY,
+        FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_NOTIFY_CHANGE_CREATION, FILE_NOTIFY_CHANGE_DIR_NAME,
+        FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE,
+        FILE_NOTIFY_INFORMATION, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING, ReadDirectoryChangesW,
+    };
+    use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+    use windows_sys::Win32::System::Threading::{CreateEventW, INFINITE, WaitForMultipleObjects};
+
+    /// A `HANDLE` (an opaque OS handle, not memory this process manages)
+    /// that needs to cross the thread boundary -- unlike a general raw
+    /// pointer, moving or sharing one carries no aliasing risk.
+    pub struct WakeHandle(pub(super) HANDLE);
+    unsafe impl Send for WakeHandle {}
+    struct SendHandle(HANDLE);
+    unsafe impl Send for SendHandle {}
+    impl SendHandle {
+        // A method taking `self` by value, rather than reading the `.0`
+        // field directly, forces a spawned closure to capture the whole
+        // (`Send`) wrapper instead of disjointly capturing just its
+        // not-`Send` `HANDLE` field.
+        fn into_inner(self) -> HANDLE {
+            self.0
+        }
+    }
+
+    const WATCH_MASK: u32 = FILE_NOTIFY_CHANGE_FILE_NAME
+        | FILE_NOTIFY_CHANGE_DIR_NAME
+        | FILE_NOTIFY_CHANGE_ATTRIBUTES
+        | FILE_NOTIFY_CHANGE_SIZE
+        | FILE_NOTIFY_CHANGE_LAST_WRITE
+        | FILE_NOTIFY_CHANGE_CREATION;
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    /// NTFS/ReFS names are case-insensitive-but-preserving, so this can't
+    /// just be a byte-for-byte match the way the inotify/kqueue sides
+    /// compare names.
+    fn names_match(reported: &std::ffi::OsStr, filename: &std::ffi::OsStr) -> bool {
+        reported
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&filename.to_string_lossy())
+    }
+
+    pub fn start(path: &Path) -> Option<FileWatcher> {
+        let dir = watch_dir(path);
+        let filename = path.file_name()?.to_owned();
+        let dir_wide = wide(&dir);
+
+        let dir_handle = unsafe {
+            CreateFileW(
+                dir_wide.as_ptr(),
+                FILE_LIST_DIRECTORY,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+                ptr::null_mut(),
+            )
+        };
+        if dir_handle == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let io_event = unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) };
+        if io_event.is_null() {
+            unsafe { CloseHandle(dir_handle) };
+            return None;
+        }
+        let wake_event = unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) };
+        if wake_event.is_null() {
+            unsafe {
+                CloseHandle(io_event);
+                CloseHandle(dir_handle);
+            }
+            return None;
+        }
+
+        let changed = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let changed2 = changed.clone();
+        let stop2 = stop.clone();
+        let dir_handle_s = SendHandle(dir_handle);
+        let io_event_s = SendHandle(io_event);
+        let wake_event_s = SendHandle(wake_event);
+
+        let handle = std::thread::spawn(move || {
+            let dir_handle = dir_handle_s.into_inner();
+            let io_event = io_event_s.into_inner();
+            let wake_event = wake_event_s.into_inner();
+            // A generous fixed buffer, matching the inotify side: even a
+            // burst of changes only needs to be *noticed*, not fully
+            // drained in one read -- ReadDirectoryChangesW is re-issued
+            // right after.
+            let mut buf = [0u8; 4096];
+            loop {
+                if stop2.load(Ordering::SeqCst) {
+                    break;
+                }
+                let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+                overlapped.hEvent = io_event;
+                let mut bytes_returned = 0u32;
+                let issued = unsafe {
+                    ReadDirectoryChangesW(
+                        dir_handle,
+                        buf.as_mut_ptr() as *mut _,
+                        buf.len() as u32,
+                        0, // bWatchSubtree = FALSE: this dir only, like the other platforms
+                        WATCH_MASK,
+                        &mut bytes_returned,
+                        &mut overlapped,
+                        None,
+                    )
+                };
+                if issued == 0 {
+                    break; // e.g. the watched directory itself was removed
+                }
+
+                let handles = [io_event, wake_event];
+                let wait = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, INFINITE) };
+                if wait != WAIT_OBJECT_0 {
+                    // Either woken for shutdown (index 1) or a wait
+                    // failure -- either way, cancel the pending read and
+                    // wait for that cancellation to land before touching
+                    // the handles again.
+                    unsafe {
+                        CancelIoEx(dir_handle, &overlapped);
+                        let mut discard = 0u32;
+                        GetOverlappedResult(dir_handle, &overlapped, &mut discard, 1);
+                    }
+                    break;
+                }
+
+                let mut transferred = 0u32;
+                let ok =
+                    unsafe { GetOverlappedResult(dir_handle, &overlapped, &mut transferred, 0) };
+                if ok == 0 || transferred == 0 {
+                    // 0 bytes transferred (including a change-buffer
+                    // overflow, when too many changes land between reads)
+                    // means we can't tell what changed -- report a change
+                    // conservatively rather than risk missing one.
+                    changed2.store(true, Ordering::SeqCst);
+                    continue;
+                }
+
+                let mut offset = 0usize;
+                loop {
+                    let info =
+                        unsafe { &*(buf.as_ptr().add(offset) as *const FILE_NOTIFY_INFORMATION) };
+                    let name_offset =
+                        offset + std::mem::offset_of!(FILE_NOTIFY_INFORMATION, FileName);
+                    let name_len = info.FileNameLength as usize / 2;
+                    let name = unsafe {
+                        std::slice::from_raw_parts(
+                            buf.as_ptr().add(name_offset) as *const u16,
+                            name_len,
+                        )
+                    };
+                    if names_match(&OsString::from_wide(name), &filename) {
+                        changed2.store(true, Ordering::SeqCst);
+                    }
+                    if info.NextEntryOffset == 0 {
+                        break;
+                    }
+                    offset += info.NextEntryOffset as usize;
+                }
+            }
+            unsafe {
+                CloseHandle(io_event);
+                CloseHandle(dir_handle);
+            }
+        });
+
+        Some(FileWatcher {
+            changed,
+            stop,
+            wake_event: WakeHandle(wake_event),
+            handle: Some(handle),
+        })
+    }
+}
+
 #[cfg(not(any(
     target_os = "linux",
     target_os = "macos",
     target_os = "freebsd",
     target_os = "netbsd",
     target_os = "openbsd",
-    target_os = "dragonfly"
+    target_os = "dragonfly",
+    windows
 )))]
 mod platform {
     use super::FileWatcher;
@@ -372,7 +592,7 @@ mod platform {
     }
 }
 
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};

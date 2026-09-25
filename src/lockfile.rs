@@ -10,6 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
 const LOCK_SIZE: usize = 1024;
 
 /// The lock-file path for `target`: `.basename.swp` next to it (nano's
@@ -121,6 +122,7 @@ pub fn write_lock(
     Ok(())
 }
 
+#[cfg(unix)]
 fn write_field(buf: &mut [u8], offset: usize, max_len: usize, s: &str) {
     let bytes = s.as_bytes();
     let n = bytes.len().min(max_len);

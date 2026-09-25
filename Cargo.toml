@@ -75,9 +75,25 @@ unicode-width = "0.2.2"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+] }
+
 [build-dependencies]
 cc = "1.2"
 
+
+# tree-sitter-scss 1.0.0 on crates.io passes the GCC-only flag
+# -Wno-unused-parameter unconditionally in its build.rs, which cl.exe
+# (MSVC) rejects with error D8021. Fixed upstream on master (still
+# unreleased to crates.io) by using /wd4100 on MSVC instead.
+[patch.crates-io]
+tree-sitter-scss = { git = "https://github.com/tree-sitter-grammars/tree-sitter-scss", rev = "9ab738d22bb248771d42e8678d1a307d14990df1" }
 
 [package.metadata.deb]
 maintainer = "Nobody <devnull@wdlabs.com>"
