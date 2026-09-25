@@ -1772,6 +1772,70 @@ mod tests {
         );
     }
 
+    /// nano's yaml `header` rule (`^%YAML |^---( |$)`) on the first
+    /// non-blank, non-comment line; a unified diff's `--- `/`+++ ` pair is
+    /// told apart and detected as diff instead.
+    #[test]
+    fn yaml_and_diff_content_sniffing() {
+        let conf = Some(std::path::Path::new("app.conf"));
+        let yaml_texts = [
+            "---\n",
+            "---",
+            "---\nkey: value\n",
+            "--- # doc\nkey: value\n",
+            "--- !tag\n",
+            "%YAML 1.2\n---\n",
+            "# comment\n\n# more\n---\nkey: value\n",
+            "\u{feff}---\nkey: value\n",
+            "--- a/file\n",
+        ];
+        for text in yaml_texts {
+            for path in [conf, None] {
+                let lang = detect(path, text)
+                    .unwrap_or_else(|| panic!("{text:?} should be detected as yaml"));
+                assert_eq!(lang.name, "yaml", "{text:?}");
+            }
+        }
+        let diff_texts = [
+            "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-x\n+y\n",
+            "--- old.txt\t2026-01-01\n+++ new.txt\t2026-01-02\n",
+        ];
+        for text in diff_texts {
+            for path in [conf, None] {
+                let lang = detect(path, text)
+                    .unwrap_or_else(|| panic!("{text:?} should be detected as diff"));
+                assert_eq!(lang.name, "diff", "{text:?}");
+            }
+        }
+        let neither = [
+            "----\n",
+            "---x\n",
+            " ---\n",
+            "key: value\n",
+            "# just a comment\n",
+            "%YAML\n",
+            "%YAMLX 1.2\n",
+            "-- sql comment\n",
+            "+++ b/file\n--- a/file\n",
+        ];
+        for text in neither {
+            assert!(
+                detect(conf, text).is_none(),
+                "{text:?} should not be detected"
+            );
+        }
+        // Filename still wins.
+        assert_eq!(
+            detect(Some(std::path::Path::new("a.ini")), "---\n")
+                .unwrap()
+                .name,
+            "ini"
+        );
+        // A JSON opening beats a later YAML marker check, since it's
+        // looked at first.
+        assert_eq!(detect(conf, "{\"a\": 1}\n---\n").unwrap().name, "json");
+    }
+
     #[test]
     fn filename_prefix_patterns() {
         let cases = [

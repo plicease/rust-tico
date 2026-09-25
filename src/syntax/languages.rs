@@ -1,7 +1,7 @@
 //! The language registry and detection cascade: filename extension (or
 //! exact filename, for things like `Makefile`) -> shebang line -> modeline
-//! (vim- or Emacs-style) -> a peek at the leading bytes (JSON's `{ "`),
-//! matching the priority order other editors use.
+//! (vim- or Emacs-style) -> a peek at the leading lines (JSON's `{ "`,
+//! YAML's `---`), matching the priority order other editors use.
 //! All on by default; see `crate::options::Options::syntax_highlighting`
 //! for the master on/off toggle.
 
@@ -679,28 +679,61 @@ pub fn detect(path: Option<&Path>, text: &str) -> Option<&'static LanguageDef> {
     None
 }
 
-/// Guess from the first couple of significant characters, without
-/// parsing anything. Currently only JSON has a signature distinctive
-/// enough to trust: `{` followed by `"` or `}` (objects must have string
-/// keys, which rules out C blocks, Perl hashes and Tcl), or `[` followed
-/// by the start of a JSON value (which rules out an ini `[section]`
-/// header, the one real collision among common `.conf` formats).
-/// Leading `//` and `/* */` comments are skipped so JSONC qualifies; a
-/// `#` comment is not, since that's the strongest sign a file isn't JSON.
+/// Guess from the first line or two, without parsing anything. Only
+/// formats with a distinctive opening are sniffed, the way nano's
+/// `header` lines do it.
 fn detect_by_content(text: &str) -> Option<&'static LanguageDef> {
-    let rest = skip_c_style_comments(text.trim_start_matches('\u{feff}'));
+    let text = text.trim_start_matches('\u{feff}');
+    if looks_like_json(text) {
+        find_by_name("json")
+    } else if looks_like_diff(text) {
+        find_by_name("diff")
+    } else if looks_like_yaml(text) {
+        find_by_name("yaml")
+    } else {
+        None
+    }
+}
+
+/// `{` followed by `"` or `}` (objects must have string keys, which
+/// rules out C blocks, Perl hashes and Tcl), or `[` followed by the
+/// start of a JSON value (which rules out an ini `[section]` header, the
+/// one real collision among common `.conf` formats). Leading `//` and
+/// `/* */` comments are skipped so JSONC qualifies; a `#` comment is not,
+/// since that's the strongest sign a file isn't JSON.
+fn looks_like_json(text: &str) -> bool {
+    let rest = skip_c_style_comments(text);
     let mut chars = rest.chars().skip_while(|c| c.is_whitespace());
-    let first = chars.next()?;
+    let Some(first) = chars.next() else {
+        return false;
+    };
     let second = chars.find(|c| !c.is_whitespace()).unwrap_or('\0');
-    let is_json = match first {
+    match first {
         '{' => matches!(second, '"' | '}'),
         '[' => {
             matches!(second, '{' | '[' | '"' | ']' | '-' | 't' | 'f' | 'n')
                 || second.is_ascii_digit()
         }
         _ => false,
-    };
-    if is_json { find_by_name("json") } else { None }
+    }
+}
+
+/// A unified diff's `--- old` / `+++ new` header pair. Checked before
+/// YAML because `--- a/file` also satisfies nano's YAML header rule.
+fn looks_like_diff(text: &str) -> bool {
+    let mut lines = text.lines();
+    lines.next().is_some_and(|l| l.starts_with("--- "))
+        && lines.next().is_some_and(|l| l.starts_with("+++ "))
+}
+
+/// nano's yaml.nanorc header rule, `^%YAML |^---( |$)`, applied to the
+/// first line that isn't blank or a `#` comment (YAML files routinely
+/// open with a comment block before the document marker).
+fn looks_like_yaml(text: &str) -> bool {
+    text.lines()
+        .map(str::trim_end)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+        .is_some_and(|l| l.starts_with("%YAML ") || l == "---" || l.starts_with("--- "))
 }
 
 /// Skip any run of leading whitespace and `//` or `/* ... */` comments.
