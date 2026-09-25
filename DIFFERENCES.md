@@ -17,7 +17,11 @@ directives — `syntax`, `color`, `icolor`, `header`, `magic`, `include`,
 have no effect. The built-in language table in `src/syntax/languages.rs`
 supplies what those per-syntax lines would have (the linter/formatter
 commands and the `M-3` comment sequence), sourced from nano's shipped
-syntax files where nano has one.
+syntax files where nano has one. Language detection is likewise built
+in: filename, then shebang, then a vim/Emacs modeline, then a peek at
+the leading bytes (a `.conf` file that opens with `{ "` or a JSON array
+is highlighted as JSON), which stands in for nano's `header` and
+`magic` lines but is not configurable.
 
 Colors come from a theme in Helix's format (`src/theme.rs`), selected in
 `~/.ticorc` or with `--tico-theme`, and only the syntax scopes of a theme

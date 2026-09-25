@@ -1699,6 +1699,79 @@ mod tests {
         }
     }
 
+    /// A file whose name says nothing (`foo.conf`, no name at all) is
+    /// sniffed for JSON's opening bytes, nano-`header` style; a
+    /// recognized name always wins over the sniff.
+    #[test]
+    fn json_content_sniffing() {
+        let conf = Some(std::path::Path::new("app.conf"));
+        let json_texts = [
+            "{\n  \"key\": 1\n}\n",
+            "{\"a\":1}",
+            "{}",
+            "  \n\t{ \"x\": [] }",
+            "\u{feff}{\"bom\": true}",
+            "[{\"a\": 1}]",
+            "[[1, 2], [3]]",
+            "[\"a\", \"b\"]",
+            "[1, 2, 3]",
+            "[-1]",
+            "[]",
+            "[true, false, null]",
+            "// jsonc comment\n{\"a\": 1}",
+            "/* block\n comment */ // line\n[1]",
+        ];
+        for text in json_texts {
+            for path in [conf, None] {
+                let lang = detect(path, text)
+                    .unwrap_or_else(|| panic!("{text:?} should be detected as json"));
+                assert_eq!(lang.name, "json", "{text:?}");
+            }
+        }
+        let not_json = [
+            "",
+            "   \n",
+            "# comment\n{\"a\": 1}",
+            "[section]\nkey = value\n",
+            "[ section ]",
+            "{ foo => 1 }",
+            "{\n  int x;\n}",
+            "{",
+            "server {\n  listen 80;\n}\n",
+            "key = value\n",
+            "<VirtualHost *:80>\n",
+            "/* unterminated",
+            "// only a comment\n",
+            "42",
+            "\"a string\"",
+        ];
+        for text in not_json {
+            assert!(
+                detect(conf, text).is_none(),
+                "{text:?} should not be detected as json"
+            );
+        }
+        // The filename wins: JSON content in an ini-named file is ini, and
+        // a `.json` extension is json regardless of what's inside.
+        assert_eq!(
+            detect(Some(std::path::Path::new("a.ini")), "{\"a\": 1}")
+                .unwrap()
+                .name,
+            "ini"
+        );
+        assert_eq!(
+            detect(Some(std::path::Path::new("a.json")), "[section]")
+                .unwrap()
+                .name,
+            "json"
+        );
+        // So does a modeline.
+        assert_eq!(
+            detect(conf, "{\"a\": 1}\n# vim: ft=yaml\n").unwrap().name,
+            "yaml"
+        );
+    }
+
     #[test]
     fn filename_prefix_patterns() {
         let cases = [

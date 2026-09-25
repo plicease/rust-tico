@@ -1,6 +1,7 @@
 //! The language registry and detection cascade: filename extension (or
 //! exact filename, for things like `Makefile`) -> shebang line -> modeline
-//! (vim- or Emacs-style), matching the priority order other editors use.
+//! (vim- or Emacs-style) -> a peek at the leading bytes (JSON's `{ "`),
+//! matching the priority order other editors use.
 //! All on by default; see `crate::options::Options::syntax_highlighting`
 //! for the master on/off toggle.
 
@@ -653,8 +654,12 @@ const LANGUAGES: &[LanguageDef] = &[
 
 /// Detect a buffer's language: by filename extension or exact filename
 /// first, then by shebang line, then by a vim- or Emacs-style modeline
-/// found in the first or last few lines — matching how other editors
-/// layer these signals, most-specific (and cheapest to check) first.
+/// found in the first or last few lines, and finally by sniffing the
+/// leading bytes — matching how other editors layer these signals,
+/// most-specific (and cheapest to check) first. The content sniff is the
+/// counterpart of nano's `header` directive: it only gets a say when the
+/// filename told us nothing, so `foo.conf` holding JSON is highlighted
+/// as JSON while `foo.ini` never is.
 pub fn detect(path: Option<&Path>, text: &str) -> Option<&'static LanguageDef> {
     if let Some(path) = path
         && let Some(lang) = detect_by_filename(path)
@@ -668,7 +673,51 @@ pub fn detect(path: Option<&Path>, text: &str) -> Option<&'static LanguageDef> {
     if let Some(lang) = detect_by_modeline(text) {
         return Some(lang);
     }
+    if let Some(lang) = detect_by_content(text) {
+        return Some(lang);
+    }
     None
+}
+
+/// Guess from the first couple of significant characters, without
+/// parsing anything. Currently only JSON has a signature distinctive
+/// enough to trust: `{` followed by `"` or `}` (objects must have string
+/// keys, which rules out C blocks, Perl hashes and Tcl), or `[` followed
+/// by the start of a JSON value (which rules out an ini `[section]`
+/// header, the one real collision among common `.conf` formats).
+/// Leading `//` and `/* */` comments are skipped so JSONC qualifies; a
+/// `#` comment is not, since that's the strongest sign a file isn't JSON.
+fn detect_by_content(text: &str) -> Option<&'static LanguageDef> {
+    let rest = skip_c_style_comments(text.trim_start_matches('\u{feff}'));
+    let mut chars = rest.chars().skip_while(|c| c.is_whitespace());
+    let first = chars.next()?;
+    let second = chars.find(|c| !c.is_whitespace()).unwrap_or('\0');
+    let is_json = match first {
+        '{' => matches!(second, '"' | '}'),
+        '[' => {
+            matches!(second, '{' | '[' | '"' | ']' | '-' | 't' | 'f' | 'n')
+                || second.is_ascii_digit()
+        }
+        _ => false,
+    };
+    if is_json { find_by_name("json") } else { None }
+}
+
+/// Skip any run of leading whitespace and `//` or `/* ... */` comments.
+fn skip_c_style_comments(mut text: &str) -> &str {
+    loop {
+        text = text.trim_start();
+        if let Some(rest) = text.strip_prefix("//") {
+            text = rest.split_once('\n').map_or("", |(_, after)| after);
+        } else if let Some(rest) = text.strip_prefix("/*") {
+            let Some((_, after)) = rest.split_once("*/") else {
+                return "";
+            };
+            text = after;
+        } else {
+            return text;
+        }
+    }
 }
 
 /// Basenames that would match a `NAME.*` pattern below but aren't that
