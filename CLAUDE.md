@@ -52,6 +52,12 @@ every binary in the crate in one pass. If you add a fourth binary, add it
 to both lists; don't let a new binary end up in `.deb` but missing from
 the tarball/zip/installer, or vice versa.
 
+The same two-places rule applies to license files. Every package must
+carry both `LICENSE` (MIT, tico itself) and `LICENSE-MPL-2.0` (the
+vendored Helix themes): they're listed in the `.deb` `assets` and in the
+workflow's `extra-files` input (which replaces the action's default of
+`README.md LICENSE`, so keep `README.md` and `LICENSE` in it too).
+
 ## Keep Mac (bare-CR) line-ending support
 
 nano dropped Mac format (bare-CR line endings, the `M-M Mac Format`

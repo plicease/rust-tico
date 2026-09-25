@@ -18,4 +18,7 @@ jobs:
     with:
       publisher: "plicease"
       extra-bin-names: "tcat ttee"
+      # LICENSE-MPL-2.0 covers the vendored Helix themes; it must ship
+      # alongside LICENSE (the action's default is "README.md LICENSE").
+      extra-files: "README.md LICENSE LICENSE-MPL-2.0"
 
