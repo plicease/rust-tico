@@ -571,6 +571,30 @@ pub fn highlight_or_plain(
     out.write_all(bytes)
 }
 
+/// `--color[=WHEN]` for `tcat`/`ttee`, with GNU `ls`/`grep` semantics:
+/// `auto` (the default) colorizes only when stdout is a terminal, `always`
+/// colorizes even into a pipe (`tcat --color=always foo.c | less -R`), and
+/// `never` turns it off. A bare `--color` means `always`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum ColorWhen {
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+impl ColorWhen {
+    /// Whether output should be highlighted, given whether stdout is a
+    /// terminal.
+    pub fn colorize(self, stdout_is_tty: bool) -> bool {
+        match self {
+            ColorWhen::Auto => stdout_is_tty,
+            ColorWhen::Always => true,
+            ColorWhen::Never => false,
+        }
+    }
+}
+
 /// The theme to paint one span's scope with: its own language's override,
 /// or the global theme -- exactly `Editor::theme_for`'s logic, without
 /// needing an `Editor` to hang it off of. Shared by `tcat` and `ttee`.
@@ -1297,5 +1321,14 @@ ty = "#000004"
         let mut w = Vec::new();
         assert!(loader.load("tico-builtin-nope", &mut w).is_none());
         assert!(w[0].contains("no built-in theme"), "{w:?}");
+    }
+
+    #[test]
+    fn color_when_gates_on_the_terminal_only_for_auto() {
+        assert!(ColorWhen::Auto.colorize(true));
+        assert!(!ColorWhen::Auto.colorize(false));
+        assert!(ColorWhen::Always.colorize(false));
+        assert!(!ColorWhen::Never.colorize(true));
+        assert_eq!(ColorWhen::default(), ColorWhen::Auto);
     }
 }

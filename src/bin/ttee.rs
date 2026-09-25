@@ -13,7 +13,10 @@
 //! straight into a file (`generate-perl | ttee out.pl`), where you want
 //! both the clean saved file and a highlighted look at what was produced;
 //! `ttee`'s own stdout just won't update live for that one case. Piped or
-//! redirected stdout is the ordinary, immediate streaming passthrough.
+//! redirected stdout is the ordinary, immediate streaming passthrough,
+//! unless `--color=always` asks for the buffered, highlighted copy anyway
+//! (`generate-perl | ttee out.pl --color=always | less -R`);
+//! `--color=never` makes a terminal behave like a pipe.
 //!
 //! There's no input filename at all (`tee`'s operands are output
 //! destinations), so language detection uses the *first* file operand's
@@ -27,6 +30,7 @@ use clap::Parser;
 use std::fs::{File, OpenOptions};
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
+use tico::theme::ColorWhen;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -68,6 +72,18 @@ struct Cli {
         help = "Don't look at nanorc/ticorc files"
     )]
     ignorercfiles: bool,
+    #[arg(
+        long = "color",
+        value_name = "WHEN",
+        value_enum,
+        default_value_t = ColorWhen::Auto,
+        default_missing_value = "always",
+        num_args = 0..=1,
+        require_equals = true,
+        help = "When to colorize the stdout copy: auto (only if stdout is a terminal), \
+                always, or never. A bare --color means always."
+    )]
+    color: ColorWhen,
     /// Output files. The first one's name (if any) feeds language
     /// detection for the stdout copy, same as a `tcat` operand's own name.
     #[arg(trailing_var_arg = true)]
@@ -131,11 +147,11 @@ fn main() {
 
     let detect_path = cli.files.first().map(PathBuf::from);
     let syntax_override = options.syntax_name.as_deref();
-    let stdout_is_tty = io::stdout().is_terminal();
+    let colorize = cli.color.colorize(io::stdout().is_terminal());
     let mut stdout = io::stdout();
 
-    // Only accumulated when stdout is a terminal (so it can be highlighted
-    // as one whole, once stdin closes); otherwise stdout is written
+    // Only accumulated when highlighting (so it can be done as one whole,
+    // once stdin closes); otherwise stdout is written
     // straight through in the same loop as the files, exactly like real
     // `tee`, and this stays empty and unused.
     let mut pending = Vec::new();
@@ -161,7 +177,7 @@ fn main() {
             }
         }
 
-        if stdout_is_tty {
+        if colorize {
             pending.extend_from_slice(chunk);
         } else if let Err(e) = stdout.write_all(chunk) {
             // Matches real `tee`'s default-SIGPIPE behavior: a downstream
@@ -178,7 +194,7 @@ fn main() {
         }
     }
 
-    if stdout_is_tty
+    if colorize
         && let Err(e) = tico::theme::highlight_or_plain(
             &pending,
             detect_path.as_deref(),
