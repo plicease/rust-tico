@@ -92,6 +92,7 @@ lang_fn!(lang_nix, tree_sitter_nix);
 lang_fn_old_api!(lang_vim, tree_sitter_vim);
 lang_fn!(lang_lua, tree_sitter_lua);
 lang_fn!(lang_markdown, tree_sitter_md);
+lang_fn!(lang_groovy, dekobon_tree_sitter_groovy);
 
 // The VCL grammar is not a crate: build.rs compiles it from
 // `grammars/tree-sitter-vcl/` (a fork of ntsk/tree-sitter-vcl extended for
@@ -597,6 +598,18 @@ const LANGUAGES: &[LanguageDef] = &[
         linter: None,
         formatter: None,
         comment: "<!--|-->",
+    },
+    LanguageDef {
+        name: "groovy",
+        extensions: &["groovy", "gvy", "gy", "gsh", "gradle"],
+        filenames: &["Jenkinsfile"],
+        shebangs: &["groovy"],
+        modeline_aliases: &[],
+        language: lang_groovy,
+        highlights_query: include_str!("queries/groovy.scm"),
+        linter: None,
+        formatter: None,
+        comment: "//",
     },
     LanguageDef {
         name: "vcl",

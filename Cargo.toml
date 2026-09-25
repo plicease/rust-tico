@@ -69,6 +69,11 @@ tree-sitter-zig = "1.1.2"
 # use), published on crates.io under this name; the `tree-sitter-perl` crate
 # is an older, unrelated grammar that misparses e.g. a `sub f ($)` prototype.
 ts-parser-perl = "2.0.0"
+# Groovy is the dekobon fork (https://github.com/dekobon/tree-sitter-groovy),
+# not the `tree-sitter-groovy` crate on crates.io: that one's published
+# package omits its highlights.scm entirely (see src/syntax/mod.rs), while
+# this fork bundles one that matches its own grammar.
+dekobon-tree-sitter-groovy = "0.3.0"
 unicode-segmentation = "1.13.3"
 unicode-width = "0.2.2"
 
