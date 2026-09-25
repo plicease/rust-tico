@@ -23,6 +23,7 @@ doesn't land in a Helix top-level scope fails
 | `groovy.scm` | The [dekobon fork of tree-sitter-groovy](https://github.com/dekobon/tree-sitter-groovy) (the `dekobon-tree-sitter-groovy` crate, not `tree-sitter-groovy` — that one's crates.io package omits its `highlights.scm`), commit `436a405`, `queries/groovy/highlights.scm`, unmodified | MIT (upstream dual-licenses MIT/Apache-2.0; used here under the MIT option) |
 | `tcl.scm` | [tree-sitter-grammars/tree-sitter-tcl](https://github.com/tree-sitter-grammars/tree-sitter-tcl) commit `850a72a`, `queries/tcl/highlights.scm`, with the stacked fallback captures dropped as noted in its header (the grammar is a git dependency, not a crate) | MIT |
 | `dockerfile.scm` | The `tree-sitter-containerfile` crate (v0.9.2, [wharflab/tree-sitter-containerfile](https://github.com/wharflab/tree-sitter-containerfile), a maintained fork of camdencheek's tree-sitter-dockerfile) `queries/highlights.scm`, unmodified | MIT |
+| `tt2.scm` | The [Template Toolkit Zed extension](https://github.com/RuvimSypa/template-toolkit-zed), commit `93854ef`, `languages/template-toolkit/highlights.scm`, unmodified (the grammar itself is vendored under `grammars/tree-sitter-template-toolkit/`) | MIT |
 | everything else | The corresponding `tree-sitter-<lang>` crate's `queries/highlights.scm`, unmodified except where noted in a file's header | That grammar's license (MIT for all current ones) |
 
 `diff.scm` is the one file here not under tico's MIT license. MPL-2.0 is a

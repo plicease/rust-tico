@@ -1058,6 +1058,41 @@ mod tests {
         );
     }
 
+    /// Template Toolkit highlights only its own `[% ... %]` directives;
+    /// whatever the template generates (VCL here) is left plain.
+    #[test]
+    fn tt2_highlights_directives_only() {
+        let src = "[%# header %]\nsub vcl_recv {\n[% FOREACH b IN backends.sort('name') -%]\n  set req.http.B = \"[% b.name | html %]\";\n[% END %]\n}\n";
+        let lang = languages::detect(Some(std::path::Path::new("default.vcl.tt")), src).unwrap();
+        assert_eq!(lang.name, "tt2");
+        let spans = highlight(src, lang);
+        let at = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| s.scope.name().to_string())
+                .next_back()
+        };
+        assert_eq!(at("[%# header %]").as_deref(), Some("comment"));
+        assert_eq!(at("FOREACH").as_deref(), Some("keyword"));
+        assert_eq!(at("IN").as_deref(), Some("keyword"));
+        assert_eq!(at("backends").as_deref(), Some("variable"));
+        assert_eq!(at("sort").as_deref(), Some("function.method"));
+        assert_eq!(at("'name'").as_deref(), Some("string"));
+        assert_eq!(at("END").as_deref(), Some("keyword"));
+        // Nothing in the VCL content is colored, not even things that
+        // would be keywords or strings in VCL.
+        let plain = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .all(|s| s.end <= start || s.start >= start + needle.len())
+        };
+        assert!(plain("sub vcl_recv {"));
+        assert!(plain("set req.http.B = \""));
+    }
+
     #[test]
     fn make_plain_rule_is_colored() {
         let src = "foo: bar baz.o\n\tcc -o foo bar\n\nall: foo\n";
@@ -2053,6 +2088,11 @@ mod tests {
                 "dockerfile",
                 "Dockerfile",
                 "# hi\nFROM alpine:3.20 AS base\nARG VERSION=1\nRUN echo $VERSION\nEXPOSE 80\n",
+            ),
+            (
+                "tt2",
+                "default.vcl.tt",
+                "sub vcl_recv {\n[% IF debug %]  set req.http.X = \"[% name %]\";\n[% END %]}\n",
             ),
             (
                 "properties",

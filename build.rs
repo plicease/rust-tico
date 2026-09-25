@@ -15,9 +15,9 @@
 //!
 //!    Example: `TICO_SYSCONFDIR=/usr/local/etc cargo build --release`
 //!
-//! 2. Compile the tree-sitter grammars vendored under `grammars/` (just
-//!    VCL so far; every other grammar comes from a crate that compiles
-//!    itself). See `grammars/tree-sitter-vcl/README.md`.
+//! 2. Compile the tree-sitter grammars vendored under `grammars/` (VCL
+//!    and Template Toolkit; every other grammar comes from a crate that
+//!    compiles itself). See the `README.md` in each grammar's directory.
 
 fn main() {
     let sysconfdir = std::env::var("TICO_SYSCONFDIR").unwrap_or_else(|_| "/etc".to_string());
@@ -32,4 +32,15 @@ fn main() {
         .warnings(false)
         .compile("tree-sitter-vcl");
     println!("cargo:rerun-if-changed=grammars/tree-sitter-vcl/src/parser.c");
+
+    let tt = std::path::Path::new("grammars/tree-sitter-template-toolkit/src");
+    cc::Build::new()
+        .std("c11")
+        .include(tt)
+        .file(tt.join("parser.c"))
+        .file(tt.join("scanner.c"))
+        .warnings(false)
+        .compile("tree-sitter-template-toolkit");
+    println!("cargo:rerun-if-changed=grammars/tree-sitter-template-toolkit/src/parser.c");
+    println!("cargo:rerun-if-changed=grammars/tree-sitter-template-toolkit/src/scanner.c");
 }

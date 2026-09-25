@@ -116,6 +116,17 @@ fn lang_vcl() -> tree_sitter::Language {
     VCL_LANGUAGE.into()
 }
 
+// Likewise Template Toolkit, from `grammars/tree-sitter-template-toolkit/`
+// (upstream ships no crate).
+unsafe extern "C" {
+    fn tree_sitter_template_toolkit() -> *const ();
+}
+const TT2_LANGUAGE: tree_sitter_language::LanguageFn =
+    unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_template_toolkit) };
+fn lang_tt2() -> tree_sitter::Language {
+    TT2_LANGUAGE.into()
+}
+
 const LANGUAGES: &[LanguageDef] = &[
     LanguageDef {
         name: "perl",
@@ -676,6 +687,21 @@ const LANGUAGES: &[LanguageDef] = &[
         linter: None,
         formatter: None,
         comment: "#",
+    },
+    LanguageDef {
+        // Only the `[% ... %]` directives are highlighted; the text between
+        // them stays plain whatever it is (HTML, VCL, config), since a
+        // template's output language isn't knowable from its name.
+        name: "tt2",
+        extensions: &["tt", "tt2", "tmpl"],
+        filenames: &[],
+        shebangs: &[],
+        modeline_aliases: &["tt", "tt2html", "template-toolkit"],
+        language: lang_tt2,
+        highlights_query: include_str!("queries/tt2.scm"),
+        linter: None,
+        formatter: None,
+        comment: "[%#|%]",
     },
     LanguageDef {
         name: "vcl",
