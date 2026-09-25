@@ -86,6 +86,7 @@ priority = "optional"
 assets = [
     ["target/release/tico", "usr/bin/", "755"],
     ["target/release/tcat", "usr/bin/", "755"],
+    ["target/release/ttee", "usr/bin/", "755"],
     ["README.md", "usr/share/doc/tico/README.md", "644"],
     ["LICENSE", "usr/share/doc/tico/LICENSE", "644"],
 ]

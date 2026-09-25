@@ -18,19 +18,7 @@ use clap::Parser;
 use std::collections::HashMap;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
-use tico::syntax::HighlightSpan;
-use tico::theme::{Style, Theme};
-
-/// The theme to paint one span's scope with: its own language's override,
-/// or the global theme -- exactly `Editor::theme_for`'s logic, without
-/// needing an `Editor` to hang it off of.
-fn theme_for<'a>(
-    theme: &'a Theme,
-    language_themes: &'a HashMap<String, Theme>,
-    language: &str,
-) -> &'a Theme {
-    language_themes.get(language).unwrap_or(theme)
-}
+use tico::theme::Theme;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -164,202 +152,16 @@ fn cat_one(
         (bytes, Some(path))
     };
 
-    let plain = !stdout_is_tty
-        || !options.syntax_highlighting
-        || bytes.len() as u64 > options.max_syntax_highlight_bytes;
-    if !plain && let Ok(text) = std::str::from_utf8(&bytes) {
-        let lang = tico::syntax::detect_with_override(path.as_deref(), text, syntax_override);
-        if let Some(lang) = lang {
-            let spans = tico::syntax::highlight(text, lang);
-            print_highlighted(out, text, &spans, theme, language_themes)?;
-            return Ok(());
-        }
+    if !stdout_is_tty {
+        return out.write_all(&bytes);
     }
-    out.write_all(&bytes)
-}
-
-/// Colorize `text` (a whole operand's contents) line by line -- bounding
-/// memory to one line's worth of per-byte style resolution at a time,
-/// rather than the whole file -- and write the original bytes verbatim in
-/// between (line terminators are never touched, matching `cat`).
-fn print_highlighted(
-    out: &mut impl Write,
-    text: &str,
-    spans: &[HighlightSpan],
-    theme: &Theme,
-    language_themes: &HashMap<String, Theme>,
-) -> io::Result<()> {
-    let bytes = text.as_bytes();
-    let mut line_start = 0usize;
-    while line_start < bytes.len() {
-        let nl = bytes[line_start..].iter().position(|&b| b == b'\n');
-        let line_end = nl.map_or(bytes.len(), |off| line_start + off);
-        print_line_highlighted(
-            out,
-            &text[line_start..line_end],
-            line_start,
-            spans,
-            theme,
-            language_themes,
-        )?;
-        match nl {
-            Some(_) => {
-                out.write_all(b"\n")?;
-                line_start = line_end + 1;
-            }
-            None => line_start = bytes.len(),
-        }
-    }
-    Ok(())
-}
-
-/// Resolve and print one line's worth of `spans` -- byte-indexed (not
-/// char-indexed, unlike `ui.rs`'s line-grid renderer), since `tcat` just
-/// streams contiguous byte ranges rather than laying out a fixed-width
-/// screen row. Later spans overwrite earlier ones where they overlap
-/// (innermost/most-specific wins), and each span's *own* language picks
-/// its theme -- not the operand's detected language -- so an injected
-/// heredoc body (Perl `<<SQL`, VCL `inline C`, ...) follows its own
-/// language's `[syntax]` override, exactly like the `tico` editor.
-fn print_line_highlighted(
-    out: &mut impl Write,
-    raw: &str,
-    line_start: usize,
-    spans: &[HighlightSpan],
-    theme: &Theme,
-    language_themes: &HashMap<String, Theme>,
-) -> io::Result<()> {
-    let line_end = line_start + raw.len();
-    let mut byte_styles: Vec<Option<Style>> = vec![None; raw.len()];
-    for span in spans {
-        if span.end <= line_start || span.start >= line_end {
-            continue;
-        }
-        let Some(style) = theme_for(theme, language_themes, span.language).style(span.scope) else {
-            continue;
-        };
-        let rel_start = span.start.max(line_start) - line_start;
-        let rel_end = span.end.min(line_end) - line_start;
-        for s in &mut byte_styles[rel_start..rel_end] {
-            *s = Some(style);
-        }
-    }
-
-    let len = raw.len();
-    let mut i = 0;
-    while i < len {
-        let style = byte_styles[i];
-        let mut j = i + 1;
-        while j < len && byte_styles[j] == style {
-            j += 1;
-        }
-        // Span boundaries are always at UTF-8 char boundaries (tree-sitter
-        // guarantees this), so every point where the style changes is one
-        // too -- this slice is safe.
-        tico::theme::print_styled(out, &raw[i..j], style)?;
-        i = j;
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tico::syntax::Scope;
-
-    fn span(start: usize, end: usize, scope_name: &str, language: &'static str) -> HighlightSpan {
-        HighlightSpan {
-            start,
-            end,
-            scope: Scope::intern(scope_name),
-            language,
-        }
-    }
-
-    #[test]
-    fn theme_for_falls_back_to_the_global_theme() {
-        let theme = Theme::builtin_default();
-        let language_themes = HashMap::new();
-        // Same underlying data either way (no override configured), but
-        // this confirms the lookup itself doesn't panic/misbehave when
-        // the map is empty.
-        assert!(std::ptr::eq(
-            theme_for(&theme, &language_themes, "perl"),
-            &theme
-        ));
-    }
-
-    #[test]
-    fn theme_for_prefers_a_configured_per_language_override() {
-        let theme = Theme::builtin_default();
-        let mut language_themes = HashMap::new();
-        language_themes.insert("perl".to_string(), Theme::builtin_default());
-        assert!(std::ptr::eq(
-            theme_for(&theme, &language_themes, "perl"),
-            language_themes.get("perl").unwrap()
-        ));
-        // An unconfigured language still falls back to the global theme.
-        assert!(std::ptr::eq(
-            theme_for(&theme, &language_themes, "c"),
-            &theme
-        ));
-    }
-
-    #[test]
-    fn print_highlighted_preserves_line_endings_and_untouched_gaps() {
-        let theme = Theme::builtin_default();
-        let language_themes = HashMap::new();
-        // "keyword" is styled by the built-in theme; the space and
-        // semicolon in between aren't covered by any span, so they must
-        // come through with no color codes at all.
-        let text = "fn x\nfn y\n";
-        let spans = vec![span(0, 2, "keyword", "rust"), span(5, 7, "keyword", "rust")];
-        let mut out = Vec::new();
-        print_highlighted(&mut out, text, &spans, &theme, &language_themes).unwrap();
-        let s = String::from_utf8(out).unwrap();
-        // Two identical lines, each with only "fn" colored -- confirms both
-        // per-line slicing and that line terminators pass through verbatim.
-        assert_eq!(s.matches('\n').count(), 2);
-        assert!(s.contains("fn"), "{s:?}");
-        assert!(
-            s.contains(" x\n"),
-            "the untouched tail must be plain: {s:?}"
-        );
-        assert!(
-            s.contains(" y\n"),
-            "the untouched tail must be plain: {s:?}"
-        );
-    }
-
-    #[test]
-    fn print_highlighted_lets_a_later_overlapping_span_win() {
-        let theme = Theme::builtin_default();
-        let language_themes = HashMap::new();
-        // "string" and "keyword" resolve to different styles in the
-        // built-in theme; the later, narrower span should win for the
-        // bytes it covers (innermost/most-specific-wins, matching the
-        // tico editor's own layering).
-        let text = "abc";
-        let spans = vec![span(0, 3, "string", "rust"), span(1, 2, "keyword", "rust")];
-        let mut out = Vec::new();
-        print_highlighted(&mut out, text, &spans, &theme, &language_themes).unwrap();
-        let s = String::from_utf8(out).unwrap();
-        // Three distinct styled/plain segments: "a" (string), "b"
-        // (keyword, overwrites string), "c" (string again).
-        let reset = "\x1b[0m";
-        assert_eq!(s.matches(reset).count(), 3, "{s:?}");
-    }
-
-    #[test]
-    fn print_highlighted_skips_a_scope_the_theme_says_nothing_about() {
-        let theme = Theme::builtin_default();
-        let language_themes = HashMap::new();
-        let text = "abc";
-        // Not a real Helix scope name the built-in theme resolves, so it
-        // must fall through to plain, uncolored output.
-        let spans = vec![span(0, 3, "totally.made.up.scope", "rust")];
-        let mut out = Vec::new();
-        print_highlighted(&mut out, text, &spans, &theme, &language_themes).unwrap();
-        assert_eq!(out, b"abc");
-    }
+    tico::theme::highlight_or_plain(
+        &bytes,
+        path.as_deref(),
+        options,
+        syntax_override,
+        theme,
+        language_themes,
+        out,
+    )
 }
