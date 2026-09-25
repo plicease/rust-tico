@@ -32,9 +32,14 @@
 //! without complaint) but have no effect, since tico's title/status bars,
 //! line numbers and selection follow nano's own `set titlecolor` & co.
 
-use crossterm::style::{Attribute, Color};
+use crossterm::queue;
+use crossterm::style::{
+    Attribute, Color, Print, SetAttribute, SetBackgroundColor, SetForegroundColor,
+    SetUnderlineColor,
+};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use crate::syntax::Scope;
@@ -216,6 +221,29 @@ impl Style {
             .map(|(_, a)| a)
             .chain(self.underline.map(UnderlineStyle::attribute))
     }
+}
+
+/// Print one run of text in a theme style (or plain, for `None`), resetting
+/// all attributes afterwards so nothing leaks into the next segment. Colors
+/// and underline color are commands; everything else is an attribute.
+/// Shared by tico's own buffer rendering and `tcat`'s standalone highlighter.
+pub fn print_styled(out: &mut impl Write, segment: &str, style: Option<Style>) -> io::Result<()> {
+    let Some(style) = style else {
+        return queue!(out, Print(segment));
+    };
+    if let Some(fg) = style.fg {
+        queue!(out, SetForegroundColor(fg))?;
+    }
+    if let Some(bg) = style.bg {
+        queue!(out, SetBackgroundColor(bg))?;
+    }
+    if let Some(uc) = style.underline_color {
+        queue!(out, SetUnderlineColor(uc))?;
+    }
+    for attr in style.attributes() {
+        queue!(out, SetAttribute(attr))?;
+    }
+    queue!(out, Print(segment), SetAttribute(Attribute::Reset))
 }
 
 /// A loaded theme: its scope table plus a memo of which style each
@@ -460,6 +488,57 @@ impl Loader {
         parts.push("built-in themes".into());
         parts.join(", ")
     }
+}
+
+/// Resolve the global theme and any per-language overrides from already-
+/// loaded config + CLI options, exactly as `tico`'s own startup does: a
+/// theme that fails to load falls back to the built-in default (for the
+/// global one) or is just dropped (for a per-language override), with a
+/// warning either way -- never a refusal to start. Shared by the `tico`
+/// and `tcat` binaries, so both pick a theme the same way.
+pub fn resolve_themes(
+    options: &crate::options::Options,
+    warnings: &mut Vec<String>,
+) -> (Theme, HashMap<String, Theme>) {
+    let loader = Loader::with_default_dirs();
+    let theme = match options.theme.as_deref() {
+        Some(name) => loader
+            .load(name, warnings)
+            .unwrap_or_else(Theme::builtin_default),
+        None => Theme::builtin_default(),
+    };
+    let mut language_themes = HashMap::new();
+    let mut loaded_themes: HashMap<&str, Option<Theme>> = HashMap::new();
+    for (lang, name) in &options.language_themes {
+        // Two languages sharing one theme parse it once; a theme that
+        // failed to load is only reported once, too.
+        let t = loaded_themes
+            .entry(name.as_str())
+            .or_insert_with(|| loader.load(name, warnings));
+        match t {
+            Some(t) => {
+                language_themes.insert(lang.clone(), t.clone());
+            }
+            None => {
+                language_themes.remove(lang);
+            }
+        }
+    }
+    (theme, language_themes)
+}
+
+/// Split a `--tico-theme` (or ticorc `[syntax]`) value of the form
+/// `LANG.NAME` into its parts, only when `LANG` is a known language name --
+/// so a theme path like `~/x.toml` or `./perl.toml`, whose first dot isn't
+/// a language, still reads as one whole name. (A bare `perl.toml` *is*
+/// taken as language `perl` + theme `toml`; write `./perl.toml` for the
+/// file.) Shared by tico's own CLI parsing and tcat's.
+pub fn split_language_theme(value: &str) -> Option<(&str, &str)> {
+    let (lang, name) = value.split_once('.')?;
+    if name.is_empty() || crate::syntax::find_by_name(&lang.to_ascii_lowercase()).is_none() {
+        return None;
+    }
+    Some((lang, name))
 }
 
 fn expand_tilde(p: &str) -> PathBuf {

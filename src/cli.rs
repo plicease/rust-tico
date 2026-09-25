@@ -430,7 +430,7 @@ impl Cli {
         // overrides from the file still apply on top of it); `LANG.NAME`
         // overrides just that language, replacing any `LANG.theme` line.
         for v in &self.tico_theme {
-            match split_language_theme(v) {
+            match crate::theme::split_language_theme(v) {
                 Some((lang, name)) => options
                     .language_themes
                     .push((lang.to_ascii_lowercase(), name.to_string())),
@@ -483,19 +483,6 @@ pub fn parse_file_args(files: &[String]) -> Vec<FileArg> {
         });
     }
     out
-}
-
-/// Split a `--tico-theme` value of the form `LANG.NAME` into its parts,
-/// only when `LANG` is a known language name -- so a theme path like
-/// `~/x.toml` or `./perl.toml`, whose first dot isn't a language, still
-/// reads as one whole name. (A bare `perl.toml` *is* taken as language
-/// `perl` + theme `toml`; write `./perl.toml` for the file.)
-fn split_language_theme(value: &str) -> Option<(&str, &str)> {
-    let (lang, name) = value.split_once('.')?;
-    if name.is_empty() || crate::syntax::find_by_name(&lang.to_ascii_lowercase()).is_none() {
-        return None;
-    }
-    Some((lang, name))
 }
 
 #[cfg(test)]

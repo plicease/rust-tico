@@ -15,8 +15,7 @@
 
 mod languages;
 
-pub use languages::{LanguageDef, detect};
-pub(crate) use languages::{find_by_name, names};
+pub use languages::{LanguageDef, detect, find_by_name, names};
 
 /// Resolve a buffer's language, honoring an optional `-Y`/`--syntax` CLI
 /// override (matching nano's `find_and_prime_applicable_syntax`): `"none"`

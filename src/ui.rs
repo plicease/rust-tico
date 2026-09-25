@@ -6,7 +6,7 @@
 use crate::app::{DiffOutcome, Editor, Mode, Prompt, PromptKind};
 use crate::buffer::Pos;
 use crate::keymap::{Action, Binding, Key as TKey, KeyMap, Menu};
-use crate::theme::Style;
+use crate::theme::{Style, print_styled};
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -14,7 +14,6 @@ use crossterm::event::{
 };
 use crossterm::style::{
     Attribute, Color, Print, SetAttribute, SetBackgroundColor, SetForegroundColor,
-    SetUnderlineColor,
 };
 use crossterm::terminal::{
     Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
@@ -3549,28 +3548,6 @@ fn render_buffer(
         }
     }
     Ok(())
-}
-
-/// Print one run of text in a theme style (or plain, for `None`), resetting
-/// all attributes afterwards so nothing leaks into the next segment. Colors
-/// and underline color are commands; everything else is an attribute.
-fn print_styled(out: &mut impl Write, segment: &str, style: Option<Style>) -> io::Result<()> {
-    let Some(style) = style else {
-        return queue!(out, Print(segment));
-    };
-    if let Some(fg) = style.fg {
-        queue!(out, SetForegroundColor(fg))?;
-    }
-    if let Some(bg) = style.bg {
-        queue!(out, SetBackgroundColor(bg))?;
-    }
-    if let Some(uc) = style.underline_color {
-        queue!(out, SetUnderlineColor(uc))?;
-    }
-    for attr in style.attributes() {
-        queue!(out, SetAttribute(attr))?;
-    }
-    queue!(out, Print(segment), SetAttribute(Attribute::Reset))
 }
 
 /// The "plain reverse video by default, `cp`'s own colors when configured"

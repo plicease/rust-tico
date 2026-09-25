@@ -1,20 +1,5 @@
-mod app;
-mod buffer;
-mod cli;
-mod config;
-mod fileio;
-mod help;
-mod history;
-mod justify;
-mod keymap;
-mod lockfile;
-mod options;
-mod syntax;
-mod theme;
-mod ui;
-mod watch;
-
 use clap::Parser;
+use tico::{app, buffer, cli, config, fileio, keymap, lockfile, options, syntax, theme, ui};
 
 fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
@@ -37,34 +22,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut warnings = loaded.warnings;
-    // A theme that can't be loaded falls back to the built-in default (or,
-    // for a per-language override, to the global theme) with a warning,
-    // like any other bad config item -- never a refusal to start.
-    let loader = theme::Loader::with_default_dirs();
-    let theme = match options.theme.as_deref() {
-        Some(name) => loader
-            .load(name, &mut warnings)
-            .unwrap_or_else(theme::Theme::builtin_default),
-        None => theme::Theme::builtin_default(),
-    };
-    let mut language_themes = std::collections::HashMap::new();
-    let mut loaded_themes: std::collections::HashMap<&str, Option<theme::Theme>> =
-        std::collections::HashMap::new();
-    for (lang, name) in &options.language_themes {
-        // Two languages sharing one theme parse it once; a theme that
-        // failed to load is only reported once, too.
-        let t = loaded_themes
-            .entry(name.as_str())
-            .or_insert_with(|| loader.load(name, &mut warnings));
-        match t {
-            Some(t) => {
-                language_themes.insert(lang.clone(), t.clone());
-            }
-            None => {
-                language_themes.remove(lang);
-            }
-        }
-    }
+    let (theme, language_themes) = theme::resolve_themes(&options, &mut warnings);
     for w in &warnings {
         eprintln!("tico: {w}");
     }
