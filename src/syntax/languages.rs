@@ -105,6 +105,7 @@ lang_fn!(lang_tcl, tree_sitter_tcl);
 lang_fn!(lang_dockerfile, tree_sitter_containerfile);
 lang_fn!(lang_powershell, tree_sitter_powershell);
 lang_fn!(lang_batch, tree_sitter_batch);
+lang_fn!(lang_hcl, tree_sitter_hcl);
 
 // The VCL grammar is not a crate: build.rs compiles it from
 // `grammars/tree-sitter-vcl/` (a fork of ntsk/tree-sitter-vcl extended for
@@ -755,6 +756,20 @@ const LANGUAGES: &[LanguageDef] = &[
         linter: None,
         formatter: None,
         comment: "//",
+    },
+    LanguageDef {
+        // Terraform (.tf/.tfvars) and Nomad job files are HCL; upstream's
+        // "terraform" dialect is the same grammar under another name.
+        name: "hcl",
+        extensions: &["hcl", "tf", "tfvars", "nomad"],
+        filenames: &[],
+        shebangs: &[],
+        modeline_aliases: &["terraform", "tf", "tfvars"],
+        language: lang_hcl,
+        highlights_query: include_str!("queries/hcl.scm"),
+        linter: None,
+        formatter: None,
+        comment: "#",
     },
     LanguageDef {
         name: "vcl",

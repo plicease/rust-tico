@@ -26,9 +26,10 @@ doesn't land in a Helix top-level scope fails
 | `tt2.scm` | The [Template Toolkit Zed extension](https://github.com/RuvimSypa/template-toolkit-zed), commit `93854ef`, `languages/template-toolkit/highlights.scm`, unmodified (the grammar itself is vendored under `grammars/tree-sitter-template-toolkit/`) | MIT |
 | `batch.scm` | The `tree-sitter-batch` crate (v0.11.1, [wharflab/tree-sitter-batch](https://github.com/wharflab/tree-sitter-batch)) `queries/highlights.scm`, with two patterns reordered as noted in its header | MIT |
 | `cue.scm` | [eonpatapon/tree-sitter-cue](https://github.com/eonpatapon/tree-sitter-cue) commit `dd7b90e`, `queries/highlights.scm`, with two patterns moved earlier as noted in its header (the grammar itself is vendored under `grammars/tree-sitter-cue/`) | MIT |
+| `hcl.scm` | [Helix](https://github.com/helix-editor/helix) `runtime/queries/hcl/highlights.scm`, commit `90b126d` (the `tree-sitter-hcl` crate ships no query) | **MPL-2.0** — see `LICENSE-MPL-2.0` in the repository root |
 | everything else | The corresponding `tree-sitter-<lang>` crate's `queries/highlights.scm`, unmodified except where noted in a file's header | That grammar's license (MIT for all current ones) |
 
-`diff.scm` is the one file here not under tico's MIT license. MPL-2.0 is a
-file-scoped copyleft: the file itself must stay under MPL-2.0 and carry its
-notice (it does, in its header comment), but that has no effect on the
-license of the rest of tico.
+`diff.scm` and `hcl.scm` are the only files here not under tico's MIT
+license. MPL-2.0 is a file-scoped copyleft: each file must stay under
+MPL-2.0 and carry its notice (both do, in their header comments), but
+that has no effect on the license of the rest of tico.

@@ -1224,6 +1224,58 @@ mod tests {
     }
 
     #[test]
+    fn hcl_terraform_highlights() {
+        let src = "# note\nvariable \"name\" {\n  type    = string\n  default = null\n}\nresource \"aws_instance\" \"web\" {\n  ami   = var.ami\n  count = 2\n  tags  = { Name = \"web-${count.index}\" }\n  ids   = [for s in local.subnets : s.id if s.public]\n  size  = max(1, 2)\n  user_data = <<-EOT\n    hello\n  EOT\n}\n";
+        let lang = languages::detect(Some(std::path::Path::new("main.tf")), src).unwrap();
+        assert_eq!(lang.name, "hcl");
+        for path in ["a.hcl", "terraform.tfvars", "job.nomad"] {
+            assert_eq!(
+                languages::detect(Some(std::path::Path::new(path)), "")
+                    .unwrap()
+                    .name,
+                "hcl"
+            );
+        }
+        let spans = highlight(src, lang);
+        let at = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| s.scope.name().to_string())
+                .next_back()
+        };
+        let at_start_of = |context: &str, len: usize| {
+            let start = src.find(context).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + len)
+                .map(|s| s.scope.name().to_string())
+                .next_back()
+        };
+        assert_eq!(at("# note").as_deref(), Some("comment"));
+        assert_eq!(at("variable").as_deref(), Some("type.builtin"));
+        assert_eq!(at("resource").as_deref(), Some("type.builtin"));
+        assert_eq!(at("aws_instance").as_deref(), Some("string"));
+        assert_eq!(at("string").as_deref(), Some("type.builtin"));
+        assert_eq!(at("null").as_deref(), Some("constant.builtin"));
+        assert_eq!(at("ami").as_deref(), Some("variable.other.member"));
+        assert_eq!(
+            at_start_of("var.ami", 3).as_deref(),
+            Some("variable.builtin")
+        );
+        assert_eq!(at("2").as_deref(), Some("constant.numeric"));
+        assert_eq!(at("${").as_deref(), Some("punctuation.special"));
+        assert_eq!(at("index").as_deref(), Some("variable.other.member"));
+        assert_eq!(at("for").as_deref(), Some("keyword.control.repeat"));
+        assert_eq!(at("local").as_deref(), Some("variable.builtin"));
+        assert_eq!(at("if").as_deref(), Some("keyword.control.conditional"));
+        assert_eq!(at("max").as_deref(), Some("function.method"));
+        assert_eq!(at("<<-").as_deref(), Some("punctuation.delimiter"));
+        assert_eq!(at("hello").as_deref(), Some("string"));
+    }
+
+    #[test]
     fn make_plain_rule_is_colored() {
         let src = "foo: bar baz.o\n\tcc -o foo bar\n\nall: foo\n";
         let lang = languages::detect(Some(std::path::Path::new("Makefile")), src).unwrap();
@@ -2234,6 +2286,11 @@ mod tests {
                 "cue",
                 "a.cue",
                 "package p\n// hi\n#S: { name: string, n: int | *1 }\nx: #S & { name: \"a\" }\n",
+            ),
+            (
+                "hcl",
+                "main.tf",
+                "# hi\nresource \"aws_instance\" \"web\" {\n  ami = var.ami\n  count = 2\n}\n",
             ),
             (
                 "properties",
