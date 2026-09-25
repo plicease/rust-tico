@@ -3,7 +3,9 @@
 //! config file (`~/.ticorc`), same theme resolution, same language
 //! detection (filename extension -> shebang -> modeline) as the `tico`
 //! editor itself. Piped/redirected output is byte-identical to plain
-//! `cat`, so `tcat` is safe to use anywhere `cat` is.
+//! `cat`, so `tcat` is safe to use anywhere `cat` is. `--color=always`
+//! overrides that terminal check (for `tcat --color=always foo.c | less
+//! -R`), `--color=never` disables highlighting -- GNU `ls`/`grep` style.
 //!
 //! Per operand, not per run: `tcat foo.pl foo.c` highlights each in its own
 //! language. `-Y`/`--syntax NAME` overrides detection for every operand at
@@ -18,7 +20,7 @@ use clap::Parser;
 use std::collections::HashMap;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
-use tico::theme::Theme;
+use tico::theme::{ColorWhen, Theme};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -61,6 +63,18 @@ struct Cli {
         help = "Don't look at nanorc/ticorc files"
     )]
     ignorercfiles: bool,
+    #[arg(
+        long = "color",
+        value_name = "WHEN",
+        value_enum,
+        default_value_t = ColorWhen::Auto,
+        default_missing_value = "always",
+        num_args = 0..=1,
+        require_equals = true,
+        help = "When to colorize: auto (only if stdout is a terminal), always, or never. \
+                A bare --color means always."
+    )]
+    color: ColorWhen,
     /// Files to print. `-`, or no operands at all, means standard input.
     #[arg(trailing_var_arg = true)]
     files: Vec<String>,
@@ -89,7 +103,7 @@ fn main() {
         eprintln!("tcat: {w}");
     }
 
-    let stdout_is_tty = io::stdout().is_terminal();
+    let colorize = cli.color.colorize(io::stdout().is_terminal());
     let syntax_override = options.syntax_name.as_deref();
     let operands: &[String] = if cli.files.is_empty() {
         &["-".to_string()]
@@ -103,7 +117,7 @@ fn main() {
         if let Err(e) = cat_one(
             operand,
             &options,
-            stdout_is_tty,
+            colorize,
             syntax_override,
             &theme,
             &language_themes,
@@ -130,13 +144,14 @@ fn main() {
 /// Print one operand (`-` for standard input, else a filename), matching
 /// `cat`'s own byte-for-byte passthrough -- no line-ending or whitespace
 /// transformation -- plus tico's own syntax coloring, layered on top only
-/// when it's safe and meaningful: stdout is a terminal, `syntax_highlighting`
-/// is on, the content is valid UTF-8, it's under the configured size limit,
-/// and a language was actually detected (or forced).
+/// when it's safe and meaningful: `colorize` (stdout is a terminal, or
+/// `--color=always`), `syntax_highlighting` is on, the content is valid
+/// UTF-8, it's under the configured size limit, and a language was
+/// actually detected (or forced).
 fn cat_one(
     operand: &str,
     options: &tico::options::Options,
-    stdout_is_tty: bool,
+    colorize: bool,
     syntax_override: Option<&str>,
     theme: &Theme,
     language_themes: &HashMap<String, Theme>,
@@ -152,7 +167,7 @@ fn cat_one(
         (bytes, Some(path))
     };
 
-    if !stdout_is_tty {
+    if !colorize {
         return out.write_all(&bytes);
     }
     tico::theme::highlight_or_plain(

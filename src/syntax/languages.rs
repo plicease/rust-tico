@@ -51,7 +51,7 @@ macro_rules! lang_fn_old_api {
     };
 }
 
-lang_fn!(lang_perl, tree_sitter_perl);
+lang_fn!(lang_perl, ts_parser_perl);
 lang_fn!(lang_c, tree_sitter_c);
 lang_fn!(lang_cpp, tree_sitter_cpp);
 lang_fn!(lang_html, tree_sitter_html);

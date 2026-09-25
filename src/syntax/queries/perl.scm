@@ -1,54 +1,180 @@
-; Hand-written for tico: tree-sitter-perl (crates.io) does not bundle a
-; highlights.scm (unlike most other grammars used here, which are vendored
-; from their own crates' queries/highlights.scm). Node names taken from
-; that crate's src/node-types.json.
+; Vendored from the ts-parser-perl crate (v2.0.0, the tree-sitter-perl org's
+; grammar), queries/highlights.scm, MIT. Changes for tico:
+;   - the shebang pattern uses `#match?` (which tree-sitter's Rust bindings
+;     evaluate) instead of nvim's `#lua-match?` (which they don't, so every
+;     leading comment would have been a directive);
+;   - POD is `@comment.block.documentation` (as in Helix's own Perl query)
+;     rather than `@text`, which no theme colors as such;
+;   - `__FILE__`, `__LINE__`, `__PACKAGE__` and `__SUB__` are
+;     `@constant.builtin`: they stand for a compile-time value, not a call.
 
-(comments) @comment
+((source_file . (comment) @preproc)
+  (#match? @preproc "^#!"))
 
-(string_double_quoted) @string
-(string_single_quoted) @string
-(string_q_quoted) @string
-(string_qq_quoted) @string
-(word_list_qw) @string
-(command_qx_quoted) @string
-(heredoc_body_statement) @string
-(heredoc_start_identifier) @string
-(heredoc_end_identifier) @string
+[ "use" "no" "require" ] @include
 
-; `__DATA__`/`__END__` open a data section (highlighted by tico's own
-; `inject_data_sections`, part by part, when it is laid out as `@@ name`
-; parts); the others stand for a compile-time value.
-(special_literal ["__DATA__" "__END__"] @keyword.directive)
-(special_literal ["__FILE__" "__LINE__" "__PACKAGE__" "__SUB__"] @constant.builtin)
+[ "if" "elsif" "unless" "else" ] @conditional
 
-(regex_pattern_qr) @string.special
-(pattern_matcher_m) @string.special
-(regex_pattern_content) @string.special
-(substitution_pattern_s) @string.special
-(transliteration_tr_or_y) @string.special
+(conditional_expression [ "?" ":" ] @conditional.ternary)
 
-(scalar_variable) @variable
-(array_variable) @variable
-(hash_variable) @variable
-(package_variable) @variable
-(special_scalar_variable) @variable.builtin
-(standard_input_to_variable) @variable.builtin
+[ "while" "until" "for" "foreach" ] @repeat
+("continue" @repeat (block))
 
-(function_definition name: (identifier) @function)
-(function_definition_without_sub name: (identifier) @function)
-(call_expression_with_bareword function_name: (identifier) @function)
-(call_expression_with_bareword package_name: (package_name) @module)
+[ "try" "catch" "finally" ] @exception
 
-(package_name) @module
+"return" @keyword.return
+
+[ "sub" "method" "async" "extended" ] @keyword.function
+
+[ "map" "grep" "sort" ] @function.builtin
+
+[ "package" "class" "role" ] @include
 
 [
-  "if" "elsif" "else" "unless"
-  "while" "until" "for" "foreach" "continue"
-  "sub" "return" "func" "method"
-  "my" "our" "local" "state"
-  "use" "no" "require" "package" "import" "parent" "feature" "constant" "prototype" "subs" "isa"
+  "defer"
+  "do" "eval"
+  "my" "our" "local" "dynamically" "state" "field"
   "last" "next" "redo" "goto"
-  "and" "or" "not" "xor" "eq" "ne" "lt" "gt" "le" "ge" "cmp"
-  "BEGIN" "END" "INIT" "CHECK" "UNITCHECK"
-  "bless" "when"
+  "undef" "await"
 ] @keyword
+
+(yadayada) @exception
+
+(phaser_statement phase: _ @keyword.phaser)
+(class_phaser_statement phase: _ @keyword.phaser)
+
+
+
+(_ operator: _ @operator)
+"\\" @operator
+
+[
+  "or" "xor" "and" "not"
+  "eq" "ne" "cmp" "lt" "le" "ge" "gt"
+  "isa"
+] @keyword.operator
+
+(eof_marker) @preproc
+(data_section) @comment
+
+(pod) @comment.block.documentation
+
+[
+  (number)
+  (version)
+] @number
+
+[
+  (string_literal)
+  (interpolated_string_literal)
+  (quoted_word_list)
+  (command_string)
+  (heredoc_content)
+  (replacement)
+  (transliteration_content)
+] @string
+
+[
+  (heredoc_token)
+  (command_heredoc_token)
+  (heredoc_end)
+] @label
+
+[(escape_sequence) (escaped_delimiter)] @string.escape
+
+(_ modifiers: _ @character.special)
+[
+ (quoted_regexp)
+ (match_regexp)
+ (regexp_content)
+] @string.regex
+
+(autoquoted_bareword) @string.special
+
+(use_statement (package) @type)
+(package_statement (package) @type)
+(class_statement (package) @type)
+(require_expression (bareword) @type)
+
+(subroutine_declaration_statement name: (bareword) @function)
+(method_declaration_statement name: (bareword) @method)
+(attribute_name) @attribute
+(attribute_value) @string
+
+(label) @label
+
+(statement_label label: _ @label)
+
+(relational_expression operator: "isa" right: (bareword) @type)
+
+(function) @function
+
+(function_call_expression (function) @function.call)
+(method_call_expression (method) @method.call)
+(method_call_expression invocant: (bareword) @type)
+
+(func0op_call_expression function: _ @function.builtin)
+(func1op_call_expression function: _ @function.builtin)
+
+([(function)(expression_statement (bareword))] @function.builtin
+ (#match? @function.builtin
+   "^(accept|atan2|bind|binmode|bless|crypt|chmod|chown|connect|die|dbmopen|exec|fcntl|flock|getpriority|getprotobynumber|gethostbyaddr|getnetbyaddr|getservbyname|getservbyport|getsockopt|glob|index|ioctl|join|kill|link|listen|mkdir|msgctl|msgget|msgrcv|msgsend|opendir|print|printf|push|pack|pipe|return|rename|rindex|read|recv|reverse|say|select|seek|semctl|semget|semop|send|setpgrp|setpriority|seekdir|setsockopt|shmctl|shmread|shmwrite|shutdown|socket|socketpair|split|sprintf|splice|substr|system|symlink|syscall|sysopen|sysseek|sysread|syswrite|tie|truncate|unlink|unpack|utime|unshift|vec|warn|waitpid|formline|open|sort)$"
+))
+
+(ERROR) @error
+
+(
+  [(varname) (filehandle)] @variable.builtin
+  (#match? @variable.builtin "^((ENV|ARGV|INC|ARGVOUT|SIG|STDIN|STDOUT|STDERR)|[_ab]|\\W|\\d+|\\^.*)$")
+)
+(filehandle (varname)) @variable
+
+[(array) (arraylen)] @variable.array
+(glob) @variable.builtin
+(scalar) @variable.scalar
+(hash) @variable.hash
+(amper_deref_expression [ "&" "*" ] @function.call)
+
+(glob_deref_expression "*" @variable.builtin)
+(glob_slot_expression "*" @variable.builtin)
+(scalar_deref_expression [ "$" "*"] @variable.scalar)
+
+; gotta be SUPER GENERIC so we can hit up string interp
+(_
+  [
+   array: (_) @variable.array
+   hash: (_) @variable.hash
+  ])
+(array_deref_expression [ "@" "*"] @variable.array)
+(arraylen_deref_expression [ "$#" "*"] @variable.array)
+(hash_deref_expression [ "%" "*"] @variable.hash)
+(array_element_expression array:(_) @variable.array)
+(slice_expression array:(_) @variable.array)
+
+
+
+(comment) @comment
+
+([ "=>" "," ";" "->" ] @punctuation.delimiter)
+
+(
+  [ "[" "]" "{" "}" "(" ")" ] @punctuation.bracket
+)
+
+(_
+  "{" @punctuation.special
+  (varname)
+  "}" @punctuation.special)
+
+(varname
+  (block
+    "{" @punctuation.special
+    "}" @punctuation.special))
+
+((_
+    (autoquoted_bareword)
+    (bareword) @constant)
+)
+
+(func0op_call_expression
+  function: [ "__FILE__" "__LINE__" "__PACKAGE__" "__SUB__" ] @constant.builtin)

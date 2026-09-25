@@ -17,7 +17,7 @@ doesn't land in a Helix top-level scope fails
 
 | File | Source | License |
 |---|---|---|
-| `perl.scm` | Hand-written for tico | MIT (tico's own) |
+| `perl.scm` | The `ts-parser-perl` crate (v2.0.0, [tree-sitter-perl/tree-sitter-perl](https://github.com/tree-sitter-perl/tree-sitter-perl)) `queries/highlights.scm`, with the changes noted in its header | MIT |
 | `diff.scm` | [Helix](https://github.com/helix-editor/helix) `runtime/queries/diff/highlights.scm`, commit `737ab17` | **MPL-2.0** — see `LICENSE-MPL-2.0` in the repository root |
 | `vcl.scm` | Started from [ntsk/tree-sitter-vcl](https://github.com/ntsk/tree-sitter-vcl) v0.4.1 `queries/highlights.scm`, extended for the Fastly constructs in tico's fork of the grammar (`grammars/tree-sitter-vcl/`) | MIT (upstream's and tico's) |
 | everything else | The corresponding `tree-sitter-<lang>` crate's `queries/highlights.scm`, unmodified except where noted in a file's header | That grammar's license (MIT for all current ones) |
