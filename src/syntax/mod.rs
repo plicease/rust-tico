@@ -1710,6 +1710,12 @@ mod tests {
             ("src/Makefile.inc", "make"),
             ("makefile.unix", "make"),
             ("GNUmakefile.local", "make"),
+            ("app.properties", "properties"),
+            ("org.eclipse.core.prefs", "properties"),
+            ("log4perl.conf", "properties"),
+            ("log4perl.debug.conf", "properties"),
+            ("etc/log4perl.prod.conf", "properties"),
+            ("log4j.properties", "properties"),
         ];
         for (path, expected) in cases {
             let lang = detect(Some(std::path::Path::new(path)), "")
@@ -1726,6 +1732,9 @@ mod tests {
             "MyMakefile.in",
             "cpanfile.snapshot",
             "dir/cpanfile.snapshot",
+            "log4perl.conf.bak",
+            "mylog4perl.x.conf",
+            "log4perlconf",
         ] {
             assert!(
                 detect(Some(std::path::Path::new(path)), "").is_none(),
@@ -1828,6 +1837,11 @@ mod tests {
                 "groovy",
                 "a.groovy",
                 "class Foo {\n    def bar() { return 1 } // hi\n}\n",
+            ),
+            (
+                "properties",
+                "log4perl.conf",
+                "# hi\nlog4perl.rootLogger=INFO, Screen\nlog4perl.appender.Screen.layout.ConversionPattern=[%5p] %m%n\n",
             ),
         ];
         for (name, path, source) in cases {

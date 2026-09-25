@@ -9,11 +9,12 @@ use std::path::Path;
 pub struct LanguageDef {
     pub name: &'static str,
     pub extensions: &'static [&'static str],
-    /// Exact basenames (`Makefile`, `cpanfile`), plus `NAME.*` entries
-    /// that match any basename starting with `NAME.` (`Makefile.in`,
-    /// `cpanfile.dev`). A `NAME.*` entry is consulted only after the
-    /// extension table, so `Makefile.PL` stays Perl rather than makefile;
-    /// see `FILENAME_EXCEPTIONS` for basenames carved out of a pattern.
+    /// Exact basenames (`Makefile`, `cpanfile`), plus glob-style entries
+    /// with a single `*` standing for any run of characters: `Makefile.*`
+    /// matches `Makefile.in`, `log4perl.*.conf` matches `log4perl.debug.conf`.
+    /// Glob entries are consulted only after the extension table, so
+    /// `Makefile.PL` stays Perl rather than makefile; see
+    /// `FILENAME_EXCEPTIONS` for basenames carved out of a glob.
     pub filenames: &'static [&'static str],
     pub shebangs: &'static [&'static str],
     /// Extra names recognized in a modeline besides `name` itself.
@@ -98,6 +99,7 @@ lang_fn_old_api!(lang_vim, tree_sitter_vim);
 lang_fn!(lang_lua, tree_sitter_lua);
 lang_fn!(lang_markdown, tree_sitter_md);
 lang_fn!(lang_groovy, dekobon_tree_sitter_groovy);
+lang_fn!(lang_properties, tree_sitter_properties);
 
 // The VCL grammar is not a crate: build.rs compiles it from
 // `grammars/tree-sitter-vcl/` (a fork of ntsk/tree-sitter-vcl extended for
@@ -624,6 +626,18 @@ const LANGUAGES: &[LanguageDef] = &[
         comment: "//",
     },
     LanguageDef {
+        name: "properties",
+        extensions: &["properties", "prefs"],
+        filenames: &["log4perl.conf", "log4perl.*.conf", "log4j.properties"],
+        shebangs: &[],
+        modeline_aliases: &["jproperties"],
+        language: lang_properties,
+        highlights_query: include_str!("queries/properties.scm"),
+        linter: None,
+        formatter: None,
+        comment: "#",
+    },
+    LanguageDef {
         name: "vcl",
         extensions: &["vcl"],
         filenames: &[],
@@ -680,16 +694,27 @@ fn detect_by_filename(path: &Path) -> Option<&'static LanguageDef> {
     {
         return Some(lang);
     }
-    // `NAME.*` patterns last, so a recognized extension wins over the
-    // family name: `Makefile.PL` is Perl, `Makefile.in` is a makefile.
+    // Glob patterns last, so a recognized extension wins over the family
+    // name: `Makefile.PL` is Perl, `Makefile.in` is a makefile.
     let filename = filename?;
     LANGUAGES.iter().find(|lang| {
-        lang.filenames.iter().any(|pattern| {
-            pattern
-                .strip_suffix('*')
-                .is_some_and(|prefix| prefix.ends_with('.') && filename.starts_with(prefix))
-        })
+        lang.filenames
+            .iter()
+            .any(|pattern| glob_matches(pattern, filename))
     })
+}
+
+/// Match a `filenames` entry containing one `*` against a basename: the
+/// text before the star must be a prefix and the text after it a suffix,
+/// without overlapping. An entry with no `*` never matches here (exact
+/// names are handled separately).
+fn glob_matches(pattern: &str, filename: &str) -> bool {
+    let Some((prefix, suffix)) = pattern.split_once('*') else {
+        return false;
+    };
+    filename.len() >= prefix.len() + suffix.len()
+        && filename.starts_with(prefix)
+        && filename.ends_with(suffix)
 }
 
 /// Parse a shebang line, following `env` indirection (e.g.
