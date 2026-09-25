@@ -714,6 +714,11 @@ fn normalize_capture(raw: &str) -> Option<String> {
     let exact = match name {
         "spell" | "nospell" | "none" | "error" | "embedded" | "clean" | "text.note"
         | "text.warning" | "text.danger" => return None,
+        // tree-sitter-powershell captures a whole array literal and a whole
+        // assignment's right-hand side under these; neither has a Helix
+        // scope, and painting a region that size one color would hide the
+        // real tokens inside it.
+        "array" | "assignvalue" => return None,
         "number" => "constant.numeric",
         "number.float" | "float" => "constant.numeric.float",
         "boolean" => "constant.builtin.boolean",
@@ -1091,6 +1096,86 @@ mod tests {
         };
         assert!(plain("sub vcl_recv {"));
         assert!(plain("set req.http.B = \""));
+    }
+
+    #[test]
+    fn powershell_highlights() {
+        let src = "# note\nfunction Get-Thing {\n    param([string]$Name)\n    $x = @(1, 2)\n    if ($Name -eq 'a') { Write-Host \"hi $Name\" }\n    return $x.Count\n}\n";
+        let lang = languages::detect(Some(std::path::Path::new("a.ps1")), src).unwrap();
+        assert_eq!(lang.name, "powershell");
+        let spans = highlight(src, lang);
+        let at = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| s.scope.name().to_string())
+                .next_back()
+        };
+        assert_eq!(at("# note").as_deref(), Some("comment"));
+        assert_eq!(at("function").as_deref(), Some("keyword"));
+        assert_eq!(at("Get-Thing").as_deref(), Some("function"));
+        assert_eq!(at("string").as_deref(), Some("type"));
+        assert_eq!(at("$Name").as_deref(), Some("variable"));
+        assert_eq!(at("-eq").as_deref(), Some("operator"));
+        assert_eq!(at("'a'").as_deref(), Some("string"));
+        assert_eq!(at("Write-Host").as_deref(), Some("function"));
+        assert_eq!(at("Count").as_deref(), Some("variable.other.member"));
+        // The query's `@array` / `@assignvalue` captures are dropped rather
+        // than painted: the array literal and the assignment's right-hand
+        // side get no span of their own, only their inner tokens do.
+        assert!(!spans.iter().any(|s| &src[s.start..s.end] == "@(1, 2)"));
+        assert_eq!(at("1").as_deref(), Some("constant.numeric"));
+    }
+
+    #[test]
+    fn batch_highlights() {
+        let src = "@echo off\nREM note\n:: also\nset NAME=world\nif \"%NAME%\"==\"world\" (\n  echo Hello %NAME% %ERRORLEVEL%\n)\nfor %%f in (*.txt) do call :sub %%f\n:sub\necho %1 > out.txt\n";
+        let lang = languages::detect(Some(std::path::Path::new("a.bat")), src).unwrap();
+        assert_eq!(lang.name, "batch");
+        for path in ["a.cmd", "a.BAT", "a.btm"] {
+            assert_eq!(
+                languages::detect(Some(std::path::Path::new(path)), "")
+                    .unwrap()
+                    .name,
+                "batch"
+            );
+        }
+        let spans = highlight(src, lang);
+        let at = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| s.scope.name().to_string())
+                .next_back()
+        };
+        // Like `at`, but locates the token by a longer unique context and
+        // takes the span covering its first `len` bytes.
+        let at_start_of = |context: &str, len: usize| {
+            let start = src.find(context).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + len)
+                .map(|s| s.scope.name().to_string())
+                .next_back()
+        };
+        assert_eq!(at("@echo off").as_deref(), Some("keyword"));
+        assert_eq!(at("REM note").as_deref(), Some("comment"));
+        assert_eq!(at(":: also").as_deref(), Some("comment"));
+        assert_eq!(at("set").as_deref(), Some("keyword"));
+        assert_eq!(at("NAME").as_deref(), Some("variable"));
+        assert_eq!(at("==").as_deref(), Some("operator"));
+        assert_eq!(at_start_of("echo Hello", 4).as_deref(), Some("function"));
+        assert_eq!(
+            at_start_of("%NAME% %ERRORLEVEL%", 6).as_deref(),
+            Some("variable")
+        );
+        // The reordered builtin pattern wins over the generic one.
+        assert_eq!(at("%ERRORLEVEL%").as_deref(), Some("variable.builtin"));
+        assert_eq!(at("%%f").as_deref(), Some("variable.parameter"));
+        assert_eq!(at_start_of(":sub\necho", 4).as_deref(), Some("label"));
+        assert_eq!(at("out.txt").as_deref(), Some("string.special"));
     }
 
     #[test]
@@ -2094,6 +2179,12 @@ mod tests {
                 "default.vcl.tt",
                 "sub vcl_recv {\n[% IF debug %]  set req.http.X = \"[% name %]\";\n[% END %]}\n",
             ),
+            (
+                "powershell",
+                "a.ps1",
+                "# hi\nfunction Foo { param($x) Write-Output $x }\n",
+            ),
+            ("batch", "a.cmd", "@echo off\nREM hi\nset X=1\necho %X%\n"),
             (
                 "properties",
                 "log4perl.conf",

@@ -103,6 +103,8 @@ lang_fn!(lang_groovy, dekobon_tree_sitter_groovy);
 lang_fn!(lang_properties, tree_sitter_properties);
 lang_fn!(lang_tcl, tree_sitter_tcl);
 lang_fn!(lang_dockerfile, tree_sitter_containerfile);
+lang_fn!(lang_powershell, tree_sitter_powershell);
+lang_fn!(lang_batch, tree_sitter_batch);
 
 // The VCL grammar is not a crate: build.rs compiles it from
 // `grammars/tree-sitter-vcl/` (a fork of ntsk/tree-sitter-vcl extended for
@@ -702,6 +704,34 @@ const LANGUAGES: &[LanguageDef] = &[
         linter: None,
         formatter: None,
         comment: "[%#|%]",
+    },
+    LanguageDef {
+        name: "powershell",
+        extensions: &["ps1", "psm1", "psd1", "pscc", "psrc"],
+        filenames: &[],
+        shebangs: &["pwsh", "powershell"],
+        modeline_aliases: &["ps1", "pwsh"],
+        language: lang_powershell,
+        highlights_query: include_str!("queries/powershell.scm"),
+        linter: None,
+        formatter: None,
+        comment: "#",
+    },
+    LanguageDef {
+        // `.btm` is JP Software's (4DOS/4NT/Take Command) extended batch;
+        // the core syntax is CMD's, so it gets the same grammar, as in
+        // Helix. `REM ` rather than `::` for M-3: `::` is a label trick
+        // that misbehaves inside parenthesized blocks.
+        name: "batch",
+        extensions: &["bat", "cmd", "btm"],
+        filenames: &[],
+        shebangs: &[],
+        modeline_aliases: &["dosbatch", "bat", "cmd"],
+        language: lang_batch,
+        highlights_query: include_str!("queries/batch.scm"),
+        linter: None,
+        formatter: None,
+        comment: "REM ",
     },
     LanguageDef {
         name: "vcl",
