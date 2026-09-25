@@ -27,7 +27,6 @@ here.
 
 - [ ] Verbatim input (`M-V`)
 - [ ] Center (`^L`) / Cycle (`M-%`)
-- [ ] Scroll left / right (`M-<` / `M->`)
 - [ ] The other `M-` toggles (`M-S` soft wrap, `M-N` line numbers, `M-X`
       help lines, ...) flip their option but don't show nano's
       "<Feature> enabled/disabled" message; only `M-P` whitespace display
@@ -43,9 +42,7 @@ here.
 - [ ] `softwrap` — toggle flips the flag, nothing wraps
 - [ ] `constantshow`
 - [ ] `matchbrackets`
-- [ ] `indicator` (scrollbar)
 - [ ] `stateflags`
-- [ ] `guidestripe`
 - [ ] `showcursor`
 - [ ] `boldtext`
 - [ ] `bookstyle`
@@ -54,21 +51,6 @@ here.
 - [ ] `rawsequences`
 - [ ] `atblanks`
 - [ ] `afterends`
-- [ ] `minibar` — shrinks the layout but the minibar itself is never drawn
-
-### Colors
-
-Only `selectedcolor`, `spotlightcolor` and `promptcolor` are honored.
-
-- [ ] `titlecolor`
-- [ ] `statuscolor`
-- [ ] `numbercolor`
-- [ ] `keycolor`
-- [ ] `functioncolor`
-- [ ] `minicolor`
-- [ ] `errorcolor`
-- [ ] `stripecolor`
-- [ ] `scrollercolor`
 
 ### Files and safety
 
@@ -87,7 +69,3 @@ Only `selectedcolor`, `spotlightcolor` and `promptcolor` are honored.
 - [ ] `colonparsing`
 - [ ] `rebinddelete`
 - [ ] `preserve`
-
-### Input
-
-- [ ] `mouse` — toggle exists but no mouse events are captured

@@ -36,6 +36,26 @@ pub fn display_width(line: &str, up_to_col: usize, tabsize: usize) -> usize {
     w
 }
 
+/// The inverse of `display_width`: the character offset whose on-screen
+/// cell contains display column `target_col` (or `line`'s length, if
+/// `target_col` is past the line's own display width) -- used to turn a
+/// mouse click's screen column back into a buffer column.
+pub fn char_col_for_display(line: &str, target_col: usize, tabsize: usize) -> usize {
+    let mut w = 0;
+    for (i, c) in line.chars().enumerate() {
+        let cw = if c == '\t' {
+            tabsize - (w % tabsize)
+        } else {
+            unicode_width::UnicodeWidthChar::width(c).unwrap_or(1)
+        };
+        if w + cw > target_col {
+            return i;
+        }
+        w += cw;
+    }
+    line.chars().count()
+}
+
 /// One undoable edit: replacing the text in `[start, end)` (in the buffer
 /// *before* the edit) with `inserted`. Undo restores `removed` at `start`;
 /// redo re-applies `inserted`.
@@ -178,6 +198,22 @@ impl Buffer {
 
     pub fn line_count(&self) -> usize {
         self.rope.len_lines()
+    }
+
+    /// The line count the way nano itself reports one (`"Read N lines"`,
+    /// the minibar's `(N lines)`, ...): `line_count()` minus one when the
+    /// text ends with a newline, since ropey's own convention (like
+    /// nano's linked list of lines) counts the empty "line" after a final
+    /// `\n` as a line of its own, which nano's messages never count.
+    /// Matches `fileio::nano_style_line_count`, which takes raw text
+    /// instead, for wherever a `Buffer` is already at hand.
+    pub fn nano_line_count(&self) -> usize {
+        let total = self.rope.len_lines();
+        if total > 0 && self.rope.line(total - 1).len_chars() == 0 {
+            total - 1
+        } else {
+            total
+        }
     }
 
     /// Settle this buffer's line-ending format after reading a file into
@@ -581,5 +617,42 @@ mod tests {
         assert_eq!(b.cursor, Pos::new(1, 2));
         b.move_up();
         assert_eq!(b.cursor, Pos::new(0, 8));
+    }
+
+    #[test]
+    fn nano_line_count_ignores_the_trailing_empty_line_after_a_final_newline() {
+        // A trailing newline leaves ropey's own `line_count()` one higher
+        // than nano ever reports (`(N lines)` in the minibar, "Read N
+        // lines", ...) -- confirmed against the installed nano.
+        let with_trailing_newline = Buffer::from_text("a\nb\nc\n", None);
+        assert_eq!(with_trailing_newline.line_count(), 4);
+        assert_eq!(with_trailing_newline.nano_line_count(), 3);
+
+        let without_trailing_newline = Buffer::from_text("a\nb\nc", None);
+        assert_eq!(without_trailing_newline.line_count(), 3);
+        assert_eq!(without_trailing_newline.nano_line_count(), 3);
+
+        let empty = Buffer::from_text("", None);
+        assert_eq!(empty.line_count(), 1);
+        assert_eq!(empty.nano_line_count(), 0);
+    }
+
+    #[test]
+    fn char_col_for_display_inverts_display_width() {
+        assert_eq!(char_col_for_display("hello", 0, 8), 0);
+        assert_eq!(char_col_for_display("hello", 2, 8), 2);
+        assert_eq!(
+            char_col_for_display("hello", 100, 8),
+            5,
+            "past the end clamps to the line's length"
+        );
+
+        // A tab expands to the next 8-column stop: clicking anywhere within
+        // its cell (0..7) should land on the tab itself (char index 0), and
+        // column 8 is the first cell of the following character.
+        for col in 0..8 {
+            assert_eq!(char_col_for_display("\tx", col, 8), 0, "column {col}");
+        }
+        assert_eq!(char_col_for_display("\tx", 8, 8), 1);
     }
 }

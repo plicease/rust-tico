@@ -101,10 +101,28 @@ fn main() -> anyhow::Result<()> {
             // (the first one), matching nano showing the "Read N lines"
             // blurb for the file that lands in the active edit window.
             if i == 0 {
-                match level {
-                    app::StatusLevel::Alert => editor.set_status_alert(message),
-                    app::StatusLevel::Mild => editor.set_status_mild(message),
-                    app::StatusLevel::Normal => editor.set_status(message),
+                // `set minibar`'s one-shot line-count note mirrors nano's
+                // own `report_size = TRUE`: it fires for a real, existing
+                // file that was read, but not for a brand-new (nonexistent)
+                // file, which gets no blurb of any kind under minibar.
+                // And under minibar, a startup load shows *only* that note
+                // -- not also the ordinary "Read N lines" status blurb,
+                // confirmed against the installed nano's own escape-code
+                // output (`we_are_running` is false at nano's own startup,
+                // which unconditionally suppresses that blurb there).
+                let is_fresh_read = level == app::StatusLevel::Normal && message != "New File";
+                if is_fresh_read {
+                    editor.minibar_note = Some(app::minibar_linecount_note(
+                        buf.nano_line_count(),
+                        buf.format,
+                    ));
+                }
+                if !(is_fresh_read && editor.options.minibar) {
+                    match level {
+                        app::StatusLevel::Alert => editor.set_status_alert(message),
+                        app::StatusLevel::Mild => editor.set_status_mild(message),
+                        app::StatusLevel::Normal => editor.set_status(message),
+                    }
                 }
             }
             // Only the focused buffer gets an interactive "someone else is

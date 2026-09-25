@@ -16,6 +16,12 @@ pub enum Color {
     White,
     Normal,
     Rgb(u8, u8, u8),
+    /// One of nano's extended, 256-color-only hue names (`lime`, `pink`,
+    /// `mauve`, ...): each is a literal index into the terminal's 256-color
+    /// palette, per the `hues`/`indices` tables in nano's own `rcfile.c`.
+    /// `light` has no effect on these -- nano rejects a `light`/`bright`
+    /// prefix on them outright, which tico's parser just ignores instead.
+    Indexed(u8),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,9 +340,29 @@ fn parse_color(name: &str) -> Option<NamedColor> {
         "cyan" => Color::Cyan,
         "white" => Color::White,
         "normal" => Color::Normal,
-        _ => return None,
+        other => {
+            return extended_hue_index(other).map(|i| NamedColor::new(Color::Indexed(i)));
+        }
     };
     Some(NamedColor { color, light })
+}
+
+/// nano's 256-color-only extra hue names, valid (per `nanorc(5)`) on
+/// terminal emulators that can do at least 256 colors. Names and 256-color
+/// palette indices copied verbatim from the `hues`/`indices` tables in
+/// nano's own `rcfile.c`.
+fn extended_hue_index(name: &str) -> Option<u8> {
+    const NAMES: &[&str] = &[
+        "pink", "purple", "mauve", "lagoon", "mint", "lime", "peach", "orange", "latte", "rosy",
+        "beet", "plum", "sea", "sky", "slate", "teal", "sage", "brown", "ocher", "sand", "tawny",
+        "brick", "crimson",
+    ];
+    const INDICES: &[u8] = &[
+        204, 163, 134, 38, 48, 148, 215, 208, 137, 175, 127, 98, 32, 111, 66, 35, 107, 100, 142,
+        186, 136, 166, 161,
+    ];
+    let i = NAMES.iter().position(|&n| n == name)?;
+    Some(INDICES[i])
 }
 
 #[cfg(test)]
@@ -377,5 +403,32 @@ mod tests {
     #[test]
     fn parse_byte_size_overflow_returns_none_instead_of_panicking() {
         assert_eq!(parse_byte_size("99999999999999999999GB"), None);
+    }
+
+    #[test]
+    fn extended_256_color_hue_names_resolve_to_nanos_own_palette_indices() {
+        // Indices copied from nano's own `rcfile.c` `hues`/`indices` tables;
+        // spot-checked against the installed nano's own escape-code output
+        // for `set titlecolor black,lime` (bg index 148).
+        let cp = parse_color_pair("black,lime").unwrap();
+        assert_eq!(cp.fg, Some(NamedColor::new(Color::Black)));
+        assert_eq!(cp.bg, Some(NamedColor::new(Color::Indexed(148))));
+
+        let cp = parse_color_pair("pink,crimson").unwrap();
+        assert_eq!(cp.fg, Some(NamedColor::new(Color::Indexed(204))));
+        assert_eq!(cp.bg, Some(NamedColor::new(Color::Indexed(161))));
+    }
+
+    #[test]
+    fn a_light_prefix_on_an_extended_hue_name_is_ignored_rather_than_erroring() {
+        // nano itself rejects `light`/`bright` on these names outright;
+        // tico's parser is more permissive and just drops the prefix.
+        let cp = parse_color_pair("lightlime").unwrap();
+        assert_eq!(cp.fg, Some(NamedColor::new(Color::Indexed(148))));
+    }
+
+    #[test]
+    fn an_unknown_color_name_is_rejected() {
+        assert_eq!(parse_color("chartreuse"), None);
     }
 }

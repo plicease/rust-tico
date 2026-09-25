@@ -8,7 +8,10 @@ use crate::buffer::Pos;
 use crate::keymap::{Action, Binding, Key as TKey, KeyMap, Menu};
 use crate::theme::Style;
 use crossterm::cursor::{Hide, MoveTo, Show};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::style::{
     Attribute, Color, Print, SetAttribute, SetBackgroundColor, SetForegroundColor,
     SetUnderlineColor,
@@ -33,7 +36,14 @@ impl RawModeGuard {
 
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
-        let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+        // Harmless even if mouse capture was never turned on -- terminals
+        // silently ignore a mode-reset escape they weren't in.
+        let _ = execute!(
+            io::stdout(),
+            DisableMouseCapture,
+            Show,
+            LeaveAlternateScreen
+        );
         let _ = disable_raw_mode();
     }
 }
@@ -76,6 +86,13 @@ pub fn run(editor: &mut Editor) -> io::Result<()> {
     // ever needs re-blanking (which is what caused the visible flicker:
     // clearing the whole screen before every redraw, even when idle).
     execute!(io::stdout(), Clear(ClearType::All))?;
+    // `set mouse` (`-m`, or `M-M` live): tracked separately from
+    // `editor.options.mouse` itself, since that's just a plain bool the
+    // rest of the editor toggles freely -- this is the one place that
+    // needs to know whether the *terminal* is currently in mouse-capture
+    // mode, so it can tell when to (de)activate it.
+    let mut mouse_capture_enabled = false;
+    sync_mouse_capture(editor, &mut mouse_capture_enabled)?;
     render_and_ring(editor)?;
 
     let mut disk_watch = DiskWatch::new();
@@ -91,6 +108,10 @@ pub fn run(editor: &mut Editor) -> io::Result<()> {
             match event::read()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     handle_key(editor, key);
+                    dirty = true;
+                }
+                Event::Mouse(mev) => {
+                    handle_mouse(editor, mev);
                     dirty = true;
                 }
                 Event::Resize(cols, rows) => {
@@ -130,10 +151,28 @@ pub fn run(editor: &mut Editor) -> io::Result<()> {
             break;
         }
 
+        sync_mouse_capture(editor, &mut mouse_capture_enabled)?;
+
         if dirty {
             render_and_ring(editor)?;
         }
     }
+    Ok(())
+}
+
+/// (De)activate the terminal's mouse-tracking mode to match
+/// `editor.options.mouse`, whenever it's just been toggled (`M-M`, or a
+/// nanorc/ticorc reload) -- a no-op otherwise.
+fn sync_mouse_capture(editor: &Editor, enabled: &mut bool) -> io::Result<()> {
+    if editor.options.mouse == *enabled {
+        return Ok(());
+    }
+    if editor.options.mouse {
+        execute!(io::stdout(), EnableMouseCapture)?;
+    } else {
+        execute!(io::stdout(), DisableMouseCapture)?;
+    }
+    *enabled = editor.options.mouse;
     Ok(())
 }
 
@@ -253,6 +292,12 @@ fn handle_key(editor: &mut Editor, key: KeyEvent) {
             // one; the persistent replace-confirm kind only exists while
             // in Mode::Prompt, not here.
             editor.clear_spotlight();
+            // `set minibar`'s one-shot line-count note is likewise good for
+            // exactly one keystroke -- cleared here, before dispatch, so a
+            // fresh note the dispatch itself sets (e.g. `M->` switching
+            // buffers) survives to be shown, same ordering as the two
+            // clears above.
+            editor.minibar_note = None;
             handle_editing_key(editor, key);
         }
         Mode::Help {
@@ -272,6 +317,226 @@ fn handle_key(editor: &mut Editor, key: KeyEvent) {
         Mode::Prompt(prompt) => handle_prompt_key(editor, prompt, key),
         Mode::Quit => editor.mode = Mode::Quit,
     }
+}
+
+// ---------------------------------------------------------------------
+// Mouse handling (`set mouse`)
+// ---------------------------------------------------------------------
+
+/// Handle a mouse event, matching nano's own `get_mouseinput`/
+/// `process_click` (confirmed against the installed nano's own source):
+/// left-clicks place the cursor (or toggle the mark, when the click
+/// resolves to the cursor's own position unchanged), clicks on the
+/// scrollbar (`set indicator`) jump proportionally, clicks on a shortcut
+/// in the two-line bar activate it, and the wheel scrolls two lines per
+/// notch. Everything else (drags, other buttons, plain motion, ...) is
+/// ignored, same as nano -- in particular, this leaves Shift+drag free for
+/// the terminal's own native text selection, which is how nano itself
+/// expects dragging to work (see `set mouse` in `nanorc(5)`): nano's own
+/// mouse handling has no drag/motion case at all.
+fn handle_mouse(editor: &mut Editor, mev: MouseEvent) {
+    if !editor.options.mouse {
+        return;
+    }
+    match mev.kind {
+        // "One bump of the mouse wheel should scroll two lines" (nano's
+        // own comment in get_mouseinput).
+        MouseEventKind::ScrollUp => {
+            editor.execute(Action::ScrollUp);
+            editor.execute(Action::ScrollUp);
+        }
+        MouseEventKind::ScrollDown => {
+            editor.execute(Action::ScrollDown);
+            editor.execute(Action::ScrollDown);
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            handle_click(editor, mev.row as usize, mev.column as usize);
+        }
+        _ => {}
+    }
+}
+
+/// Dispatch a left-click at 0-based screen `(row, col)` to whichever
+/// region it landed in. The main editing screen and every prompt share one
+/// layout (`main_screen_layout`); the full-screen Help and Diff viewers
+/// only expose their own bottom shortcut bar.
+fn handle_click(editor: &mut Editor, row: usize, col: usize) {
+    if matches!(&editor.mode, Mode::Editing | Mode::Prompt(_)) {
+        handle_main_screen_click(editor, row, col);
+        return;
+    }
+    let bar_row = editor.screen_rows.saturating_sub(2);
+    if row < bar_row {
+        return;
+    }
+    let entries = match &editor.mode {
+        Mode::Help { .. } => resolve_shortcuts(&editor.keymap, Menu::Help, HELP_SHORTCUTS),
+        Mode::Diff { outcome, .. } => diff_shortcut_entries(outcome),
+        _ => return,
+    };
+    activate_shortcut_click(editor, &entries, row - bar_row, col);
+}
+
+/// A click within the main editing screen's own layout (shared by
+/// `Mode::Editing` and every `Mode::Prompt`, since a prompt overlays only
+/// the status row -- clicking the buffer or the shortcut bar still works
+/// while one is open, matching nano's own `process_click`, which only
+/// special-cases the prompt row itself into a no-op).
+fn handle_main_screen_click(editor: &mut Editor, row: usize, col: usize) {
+    if editor.options.zero {
+        handle_buffer_click(editor, row, col, editor.screen_rows);
+        return;
+    }
+    let layout = main_screen_layout(editor);
+    if row >= layout.text_start_row && row < layout.text_start_row + layout.text_rows {
+        handle_buffer_click(editor, row - layout.text_start_row, col, layout.text_rows);
+    } else if layout.help_rows > 0 && row > layout.status_row {
+        let row_in_bar = row - layout.status_row - 1;
+        let prompt = if let Mode::Prompt(p) = &editor.mode {
+            Some(p)
+        } else {
+            None
+        };
+        let entries = shortcut_bar_entries(&editor.keymap, prompt);
+        activate_shortcut_click(editor, &entries, row_in_bar, col);
+    }
+    // A click on the title row or the status/prompt row itself is a
+    // no-op, matching nano exactly.
+}
+
+/// A click within the buffer area proper (0-based `row_in_buffer` counts
+/// from the top of the visible text, not the whole screen). `editwinrows`
+/// is however many rows that area has, matching what `render_buffer` was
+/// given -- needed for the scrollbar's own proportion math.
+fn handle_buffer_click(editor: &mut Editor, row_in_buffer: usize, col: usize, editwinrows: usize) {
+    let cols = editor.screen_cols;
+    let sidebar = usize::from(editor.options.indicator && cols > 9 && editor.screen_rows > 5);
+
+    if sidebar == 1 && col + 1 == cols {
+        // Clicking the scrollbar jumps to the roughly corresponding line,
+        // matching nano's own click-to-scrollbar math exactly (`row 0` ->
+        // the very top; any other row rounds up by one first).
+        let total = editor.buf().line_count().max(1);
+        let adjusted_row = if row_in_buffer == 0 {
+            0
+        } else {
+            row_in_buffer + 1
+        };
+        let target_line = (total * adjusted_row / editwinrows.max(1)).min(total - 1);
+        editor.buf_mut().cursor.line = target_line;
+        let len = editor.buf().line(target_line).chars().count();
+        editor.buf_mut().cursor.col = editor.buf().cursor.col.min(len);
+        editor.scroll_to_cursor_centered();
+        return;
+    }
+
+    let gutter = editor.gutter_width();
+    let tabsize = editor.options.tabsize as usize;
+    let buf = editor.buf();
+    let line_idx = (buf.top_line + row_in_buffer).min(buf.line_count().saturating_sub(1));
+    let is_cursor_line = line_idx == buf.cursor.line;
+    // Only the cursor's own line is ever horizontally scrolled (see
+    // `render_buffer`), so a click on any other row starts counting
+    // columns from display column 0.
+    let content_col = col.saturating_sub(gutter);
+    let target_display_col = if is_cursor_line {
+        buf.left_col + content_col
+    } else {
+        content_col
+    };
+    let raw = buf.line(line_idx);
+    let char_col = crate::buffer::char_col_for_display(&raw, target_display_col, tabsize);
+    let was_line = buf.cursor.line;
+    let was_col = buf.cursor.col;
+
+    editor.buf_mut().cursor = Pos::new(line_idx, char_col);
+    editor.scroll_to_cursor();
+
+    // Clicking exactly where the cursor already was toggles the mark,
+    // matching nano's own `process_click` (it's not click-timing based —
+    // literally just "the click didn't move the cursor").
+    if line_idx == was_line && char_col == was_col {
+        editor.execute(Action::Mark);
+    }
+}
+
+/// Resolve a click at `(row_in_bar, col)` -- 0-based, relative to the
+/// shortcut bar's own top-left corner -- against `entries`, and, if it
+/// lands on a real one, activate it by converting its displayed key label
+/// back into the equivalent keystroke and dispatching that through the
+/// exact same path a real keypress would take (matching nano's own
+/// "put the keystroke back" mechanism).
+fn activate_shortcut_click(
+    editor: &mut Editor,
+    entries: &[(String, &str)],
+    row_in_bar: usize,
+    col: usize,
+) {
+    let cols = editor.screen_cols;
+    if let Some(idx) = shortcut_bar_click_index(cols, entries, row_in_bar, col)
+        && let Some(kev) = synthetic_key_event_for_label(&entries[idx].0)
+    {
+        handle_key(editor, kev);
+    }
+}
+
+/// The crossterm `KeyEvent` that, fed through `handle_key`, has the same
+/// effect as the shortcut bar's displayed label for one entry -- either a
+/// real `Key` spec (`^G`, `M-U`, `F1`, ...; parsed the same way a nanorc
+/// `bind` line would be, then converted with `key_to_event`) or a bare
+/// single character (`Y`, `N`, `A`, ...), which the Y/N/A-style
+/// confirmation prompts match directly as a raw keystroke, outside the
+/// rebindable keymap entirely.
+fn synthetic_key_event_for_label(label: &str) -> Option<KeyEvent> {
+    let mut chars = label.chars();
+    let first = chars.next()?;
+    if chars.next().is_none() && first != '^' {
+        return Some(KeyEvent::new(KeyCode::Char(first), KeyModifiers::NONE));
+    }
+    TKey::parse(label).map(key_to_event)
+}
+
+/// The inverse of `normalize_key`: the crossterm `KeyEvent` that
+/// `normalize_key` would turn back into `key`. Needed to replay a
+/// shortcut-bar click as the keystroke it represents.
+fn key_to_event(key: TKey) -> KeyEvent {
+    let (code, modifiers) = match key {
+        TKey::Ctrl(c) => (KeyCode::Char(c.to_ascii_lowercase()), KeyModifiers::CONTROL),
+        TKey::Meta(c) => (KeyCode::Char(c), KeyModifiers::ALT),
+        TKey::ShiftMeta(c) => (KeyCode::Char(c), KeyModifiers::ALT | KeyModifiers::SHIFT),
+        TKey::F(n) => (KeyCode::F(n), KeyModifiers::NONE),
+        TKey::Ins => (KeyCode::Insert, KeyModifiers::NONE),
+        TKey::Del => (KeyCode::Delete, KeyModifiers::NONE),
+        TKey::Backspace => (KeyCode::Backspace, KeyModifiers::NONE),
+        TKey::ShiftTab => (KeyCode::BackTab, KeyModifiers::NONE),
+        TKey::Left => (KeyCode::Left, KeyModifiers::NONE),
+        TKey::Right => (KeyCode::Right, KeyModifiers::NONE),
+        TKey::Up => (KeyCode::Up, KeyModifiers::NONE),
+        TKey::Down => (KeyCode::Down, KeyModifiers::NONE),
+        TKey::Home => (KeyCode::Home, KeyModifiers::NONE),
+        TKey::End => (KeyCode::End, KeyModifiers::NONE),
+        TKey::PageUp => (KeyCode::PageUp, KeyModifiers::NONE),
+        TKey::PageDown => (KeyCode::PageDown, KeyModifiers::NONE),
+        TKey::CtrlLeft => (KeyCode::Left, KeyModifiers::CONTROL),
+        TKey::CtrlRight => (KeyCode::Right, KeyModifiers::CONTROL),
+        TKey::CtrlUp => (KeyCode::Up, KeyModifiers::CONTROL),
+        TKey::CtrlDown => (KeyCode::Down, KeyModifiers::CONTROL),
+        TKey::CtrlHome => (KeyCode::Home, KeyModifiers::CONTROL),
+        TKey::CtrlEnd => (KeyCode::End, KeyModifiers::CONTROL),
+        TKey::CtrlDel => (KeyCode::Delete, KeyModifiers::CONTROL),
+        TKey::ShiftCtrlDel => (KeyCode::Delete, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        TKey::MetaLeft => (KeyCode::Left, KeyModifiers::ALT),
+        TKey::MetaRight => (KeyCode::Right, KeyModifiers::ALT),
+        TKey::MetaUp => (KeyCode::Up, KeyModifiers::ALT),
+        TKey::MetaDown => (KeyCode::Down, KeyModifiers::ALT),
+        TKey::MetaHome => (KeyCode::Home, KeyModifiers::ALT),
+        TKey::MetaEnd => (KeyCode::End, KeyModifiers::ALT),
+        TKey::MetaPgUp => (KeyCode::PageUp, KeyModifiers::ALT),
+        TKey::MetaPgDn => (KeyCode::PageDown, KeyModifiers::ALT),
+        TKey::MetaIns => (KeyCode::Insert, KeyModifiers::ALT),
+        TKey::MetaDel => (KeyCode::Delete, KeyModifiers::ALT),
+    };
+    KeyEvent::new(code, modifiers)
 }
 
 /// Handle a keystroke while the `^G` help viewer is open: scroll its body,
@@ -1296,7 +1561,16 @@ fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
                             );
                             editor.buffers.push(buf);
                             editor.current = editor.buffers.len() - 1;
-                            editor.set_status(msg);
+                            editor.note_buffer_linecount();
+                            // Loading into a *new* buffer this way is never
+                            // an undoable insert into the current one, so
+                            // nano suppresses the ordinary blurb here too
+                            // whenever minibar is on (only the persistent
+                            // note shows) -- confirmed against the
+                            // installed nano's own escape-code output.
+                            if !editor.options.minibar {
+                                editor.set_status(msg);
+                            }
                         }
                         Err(e) => editor
                             .set_status_alert(format!("Error reading {}: {e}", path.display())),
@@ -1312,6 +1586,7 @@ fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
                         editor.buf_mut().insert_str(&content);
                         editor.buf_mut().adopt_format(detected, unix);
                         editor.set_status(msg);
+                        editor.note_buffer_linecount();
                     }
                     Err(e) => {
                         editor.set_status_alert(format!("Error reading {}: {e}", path.display()))
@@ -1346,7 +1621,14 @@ fn submit_prompt(editor: &mut Editor, prompt: Prompt) {
             }
             match crate::fileio::save_file(editor.buf_mut(), &path) {
                 Ok(()) => {
-                    editor.set_status(format!("Wrote {}", path.display()));
+                    editor.note_buffer_linecount();
+                    // nano suppresses the ordinary "Wrote N lines" blurb
+                    // under minibar too -- only the persistent note shows
+                    // (confirmed against the installed nano's own
+                    // escape-code output).
+                    if !editor.options.minibar {
+                        editor.set_status(format!("Wrote {}", path.display()));
+                    }
                     if exiting {
                         editor.close_current_buffer();
                     }
@@ -2066,40 +2348,76 @@ fn render(editor: &Editor) -> io::Result<()> {
     }
 
     let cols = editor.screen_cols;
-    let rows = editor.screen_rows;
     if editor.options.zero {
-        render_buffer(editor, &mut out, 0, rows)?;
+        render_buffer(editor, &mut out, 0, editor.screen_rows)?;
         finish_cursor(editor, &mut out, 0)?;
         return out.flush();
     }
 
-    queue!(out, MoveTo(0, 0))?;
-    render_title_bar(editor, &mut out, cols)?;
-
-    let help_rows = if editor.options.nohelp { 0 } else { 2 };
-    let text_start_row = 1u16;
-    let text_rows = rows.saturating_sub(2 + help_rows);
-    if let Some(matches) = &editor.file_completions {
-        render_completions_grid(&mut out, text_start_row, text_rows, cols, matches)?;
-    } else {
-        render_buffer(editor, &mut out, text_start_row, text_rows)?;
+    let layout = main_screen_layout(editor);
+    let text_start_row = layout.text_start_row as u16;
+    // `set minibar` suppresses the title bar entirely -- its own summary
+    // takes over the status row instead (see `render_minibar`), so the
+    // buffer gets that row back.
+    if text_start_row > 0 {
+        queue!(out, MoveTo(0, 0))?;
+        render_title_bar(editor, &mut out, cols)?;
     }
 
-    let status_row = text_start_row + text_rows as u16;
+    if let Some(matches) = &editor.file_completions {
+        render_completions_grid(&mut out, text_start_row, layout.text_rows, cols, matches)?;
+    } else {
+        render_buffer(editor, &mut out, text_start_row, layout.text_rows)?;
+    }
+
+    let status_row = layout.status_row as u16;
     render_status_line(editor, &mut out, status_row, cols)?;
 
-    if help_rows > 0 {
+    if layout.help_rows > 0 {
         let prompt = if let Mode::Prompt(p) = &editor.mode {
             Some(p)
         } else {
             None
         };
         let entries = shortcut_bar_entries(&editor.keymap, prompt);
-        render_shortcut_bar(&mut out, status_row + 1, cols, &entries)?;
+        render_shortcut_bar(editor, &mut out, status_row + 1, cols, &entries)?;
     }
 
     finish_cursor(editor, &mut out, text_start_row)?;
     out.flush()
+}
+
+/// The main editing screen's row layout (everything but `Mode::Help` /
+/// `Mode::Diff`, which have their own bespoke full-screen layout, and
+/// `set zero`, which hides all chrome and just needs `screen_rows`):
+/// shared by `render` and by mouse click resolution (`handle_mouse`), so
+/// the two can never drift the way `Editor::text_rows` and `render`'s own
+/// row math once did.
+struct MainLayout {
+    /// 0 normally, 1 when `set minibar` drops the title bar.
+    text_start_row: usize,
+    /// Rows available to the buffer (or the `^R` tab-completion grid).
+    text_rows: usize,
+    /// The status/prompt/minibar row, directly below the buffer.
+    status_row: usize,
+    /// 0 under `set nohelp`, else 2 (the shortcut bar's own two rows,
+    /// directly below `status_row`).
+    help_rows: usize,
+}
+
+fn main_screen_layout(editor: &Editor) -> MainLayout {
+    let text_start_row = if editor.options.minibar { 0 } else { 1 };
+    let help_rows = if editor.options.nohelp { 0 } else { 2 };
+    let text_rows = editor
+        .screen_rows
+        .saturating_sub(text_start_row + 1 + help_rows);
+    let status_row = text_start_row + text_rows;
+    MainLayout {
+        text_start_row,
+        text_rows,
+        status_row,
+        help_rows,
+    }
 }
 
 /// Number of rows available for the help viewer's scrollable body: the
@@ -2123,6 +2441,7 @@ fn render_help_screen(
     let rows = editor.screen_rows;
 
     render_centered_title_row(
+        editor,
         out,
         cols,
         lines.first().map(|s| s.as_str()).unwrap_or("Help"),
@@ -2136,7 +2455,7 @@ fn render_help_screen(
         None,
     )?;
     let entries = resolve_shortcuts(&editor.keymap, Menu::Help, HELP_SHORTCUTS);
-    render_shortcut_bar(out, rows.saturating_sub(2) as u16, cols, &entries)
+    render_shortcut_bar(editor, out, rows.saturating_sub(2) as u16, cols, &entries)
 }
 
 /// The merge-diff viewer (`Mode::Diff`): same full-screen layout as the
@@ -2154,6 +2473,7 @@ fn render_diff_screen(
     let rows = editor.screen_rows;
 
     render_centered_title_row(
+        editor,
         out,
         cols,
         lines.first().map(|s| s.as_str()).unwrap_or("Diff"),
@@ -2173,6 +2493,15 @@ fn render_diff_screen(
         styles.as_deref(),
     )?;
 
+    let entries = diff_shortcut_entries(outcome);
+    render_shortcut_bar(editor, out, rows.saturating_sub(2) as u16, cols, &entries)
+}
+
+/// The merge-diff viewer's bottom-bar entries for the given outcome --
+/// shared by `render_diff_screen` and mouse click resolution
+/// (`handle_click`), so the two can never disagree about what a click
+/// lands on.
+fn diff_shortcut_entries(outcome: &DiffOutcome) -> Vec<(String, &'static str)> {
     let shortcuts: &[(&str, &str)] = match outcome {
         DiffOutcome::ApplyMerge { .. } => &[
             ("A", "Apply merge"),
@@ -2184,13 +2513,19 @@ fn render_diff_screen(
         ],
         DiffOutcome::Conflict => &[("(any key)", "Continue")],
     };
-    let entries: Vec<(String, &str)> = shortcuts.iter().map(|&(k, d)| (k.to_string(), d)).collect();
-    render_shortcut_bar(out, rows.saturating_sub(2) as u16, cols, &entries)
+    shortcuts.iter().map(|&(k, d)| (k.to_string(), d)).collect()
 }
 
-/// Center `title` on its own reverse-video row at the top of the screen —
-/// shared by the help and merge-diff full-screen viewers.
-fn render_centered_title_row(out: &mut impl Write, cols: usize, title: &str) -> io::Result<()> {
+/// Center `title` on its own title-bar-colored row at the top of the
+/// screen — shared by the help and merge-diff full-screen viewers, and
+/// confirmed against the installed nano to follow `titlecolor` exactly the
+/// same as the ordinary title bar does.
+fn render_centered_title_row(
+    editor: &Editor,
+    out: &mut impl Write,
+    cols: usize,
+    title: &str,
+) -> io::Result<()> {
     queue!(out, MoveTo(0, 0))?;
     let mut title_row = vec![' '; cols];
     let start = cols.saturating_sub(title.chars().count()) / 2;
@@ -2200,12 +2535,8 @@ fn render_centered_title_row(out: &mut impl Write, cols: usize, title: &str) -> 
         }
     }
     let title_line: String = title_row.into_iter().collect();
-    queue!(
-        out,
-        SetAttribute(Attribute::Reverse),
-        Print(title_line),
-        SetAttribute(Attribute::Reset)
-    )
+    let style = title_bar_style(editor);
+    queue_bar_segment(out, style, &title_line)
 }
 
 /// Draw `body_rows` rows of `body` starting at `top`, one screen row per
@@ -2372,12 +2703,15 @@ fn render_title_bar(editor: &Editor, out: &mut impl Write, cols: usize) -> io::R
         }
     }
     let s: String = line.into_iter().collect();
-    queue!(
-        out,
-        SetAttribute(Attribute::Reverse),
-        Print(s),
-        SetAttribute(Attribute::Reset)
-    )
+    let style = bar_style(&editor.options.titlecolor, BarStyle::Reverse);
+    queue_bar_segment(out, style, &s)
+}
+
+/// The resolved style for the title bar, used directly by the title bar
+/// itself and as the fallback for `promptcolor`/`minicolor` when those are
+/// unset (nano: "the colors of the title bar are used").
+fn title_bar_style(editor: &Editor) -> BarStyle {
+    bar_style(&editor.options.titlecolor, BarStyle::Reverse)
 }
 
 fn render_status_line(
@@ -2389,8 +2723,10 @@ fn render_status_line(
     queue!(out, MoveTo(0, row))?;
     if let Mode::Prompt(prompt) = &editor.mode {
         // nano's promptcolor defaults to the title bar's colors (reverse
-        // video), confirmed against the installed nano's own escape-code
-        // output for both the Search and WriteOut prompts.
+        // video unless titlecolor is set), confirmed against the installed
+        // nano's own escape-code output for both the Search and WriteOut
+        // prompts.
+        let style = bar_style(&editor.options.promptcolor, title_bar_style(editor));
         let text = format!(
             "{}: {}",
             prompt.label,
@@ -2400,17 +2736,13 @@ fn render_status_line(
         while s.chars().count() < cols {
             s.push(' ');
         }
-        queue!(
-            out,
-            SetAttribute(Attribute::Reverse),
-            Print(s),
-            SetAttribute(Attribute::Reset)
-        )
+        queue_bar_segment(out, style, &s)
     } else if let Some(msg) = &editor.status {
-        // nano shows ordinary status-bar messages in reverse video, and
-        // Alert-level ones (unwritable file, "is a directory", ...) bold
-        // white-on-red instead (confirmed against the installed nano's own
-        // escape-code output for both cases).
+        // nano shows ordinary status-bar messages in reverse video by
+        // default, and Alert/Mild-level ones (unwritable file, "is a
+        // directory", ...) in `errorcolor` (bold white-on-red by default)
+        // instead, confirmed against the installed nano's own escape-code
+        // output for both cases.
         let bracketed = format!("[ {msg} ]");
         let pad = cols.saturating_sub(bracketed.chars().count()) / 2;
         if pad > 0 {
@@ -2421,29 +2753,15 @@ fn render_status_line(
         let shown_len = shown.chars().count();
         match editor.status_level {
             crate::app::StatusLevel::Normal => {
-                queue!(
-                    out,
-                    SetAttribute(Attribute::Reverse),
-                    Print(shown),
-                    SetAttribute(Attribute::Reset)
-                )?;
+                let style = bar_style(&editor.options.statuscolor, BarStyle::Reverse);
+                queue_bar_segment(out, style, &shown)?;
             }
             crate::app::StatusLevel::Mild | crate::app::StatusLevel::Alert => {
-                // Matches nano's captured escape codes exactly: ESC[1m
-                // ESC[37m ESC[41m — bold, *standard* white (crossterm's
-                // `Grey`, not `White`, which is bright/ANSI-97), on
-                // standard (non-bright) red. nano uses this same
-                // ERROR_MESSAGE color for both MILD and ALERT messages;
-                // only ALERT also rings the bell (handled via
-                // `bell_pending`, which `set_status_mild` never sets).
-                queue!(
-                    out,
-                    SetAttribute(Attribute::Bold),
-                    SetForegroundColor(Color::Grey),
-                    SetBackgroundColor(Color::DarkRed),
-                    Print(shown),
-                    SetAttribute(Attribute::Reset)
-                )?;
+                // nano uses this same ERROR_MESSAGE color for both MILD and
+                // ALERT messages; only ALERT also rings the bell (handled
+                // via `bell_pending`, which `set_status_mild` never sets).
+                let style = bar_style(&editor.options.errorcolor, BarStyle::Reverse);
+                queue_bar_segment(out, style, &shown)?;
             }
         }
         let used = pad + shown_len;
@@ -2451,9 +2769,70 @@ fn render_status_line(
             queue!(out, Print(" ".repeat(cols - used)))?;
         }
         Ok(())
+    } else if editor.options.minibar {
+        render_minibar(editor, out, cols)
     } else {
         queue!(out, Print(" ".repeat(cols)))
     }
+}
+
+/// `set minibar`'s condensed one-line summary of the current buffer, shown
+/// where the status bar normally goes once no prompt or status message is
+/// active: the filename (plus `*` if modified) on the left, then either the
+/// one-shot `minibar_note` (right after a load/save/buffer-switch) or,
+/// once that's gone, an `[i/n]` counter when multiple buffers are open, and
+/// finally the cursor's percentage into the file, right-aligned. Colored
+/// with `minicolor` (falling back to the title bar's own colors, same as
+/// `promptcolor`) -- confirmed layout and colors against the installed
+/// nano's own escape-code output.
+fn render_minibar(editor: &Editor, out: &mut impl Write, cols: usize) -> io::Result<()> {
+    let buf = editor.buf();
+    let name = buf
+        .path
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "New Buffer".to_string());
+    let mark = if buf.modified { '*' } else { ' ' };
+    let left = format!("  {name} {mark} ");
+
+    let mut line: Vec<char> = vec![' '; cols];
+    let mut cursor = 0;
+    for c in left.chars() {
+        if cursor >= cols {
+            break;
+        }
+        line[cursor] = c;
+        cursor += 1;
+    }
+
+    let right_note = editor.minibar_note.clone().or_else(|| {
+        (editor.buffers.len() > 1)
+            .then(|| format!("[{}/{}]", editor.current + 1, editor.buffers.len()))
+    });
+    if let Some(note) = right_note {
+        for c in note.chars() {
+            if cursor >= cols {
+                break;
+            }
+            line[cursor] = c;
+            cursor += 1;
+        }
+    }
+
+    // Right-aligned, 2 columns in from the edge -- the same margin the
+    // title bar's own `[i/n]`/"View" indicator uses.
+    let pct = 100 * (buf.cursor.line + 1) / buf.line_count().max(1);
+    let pct_str = format!("{pct}%");
+    let pct_start = cols.saturating_sub(pct_str.chars().count() + 2);
+    for (i, c) in pct_str.chars().enumerate() {
+        if pct_start + i < cols {
+            line[pct_start + i] = c;
+        }
+    }
+
+    let s: String = line.into_iter().collect();
+    let style = bar_style(&editor.options.minicolor, title_bar_style(editor));
+    queue_bar_segment(out, style, &s)
 }
 
 /// The default main-menu shortcut priority list, in the exact order GNU
@@ -2706,12 +3085,20 @@ fn key_label_for(keymap: &KeyMap, menu: Menu, action: Action) -> String {
         .unwrap_or_default()
 }
 
-fn render_shortcut_bar(
-    out: &mut impl Write,
-    row: u16,
-    cols: usize,
-    entries: &[(String, &str)],
-) -> io::Result<()> {
+/// The shortcut bar's column grid: shared by the renderer and by mouse
+/// click resolution, so the two can never drift apart the way `text_rows`
+/// and `render`'s own row math once did (see `note_buffer_linecount`'s
+/// history). `col_width` is the width, in columns, of one (key, desc)
+/// cell; `n_pairs` is how many such cells fit across `cols`, each holding
+/// up to two entries (one per row of the two-line bar).
+struct ShortcutBarLayout {
+    max_label: usize,
+    max_desc: usize,
+    col_width: usize,
+    n_pairs: usize,
+}
+
+fn shortcut_bar_layout(cols: usize, entries: &[(String, &str)]) -> ShortcutBarLayout {
     let max_label = entries
         .iter()
         .map(|(k, _)| k.chars().count())
@@ -2725,6 +3112,57 @@ fn render_shortcut_bar(
     let col_width = max_label + 1 + max_desc + 2;
     let n_cols = (cols / col_width).max(1);
     let n_pairs = n_cols.min(entries.len().div_ceil(2));
+    ShortcutBarLayout {
+        max_label,
+        max_desc,
+        col_width,
+        n_pairs,
+    }
+}
+
+/// The entry (if any) a mouse click at `(row_in_bar, col)` -- 0-based
+/// coordinates relative to the shortcut bar's own top-left corner -- would
+/// activate, matching nano's own `get_mouseinput`'s shortcut-click math
+/// (adapted to tico's own column layout, which sizes columns to the
+/// longest label/description rather than nano's fixed `COLS /
+/// ((number+1)/2)` grid).
+fn shortcut_bar_click_index(
+    cols: usize,
+    entries: &[(String, &str)],
+    row_in_bar: usize,
+    col: usize,
+) -> Option<usize> {
+    if row_in_bar > 1 {
+        return None;
+    }
+    let layout = shortcut_bar_layout(cols, entries);
+    let c = col / layout.col_width;
+    if c >= layout.n_pairs {
+        return None;
+    }
+    let idx = c * 2 + row_in_bar;
+    let (key, _) = entries.get(idx)?;
+    if key.is_empty() {
+        return None;
+    }
+    Some(idx)
+}
+
+fn render_shortcut_bar(
+    editor: &Editor,
+    out: &mut impl Write,
+    row: u16,
+    cols: usize,
+    entries: &[(String, &str)],
+) -> io::Result<()> {
+    let key_style = bar_style(&editor.options.keycolor, BarStyle::Reverse);
+    let desc_style = bar_style(&editor.options.functioncolor, BarStyle::Plain);
+    let ShortcutBarLayout {
+        max_label,
+        max_desc,
+        col_width,
+        n_pairs,
+    } = shortcut_bar_layout(cols, entries);
 
     for r in 0..2u16 {
         queue!(out, MoveTo(0, row + r))?;
@@ -2732,17 +3170,13 @@ fn render_shortcut_bar(
         for c in 0..n_pairs {
             let idx = c * 2 + r as usize;
             if let Some((key, desc)) = entries.get(idx).filter(|(k, _)| !k.is_empty()) {
-                // As in nano: the key combo is shown in reverse video, the
-                // description in the terminal's normal colors.
+                // As in nano: the key combo is shown in `keycolor` (reverse
+                // video by default), the description in `functioncolor`
+                // (the terminal's normal colors by default).
                 let key_padded = format!("{key:<lw$}", lw = max_label);
-                queue!(
-                    out,
-                    SetAttribute(Attribute::Reverse),
-                    Print(&key_padded),
-                    SetAttribute(Attribute::Reset)
-                )?;
+                queue_bar_segment(out, key_style, &key_padded)?;
                 let rest = format!(" {desc:<dw$}  ", dw = max_desc);
-                queue!(out, Print(&rest))?;
+                queue_bar_segment(out, desc_style, &rest)?;
                 written += key_padded.chars().count() + rest.chars().count();
             } else {
                 let pad = " ".repeat(col_width);
@@ -2853,6 +3287,27 @@ fn render_buffer(
             Vec::new()
         };
     let selection = editor.selection_range();
+    let number_style = numbercolor_style(&editor.options.numbercolor);
+
+    // `set indicator`: a one-column "scrollbar" on the right edge, showing
+    // the viewport's position and extent within the buffer -- suppressed
+    // on a too-small screen, matching nano's own `sidebar` guard exactly.
+    let sidebar = usize::from(editor.options.indicator && cols > 9 && editor.screen_rows > 5);
+    let (thumb_lowest, thumb_highest) = if sidebar == 1 && rows > 0 {
+        scrollbar_thumb_range(buf.top_line, rows, buf.line_count())
+    } else {
+        (0, 0)
+    };
+    let scrollbar_track_style = scrollbar_cell_style(&editor.options.scrollercolor, false);
+    let scrollbar_thumb_style = scrollbar_cell_style(&editor.options.scrollercolor, true);
+    // `set guidestripe`: a one-column vertical guide recoloring whatever
+    // character (or blank) already sits at that column, so it moves with
+    // horizontal scroll -- the given column number is 1-based.
+    let stripe_col = editor
+        .options
+        .guidestripe
+        .map(|n| (n as usize).saturating_sub(1));
+    let stripe_style = stripecolor_style(&editor.options.stripecolor);
 
     for r in 0..rows {
         queue!(out, MoveTo(0, start_row + r as u16))?;
@@ -2875,7 +3330,7 @@ fn render_buffer(
         if is_real_line {
             if gutter > 0 {
                 let prefix = format!("{:>width$} ", line_idx + 1, width = gutter - 1);
-                styles.extend(prefix.chars().map(|_| None));
+                styles.extend(prefix.chars().map(|_| Some(number_style)));
                 rendered.push_str(&prefix);
             }
             let raw = buf.line(line_idx);
@@ -2936,7 +3391,7 @@ fn render_buffer(
         } else {
             0
         };
-        let content_width = cols.saturating_sub(gutter_chars);
+        let content_width = cols.saturating_sub(gutter_chars + sidebar);
         let show_left = left > 0;
         let mut capacity = content_width.saturating_sub(if show_left { 1 } else { 0 });
         let show_right = left + capacity < text_total;
@@ -2962,7 +3417,7 @@ fn render_buffer(
         if show_right {
             windowed_styles.push(None);
         }
-        let styles = windowed_styles;
+        let mut styles = windowed_styles;
         let marker_shift = gutter_chars + if show_left { 1 } else { 0 };
         let clamp_to_view = |(s, e): (usize, usize)| {
             let clamp = |x: usize| marker_shift + x.clamp(vis_start, vis_end) - vis_start;
@@ -2970,6 +3425,23 @@ fn render_buffer(
         };
         let highlight = highlight.map(clamp_to_view);
         let selected = selected.map(clamp_to_view);
+
+        // The stripe recolors whatever's already at its column, so it
+        // scrolls along with the line -- hidden once scrolled past it
+        // (`stripe_col < left`) or off the right edge of the content area.
+        // It can land past the line's actual text (a short line, or past
+        // end-of-buffer's own blank rows), in which case `chars`/`styles`
+        // are extended with a plain space to carry it, matching nano's own
+        // fallback of painting a space there.
+        let stripe_idx = stripe_col
+            .and_then(|col| stripe_content_offset(col, left, content_width))
+            .map(|offset| marker_shift + offset);
+        if let Some(idx) = stripe_idx
+            && idx >= chars.len()
+        {
+            chars.resize(idx + 1, ' ');
+            styles.resize(idx + 1, None);
+        }
 
         let len = chars.len();
         let spot = highlight
@@ -2985,7 +3457,8 @@ fn render_buffer(
         while i < len {
             let in_spot = spot.is_some_and(|(s, e)| i >= s && i < e);
             let in_sel = !in_spot && sel.is_some_and(|(s, e)| i >= s && i < e);
-            let style = if in_spot || in_sel {
+            let in_stripe = !in_spot && !in_sel && stripe_idx == Some(i);
+            let style = if in_spot || in_sel || in_stripe {
                 None
             } else {
                 styles.get(i).copied().flatten()
@@ -2994,10 +3467,11 @@ fn render_buffer(
             while j < len {
                 let j_in_spot = spot.is_some_and(|(s, e)| j >= s && j < e);
                 let j_in_sel = !j_in_spot && sel.is_some_and(|(s, e)| j >= s && j < e);
-                if j_in_spot != in_spot || j_in_sel != in_sel {
+                let j_in_stripe = !j_in_spot && !j_in_sel && stripe_idx == Some(j);
+                if j_in_spot != in_spot || j_in_sel != in_sel || j_in_stripe != in_stripe {
                     break;
                 }
-                let j_style = if j_in_spot || j_in_sel {
+                let j_style = if j_in_spot || j_in_sel || j_in_stripe {
                     None
                 } else {
                     styles.get(j).copied().flatten()
@@ -3036,13 +3510,25 @@ fn render_buffer(
                         )?;
                     }
                 }
+            } else if in_stripe {
+                print_styled(out, &segment, Some(stripe_style))?;
             } else {
                 print_styled(out, &segment, style)?;
             }
             i = j;
         }
-        if len < cols {
-            queue!(out, Print(" ".repeat(cols - len)))?;
+        let fill_width = cols.saturating_sub(sidebar);
+        if len < fill_width {
+            queue!(out, Print(" ".repeat(fill_width - len)))?;
+        }
+        if sidebar == 1 {
+            let in_thumb = r >= thumb_lowest && r <= thumb_highest;
+            let style = if in_thumb {
+                scrollbar_thumb_style
+            } else {
+                scrollbar_track_style
+            };
+            print_styled(out, " ", Some(style))?;
         }
     }
     Ok(())
@@ -3070,6 +3556,93 @@ fn print_styled(out: &mut impl Write, segment: &str, style: Option<Style>) -> io
     queue!(out, Print(segment), SetAttribute(Attribute::Reset))
 }
 
+/// The "plain reverse video by default, `cp`'s own colors when configured"
+/// pattern shared by `numbercolor` and `stripecolor`: confirmed against the
+/// installed nano's own escape-code output for both the line-number margin
+/// (`set linenumbers`) and the vertical guide (`set guidestripe`) -- nano's
+/// own color-pair setup gives both LINE_NUMBER and GUIDE_STRIPE plain
+/// `A_REVERSE` when unconfigured, unlike `scrollercolor`/`functioncolor`'s
+/// `A_NORMAL` default.
+fn reverse_default_style(cp: &crate::options::ColorPair) -> Style {
+    if cp.fg.is_none() && cp.bg.is_none() {
+        Style {
+            modifiers: crate::theme::Modifiers::any(false, false, true),
+            ..Style::default()
+        }
+    } else {
+        Style {
+            fg: cp.fg.map(map_named_color),
+            bg: cp.bg.map(map_named_color),
+            modifiers: crate::theme::Modifiers::any(cp.bold, cp.italic, false),
+            ..Style::default()
+        }
+    }
+}
+
+fn numbercolor_style(cp: &crate::options::ColorPair) -> Style {
+    reverse_default_style(cp)
+}
+
+/// `stripecolor`'s resolved style for `set guidestripe`'s vertical guide.
+fn stripecolor_style(cp: &crate::options::ColorPair) -> Style {
+    reverse_default_style(cp)
+}
+
+/// Where `set guidestripe`'s vertical guide falls within one row's visible
+/// content, if at all -- `stripe_col` and `left` (the row's horizontal
+/// scroll offset) are both 0-based display columns, and `content_width` is
+/// how many display columns the content area itself has. The result is an
+/// offset from the content area's own start (so a caller windowing the row
+/// still needs to add its own left-marker shift) -- `None` when the
+/// configured column has been scrolled past on either side, matching
+/// nano's own `draw_row`'s bounds check exactly (confirmed against the
+/// installed nano's own escape-code output at both edges).
+fn stripe_content_offset(stripe_col: usize, left: usize, content_width: usize) -> Option<usize> {
+    let offset = stripe_col.checked_sub(left)?;
+    (offset < content_width).then_some(offset)
+}
+
+/// The row range (inclusive, 0-based within the viewport) of `set
+/// indicator`'s scrollbar "thumb" -- the portion representing the current
+/// viewport within the whole buffer. Matches nano's own `draw_scrollbar`
+/// exactly (`lowest`/`highest`, for the no-softwrap case, since tico
+/// doesn't support `softwrap` yet): `top_line` is 0-based, `viewport_rows`
+/// is the edit window's height, and `total_lines` is the buffer's own
+/// (ropey-native) line count, consistent with nano's `filebot->lineno`.
+fn scrollbar_thumb_range(
+    top_line: usize,
+    viewport_rows: usize,
+    total_lines: usize,
+) -> (usize, usize) {
+    let total_lines = total_lines.max(1);
+    let lowest = (top_line * viewport_rows) / total_lines;
+    let mut highest = lowest + (viewport_rows * viewport_rows) / total_lines;
+    if viewport_rows > total_lines {
+        // The whole buffer already fits without scrolling: the thumb
+        // covers the entire bar.
+        highest = viewport_rows;
+    }
+    (lowest, highest)
+}
+
+/// `scrollercolor`'s resolved style for one cell of `set indicator`'s
+/// scrollbar column: unlike the other bars, its unset default is no color
+/// at all (matching `functioncolor`, not the usual reverse-video default),
+/// and the "thumb" (the portion representing the current viewport) is
+/// always additionally reverse-video, on top of whatever `scrollercolor`
+/// resolves to -- nano ORs `A_REVERSE` onto the color pair rather than
+/// treating it as a separate, mutually exclusive style. Confirmed against
+/// the installed nano's own escape-code output, unconfigured and with an
+/// explicit `set scrollercolor`.
+fn scrollbar_cell_style(cp: &crate::options::ColorPair, thumb: bool) -> Style {
+    Style {
+        fg: cp.fg.map(map_named_color),
+        bg: cp.bg.map(map_named_color),
+        modifiers: crate::theme::Modifiers::any(cp.bold, cp.italic, thumb),
+        ..Style::default()
+    }
+}
+
 /// Map a nanorc color spec to the crossterm colors that produce the same
 /// escape codes as nano itself (crossterm's naming is inverted from
 /// nano's: `Color::Red` is bright/light red, `Color::DarkRed` is the
@@ -3079,6 +3652,71 @@ fn spotlight_colors(cp: &crate::options::ColorPair) -> (Color, Color) {
     let fg = cp.fg.map(map_named_color).unwrap_or(Color::Black);
     let bg = cp.bg.map(map_named_color).unwrap_or(Color::Yellow);
     (fg, bg)
+}
+
+/// How to paint a title/status/prompt bar, an error message, or the
+/// key-combo half of a shortcut-bar entry. nano's own default, whenever the
+/// corresponding `set XXXcolor` is unset, is plain reverse video (confirmed
+/// against the installed nano's own escape-code output); an explicit
+/// setting instead paints with exactly the given colors, bold and italic.
+/// `functioncolor`'s unset default is no color at all (`Plain`), matching
+/// nano's own behavior for the shortcut bar's descriptions.
+#[derive(Clone, Copy)]
+enum BarStyle {
+    Reverse,
+    Plain,
+    Colored {
+        fg: Color,
+        bg: Color,
+        bold: bool,
+        italic: bool,
+    },
+}
+
+/// Resolve a `set XXXcolor` option to how it should actually be painted,
+/// falling back to `default` (nano's own per-option default: `Reverse` for
+/// most bars, `Plain` for `functioncolor`, or another bar's already-resolved
+/// style for `promptcolor`/`minicolor`, which fall back to `titlecolor`)
+/// when the option was never configured.
+fn bar_style(cp: &crate::options::ColorPair, default: BarStyle) -> BarStyle {
+    if cp.fg.is_none() && cp.bg.is_none() {
+        default
+    } else {
+        BarStyle::Colored {
+            fg: cp.fg.map(map_named_color).unwrap_or(Color::Reset),
+            bg: cp.bg.map(map_named_color).unwrap_or(Color::Reset),
+            bold: cp.bold,
+            italic: cp.italic,
+        }
+    }
+}
+
+/// Print `text` in `style`, resetting afterwards (a no-op for `Plain`).
+fn queue_bar_segment(out: &mut impl Write, style: BarStyle, text: &str) -> io::Result<()> {
+    match style {
+        BarStyle::Plain => queue!(out, Print(text)),
+        BarStyle::Reverse => queue!(
+            out,
+            SetAttribute(Attribute::Reverse),
+            Print(text),
+            SetAttribute(Attribute::Reset)
+        ),
+        BarStyle::Colored {
+            fg,
+            bg,
+            bold,
+            italic,
+        } => {
+            queue!(out, SetForegroundColor(fg), SetBackgroundColor(bg))?;
+            if bold {
+                queue!(out, SetAttribute(Attribute::Bold))?;
+            }
+            if italic {
+                queue!(out, SetAttribute(Attribute::Italic))?;
+            }
+            queue!(out, Print(text), SetAttribute(Attribute::Reset))
+        }
+    }
 }
 
 /// How to paint the marked selection (`buf.mark`).
@@ -3161,6 +3799,9 @@ fn map_named_color(nc: crate::options::NamedColor) -> Color {
         }
         OC::Normal => Color::Reset,
         OC::Rgb(r, g, b) => Color::Rgb { r, g, b },
+        // nano's extended hue names (`lime`, `pink`, ...) are already a
+        // literal 256-color palette index; `light` doesn't apply to them.
+        OC::Indexed(i) => Color::AnsiValue(i),
     }
 }
 
@@ -3617,6 +4258,63 @@ mod tests {
             "original\n",
             "original buffer untouched"
         );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn insert_file_new_buffer_under_minibar_suppresses_the_blurb_but_notes_the_linecount() {
+        // Loading into a *new* buffer is never an undoable insert into the
+        // current one, so nano suppresses the ordinary "Read N lines"
+        // blurb under minibar too, showing only the persistent note --
+        // confirmed against the installed nano's own escape-code output.
+        let path = std::env::temp_dir().join("tico_test_insert_new_buffer_minibar.txt");
+        std::fs::write(&path, "a\nb\nc\n").unwrap();
+        let mut ed = test_editor("original\n");
+        ed.options.minibar = true;
+        submit_prompt(&mut ed, insert_prompt(true, path.to_str().unwrap()));
+        assert_eq!(ed.status, None, "blurb suppressed under minibar");
+        assert_eq!(ed.minibar_note.as_deref(), Some("(3 lines)"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn insert_file_into_current_buffer_under_minibar_still_shows_the_blurb() {
+        // Unlike loading into a new buffer, an interactive insert into the
+        // *current* buffer is undoable, so nano does NOT suppress its
+        // ordinary blurb even under minibar (only startup loads and
+        // new-buffer loads are silenced) -- confirmed against the
+        // installed nano's own escape-code output.
+        let path = std::env::temp_dir().join("tico_test_insert_current_minibar.txt");
+        std::fs::write(&path, "x\n").unwrap();
+        let mut ed = test_editor("original\n");
+        ed.options.minibar = true;
+        submit_prompt(&mut ed, insert_prompt(false, path.to_str().unwrap()));
+        assert!(
+            ed.status.is_some(),
+            "blurb still shown for an in-place insert"
+        );
+        assert_eq!(ed.minibar_note.as_deref(), Some("(2 lines)"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn write_out_under_minibar_suppresses_the_blurb_but_notes_the_linecount() {
+        let path = std::env::temp_dir().join("tico_test_write_out_minibar.txt");
+        std::fs::remove_file(&path).ok();
+        let mut ed = test_editor("one\ntwo\n");
+        ed.options.minibar = true;
+        let prompt = Prompt {
+            kind: PromptKind::WriteOut { exiting: false },
+            menu: Menu::WriteOut,
+            label: "Write Out".to_string(),
+            input: path.to_str().unwrap().to_string(),
+            cursor: 0,
+            history_pos: None,
+            saved_input: None,
+        };
+        submit_prompt(&mut ed, prompt);
+        assert_eq!(ed.status, None, "blurb suppressed under minibar");
+        assert_eq!(ed.minibar_note.as_deref(), Some("(2 lines)"));
         std::fs::remove_file(&path).ok();
     }
 
@@ -4105,5 +4803,403 @@ mod tests {
         assert_eq!(prompt_input_for_display(&ed, "a b"), "a b");
         ed.options.whitespacedisplay = true;
         assert_eq!(prompt_input_for_display(&ed, "a b"), "a\u{b7}b");
+    }
+
+    // Color settings (`set titlecolor` and friends): defaults and fallbacks
+    // confirmed against the installed nano 8.6's own escape-code output.
+
+    #[test]
+    fn bar_style_falls_back_to_the_given_default_when_unconfigured() {
+        let unset = crate::options::ColorPair::default();
+        assert!(matches!(
+            bar_style(&unset, BarStyle::Reverse),
+            BarStyle::Reverse
+        ));
+        assert!(matches!(
+            bar_style(&unset, BarStyle::Plain),
+            BarStyle::Plain
+        ));
+    }
+
+    #[test]
+    fn bar_style_uses_the_configured_colors_and_attributes() {
+        let cp = crate::options::parse_color_pair("bold,yellow,magenta").unwrap();
+        match bar_style(&cp, BarStyle::Reverse) {
+            BarStyle::Colored {
+                fg,
+                bg,
+                bold,
+                italic,
+            } => {
+                assert_eq!(fg, Color::DarkYellow);
+                assert_eq!(bg, Color::DarkMagenta);
+                assert!(bold);
+                assert!(!italic);
+            }
+            _ => panic!("expected a configured color pair to resolve to Colored"),
+        }
+    }
+
+    #[test]
+    fn errorcolor_default_matches_nanos_bold_white_on_red() {
+        // nano's own default ERROR_MESSAGE color, captured directly from
+        // the installed binary opening a directory as a file.
+        let cp = crate::options::Options::default().errorcolor;
+        match bar_style(&cp, BarStyle::Reverse) {
+            BarStyle::Colored {
+                fg,
+                bg,
+                bold,
+                italic,
+            } => {
+                assert_eq!(fg, Color::Grey);
+                assert_eq!(bg, Color::DarkRed);
+                assert!(bold);
+                assert!(!italic);
+            }
+            _ => panic!("errorcolor always has fg/bg set, even by default"),
+        }
+    }
+
+    #[test]
+    fn promptcolor_and_minicolor_fall_back_to_titlecolor() {
+        let mut ed = test_editor("");
+        ed.options.titlecolor = crate::options::parse_color_pair("bold,green,blue").unwrap();
+        let title_style = title_bar_style(&ed);
+        let prompt_style = bar_style(&ed.options.promptcolor, title_style);
+        match prompt_style {
+            BarStyle::Colored { fg, bg, bold, .. } => {
+                assert_eq!(fg, Color::DarkGreen);
+                assert_eq!(bg, Color::DarkBlue);
+                assert!(bold);
+            }
+            _ => panic!("promptcolor should inherit titlecolor when unset"),
+        }
+    }
+
+    #[test]
+    fn numbercolor_defaults_to_reverse_video() {
+        let unset = crate::options::ColorPair::default();
+        let style = numbercolor_style(&unset);
+        assert_eq!(style.fg, None);
+        assert_eq!(style.bg, None);
+        assert!(style.modifiers.contains(crate::theme::Modifiers::REVERSED));
+    }
+
+    #[test]
+    fn numbercolor_configured_uses_its_own_colors_not_reverse() {
+        let cp = crate::options::parse_color_pair("italic,cyan").unwrap();
+        let style = numbercolor_style(&cp);
+        assert_eq!(style.fg, Some(Color::DarkCyan));
+        assert_eq!(style.bg, None);
+        assert!(style.modifiers.contains(crate::theme::Modifiers::ITALIC));
+        assert!(!style.modifiers.contains(crate::theme::Modifiers::REVERSED));
+    }
+
+    #[test]
+    fn functioncolor_defaults_to_plain_not_reverse() {
+        let unset = crate::options::ColorPair::default();
+        assert!(matches!(
+            bar_style(&unset, BarStyle::Plain),
+            BarStyle::Plain
+        ));
+    }
+
+    #[test]
+    fn an_extended_256_color_hue_name_like_lime_is_not_rendered_invisibly() {
+        // Regression test: `set titlecolor black,lime` used to render as
+        // black-on-black, because `lime` failed to parse and left the
+        // background unset (-> the terminal's own default, typically
+        // black) instead of the lime-green 256-color background nano
+        // itself shows.
+        let cp = crate::options::parse_color_pair("black,lime").unwrap();
+        match bar_style(&cp, BarStyle::Reverse) {
+            BarStyle::Colored { fg, bg, .. } => {
+                assert_eq!(fg, Color::Black);
+                assert_eq!(bg, Color::AnsiValue(148));
+                assert_ne!(fg, bg, "must not resolve to the same color");
+            }
+            _ => panic!("an explicit color pair should never fall back to the default"),
+        }
+    }
+
+    // `set indicator` (the scrollbar)
+
+    #[test]
+    fn scrollbar_thumb_covers_the_whole_bar_when_the_buffer_fits_without_scrolling() {
+        assert_eq!(scrollbar_thumb_range(0, 26, 5), (0, 26));
+    }
+
+    #[test]
+    fn scrollbar_thumb_matches_nano_at_the_top_of_a_100_line_buffer() {
+        // 26-row viewport, 100-line buffer, scrolled to the top -- matches
+        // the installed nano's own escape-code output exactly (rows 0..6
+        // of the viewport highlighted).
+        assert_eq!(scrollbar_thumb_range(0, 26, 100), (0, 6));
+    }
+
+    #[test]
+    fn scrollbar_thumb_matches_nano_at_the_bottom_of_a_100_line_buffer() {
+        // Same buffer, scrolled all the way down (top_line = 74) -- matches
+        // the installed nano's own escape-code output exactly (rows 19..25).
+        assert_eq!(scrollbar_thumb_range(74, 26, 100), (19, 25));
+    }
+
+    #[test]
+    fn scrollercolor_default_is_plain_not_reverse_but_the_thumb_always_reverses() {
+        let unset = crate::options::ColorPair::default();
+        let track = scrollbar_cell_style(&unset, false);
+        assert_eq!(track.fg, None);
+        assert_eq!(track.bg, None);
+        assert!(!track.modifiers.contains(crate::theme::Modifiers::REVERSED));
+
+        let thumb = scrollbar_cell_style(&unset, true);
+        assert_eq!(thumb.fg, None);
+        assert_eq!(thumb.bg, None);
+        assert!(thumb.modifiers.contains(crate::theme::Modifiers::REVERSED));
+    }
+
+    #[test]
+    fn scrollercolor_configured_colors_both_track_and_thumb_reverse_added_to_thumb_only() {
+        let cp = crate::options::parse_color_pair("blue,yellow").unwrap();
+        let track = scrollbar_cell_style(&cp, false);
+        assert_eq!(track.fg, Some(Color::DarkBlue));
+        assert_eq!(track.bg, Some(Color::DarkYellow));
+        assert!(!track.modifiers.contains(crate::theme::Modifiers::REVERSED));
+
+        let thumb = scrollbar_cell_style(&cp, true);
+        assert_eq!(thumb.fg, Some(Color::DarkBlue));
+        assert_eq!(thumb.bg, Some(Color::DarkYellow));
+        assert!(thumb.modifiers.contains(crate::theme::Modifiers::REVERSED));
+    }
+
+    // `set guidestripe` / `stripecolor`
+
+    #[test]
+    fn stripe_content_offset_is_visible_within_bounds() {
+        assert_eq!(stripe_content_offset(9, 0, 20), Some(9));
+        // Scrolled so the stripe's column is now the content area's first
+        // visible column.
+        assert_eq!(stripe_content_offset(9, 9, 20), Some(0));
+    }
+
+    #[test]
+    fn stripe_content_offset_hides_once_scrolled_past_on_either_side() {
+        // Scrolled past it to the left.
+        assert_eq!(stripe_content_offset(9, 10, 20), None);
+        // Past the right edge of a narrow content area.
+        assert_eq!(stripe_content_offset(25, 0, 20), None);
+        // Exactly at the last visible column is still shown.
+        assert_eq!(stripe_content_offset(19, 0, 20), Some(19));
+    }
+
+    #[test]
+    fn stripecolor_defaults_to_reverse_video_like_numbercolor() {
+        let unset = crate::options::ColorPair::default();
+        let style = stripecolor_style(&unset);
+        assert_eq!(style.fg, None);
+        assert_eq!(style.bg, None);
+        assert!(style.modifiers.contains(crate::theme::Modifiers::REVERSED));
+    }
+
+    #[test]
+    fn stripecolor_configured_uses_its_own_colors_not_reverse() {
+        let cp = crate::options::parse_color_pair("blue,yellow").unwrap();
+        let style = stripecolor_style(&cp);
+        assert_eq!(style.fg, Some(Color::DarkBlue));
+        assert_eq!(style.bg, Some(Color::DarkYellow));
+        assert!(!style.modifiers.contains(crate::theme::Modifiers::REVERSED));
+    }
+
+    #[test]
+    fn guidestripe_recolors_the_configured_column_in_reverse_by_default() {
+        // Confirmed against the installed nano's own escape-code output:
+        // column 10 recolors the character already there, in plain
+        // reverse video, when stripecolor is unset.
+        let mut ed = test_editor("xxxxxxxxxxxxxxxxxxxx\n");
+        ed.options.guidestripe = Some(10);
+        ed.screen_cols = 80;
+        let mut out = Vec::new();
+        render_buffer(&ed, &mut out, 0, 1).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            text.contains("\x1b[7mx\x1b[0m"),
+            "expected a lone reverse-video 'x' at the stripe column: {text:?}"
+        );
+    }
+
+    #[test]
+    fn guidestripe_paints_a_space_past_a_short_lines_own_text() {
+        let mut ed = test_editor("short\n");
+        ed.options.guidestripe = Some(10);
+        ed.screen_cols = 80;
+        let mut out = Vec::new();
+        render_buffer(&ed, &mut out, 0, 1).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            text.contains("\x1b[7m \x1b[0m"),
+            "expected a reverse-video space past the end of the line: {text:?}"
+        );
+    }
+
+    #[test]
+    fn selection_takes_priority_over_the_guidestripe_at_the_same_column() {
+        let mut ed = test_editor("xxxxxxxxxxxxxxxxxxxx\n");
+        ed.options.guidestripe = Some(10);
+        ed.screen_cols = 80;
+        ed.buf_mut().mark = Some(Pos::new(0, 0));
+        ed.buf_mut().cursor = Pos::new(0, 20);
+        let mut out = Vec::new();
+        render_buffer(&ed, &mut out, 0, 1).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            !text.contains("\x1b[7mx\x1b[0m"),
+            "the whole line is selected, so no lone reverse 'x' should appear: {text:?}"
+        );
+    }
+
+    // `set mouse`
+
+    fn mev(kind: MouseEventKind, row: u16, column: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn mouse_events_are_ignored_when_the_option_is_off() {
+        let mut ed = test_editor("hello\n");
+        ed.options.mouse = false;
+        handle_mouse(&mut ed, mev(MouseEventKind::Down(MouseButton::Left), 1, 3));
+        assert_eq!(ed.buf().cursor, Pos::new(0, 0), "click had no effect");
+    }
+
+    #[test]
+    fn mouse_click_in_the_buffer_places_the_cursor() {
+        let mut ed = test_editor("line one\nline two\nline three\n");
+        ed.options.mouse = true;
+        // Row 0 is the title bar; row 1 + n is buffer line n.
+        handle_mouse(&mut ed, mev(MouseEventKind::Down(MouseButton::Left), 3, 3));
+        assert_eq!(ed.buf().cursor, Pos::new(2, 3));
+    }
+
+    #[test]
+    fn mouse_click_at_the_cursors_own_position_toggles_the_mark() {
+        // Matches nano's own process_click: not click-timing based, just
+        // "the click didn't move the cursor".
+        let mut ed = test_editor("hello world\n");
+        ed.options.mouse = true;
+        ed.buf_mut().cursor = Pos::new(0, 3);
+        assert!(ed.buf().mark.is_none());
+
+        handle_click(&mut ed, 1, 3);
+        assert_eq!(ed.buf().cursor, Pos::new(0, 3), "cursor shouldn't move");
+        assert_eq!(
+            ed.buf().mark,
+            Some(Pos::new(0, 3)),
+            "click-in-place toggles the mark on"
+        );
+
+        handle_click(&mut ed, 1, 3);
+        assert!(
+            ed.buf().mark.is_none(),
+            "clicking again toggles it back off"
+        );
+    }
+
+    #[test]
+    fn mouse_click_on_the_scrollbar_jumps_proportionally() {
+        let text: String = (1..=100).map(|n| format!("line {n}\n")).collect();
+        let mut ed = test_editor(&text);
+        ed.options.mouse = true;
+        ed.options.indicator = true;
+        ed.screen_cols = 80;
+        ed.screen_rows = 24;
+        // editwinrows = 24 - title(1) - status(1) - help(2) = 20; clicking
+        // the scrollbar's very last row (and very last column) should jump
+        // at or near the end of the buffer.
+        handle_click(&mut ed, 1 + 19, 79);
+        assert_eq!(ed.buf().cursor.line, 100);
+    }
+
+    #[test]
+    fn mouse_click_on_a_shortcut_activates_it() {
+        let mut ed = test_editor("hello\n");
+        ed.options.mouse = true;
+        let bar_row = main_screen_layout(&ed).status_row + 1;
+        // Column 2 lands within the bar's first cell ("^G Help").
+        handle_click(&mut ed, bar_row, 2);
+        assert!(matches!(ed.mode, Mode::Help { .. }));
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_two_lines_without_moving_the_cursor() {
+        let text: String = (1..=50).map(|n| format!("line {n}\n")).collect();
+        let mut ed = test_editor(&text);
+        ed.options.mouse = true;
+        let before = ed.buf().cursor;
+        handle_mouse(&mut ed, mev(MouseEventKind::ScrollDown, 0, 0));
+        assert_eq!(ed.buf().top_line, 2, "one wheel notch scrolls two lines");
+        assert_eq!(ed.buf().cursor, before, "the cursor doesn't move");
+        handle_mouse(&mut ed, mev(MouseEventKind::ScrollUp, 0, 0));
+        assert_eq!(ed.buf().top_line, 0);
+    }
+
+    #[test]
+    fn shortcut_bar_click_index_matches_the_rendered_grid() {
+        let entries: Vec<(String, &str)> = vec![
+            ("^A".into(), "Aaa"),
+            ("^B".into(), "Bbb"),
+            ("^C".into(), "Ccc"),
+            ("^D".into(), "Ddd"),
+        ];
+        // max_label=2, max_desc=3 -> col_width = 2+1+3+2 = 8;
+        // cols=20 -> n_cols=2 -> n_pairs=min(2, 4.div_ceil(2)=2)=2.
+        assert_eq!(shortcut_bar_click_index(20, &entries, 0, 0), Some(0));
+        assert_eq!(shortcut_bar_click_index(20, &entries, 1, 0), Some(1));
+        assert_eq!(shortcut_bar_click_index(20, &entries, 0, 8), Some(2));
+        assert_eq!(shortcut_bar_click_index(20, &entries, 1, 8), Some(3));
+        assert_eq!(
+            shortcut_bar_click_index(20, &entries, 2, 0),
+            None,
+            "only 2 rows exist"
+        );
+        assert_eq!(
+            shortcut_bar_click_index(20, &entries, 0, 16),
+            None,
+            "beyond the last column"
+        );
+    }
+
+    #[test]
+    fn key_to_event_round_trips_through_normalize_key() {
+        for key in [
+            TKey::Ctrl('G'),
+            TKey::Meta('U'),
+            TKey::ShiftMeta('A'),
+            TKey::F(1),
+            TKey::Backspace,
+            TKey::ShiftTab,
+            TKey::Ins,
+        ] {
+            let ev = key_to_event(key);
+            assert_eq!(normalize_key(ev), Some(key), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn synthetic_key_event_for_label_handles_bare_chars_and_key_specs() {
+        assert_eq!(synthetic_key_event_for_label(""), None);
+        assert_eq!(
+            synthetic_key_event_for_label("Y"),
+            Some(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::NONE))
+        );
+        let ev = synthetic_key_event_for_label("^G").unwrap();
+        assert_eq!(normalize_key(ev), Some(TKey::Ctrl('G')));
+        let ev = synthetic_key_event_for_label("M-U").unwrap();
+        assert_eq!(normalize_key(ev), Some(TKey::Meta('U')));
     }
 }
