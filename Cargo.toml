@@ -3,7 +3,7 @@ name = "tico"
 version = "0.1.0"
 edition = "2024"
 description = "Yet Another Text Editor"
-repository = "https://github.com/plicease/tico"
+repository = "https://github.com/tico-edit/tico"
 # MIT, except the files copied from Helix (MPL-2.0): src/syntax/queries/diff.scm
 # and the built-in themes under themes/; see README.md.
 # grammars/tree-sitter-vcl/ is a vendored MIT grammar (copyright ntsk), so
