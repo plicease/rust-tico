@@ -101,6 +101,7 @@ lang_fn!(lang_lua, tree_sitter_lua);
 lang_fn!(lang_markdown, tree_sitter_md);
 lang_fn!(lang_groovy, dekobon_tree_sitter_groovy);
 lang_fn!(lang_properties, tree_sitter_properties);
+lang_fn!(lang_tcl, tree_sitter_tcl);
 
 // The VCL grammar is not a crate: build.rs compiles it from
 // `grammars/tree-sitter-vcl/` (a fork of ntsk/tree-sitter-vcl extended for
@@ -634,6 +635,18 @@ const LANGUAGES: &[LanguageDef] = &[
         modeline_aliases: &["jproperties"],
         language: lang_properties,
         highlights_query: include_str!("queries/properties.scm"),
+        linter: None,
+        formatter: None,
+        comment: "#",
+    },
+    LanguageDef {
+        name: "tcl",
+        extensions: &["tcl", "exp"],
+        filenames: &[],
+        shebangs: &["tclsh", "wish", "expect"],
+        modeline_aliases: &["expect"],
+        language: lang_tcl,
+        highlights_query: include_str!("queries/tcl.scm"),
         linter: None,
         formatter: None,
         comment: "#",

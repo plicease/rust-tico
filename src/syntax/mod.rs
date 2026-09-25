@@ -999,6 +999,32 @@ mod tests {
     /// An ordinary rule with no standard target name must still get color:
     /// the crate's make query left `foo: bar` blank (only the `:` was
     /// captured), which read as "highlighting is off" in a two-line Makefile.
+    /// The Tcl query stacks captures (`@spell @comment`, `@repeat
+    /// @keyword`); the Helix-scope one must be what wins for each node.
+    #[test]
+    fn tcl_highlights() {
+        let src =
+            "# note\nproc greet {name} {\n    puts \"hi $name\"\n}\nforeach x $list { incr n }\n";
+        let lang = languages::detect(Some(std::path::Path::new("a.tcl")), src).unwrap();
+        assert_eq!(lang.name, "tcl");
+        let spans = highlight(src, lang);
+        let at = |needle: &str| {
+            let start = src.find(needle).unwrap();
+            spans
+                .iter()
+                .filter(|s| s.start == start && s.end == start + needle.len())
+                .map(|s| s.scope.name().to_string())
+                .next_back()
+        };
+        assert_eq!(at("# note").as_deref(), Some("comment"));
+        assert_eq!(at("proc").as_deref(), Some("keyword.function"));
+        assert_eq!(at("greet").as_deref(), Some("variable"));
+        assert_eq!(at("puts").as_deref(), Some("function.builtin"));
+        assert_eq!(at("\"hi $name\"").as_deref(), Some("string"));
+        assert_eq!(at("foreach").as_deref(), Some("keyword.control.repeat"));
+        assert_eq!(at("incr").as_deref(), Some("function.builtin"));
+    }
+
     #[test]
     fn make_plain_rule_is_colored() {
         let src = "foo: bar baz.o\n\tcc -o foo bar\n\nall: foo\n";
@@ -1974,6 +2000,11 @@ mod tests {
                 "groovy",
                 "a.groovy",
                 "class Foo {\n    def bar() { return 1 } // hi\n}\n",
+            ),
+            (
+                "tcl",
+                "a.tcl",
+                "#!/usr/bin/env tclsh\nproc greet {name} { puts \"hi $name\" } ;# hi\nset x [expr {1 + 2}]\n",
             ),
             (
                 "properties",

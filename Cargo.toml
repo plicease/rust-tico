@@ -75,6 +75,10 @@ ts-parser-perl = "2.0.0"
 # package omits its highlights.scm entirely (see src/syntax/mod.rs), while
 # this fork bundles one that matches its own grammar.
 dekobon-tree-sitter-groovy = "0.3.0"
+# Tcl is the tree-sitter-grammars grammar (what Helix and nvim-treesitter
+# use), which isn't published on crates.io under its own name; pulled
+# straight from git, pinned to a commit, like tree-sitter-scss below.
+tree-sitter-tcl = { git = "https://github.com/tree-sitter-grammars/tree-sitter-tcl", rev = "850a72ab6436e06645b33b11cfa60cbdb04b1f01" }
 unicode-segmentation = "1.13.3"
 unicode-width = "0.2.2"
 

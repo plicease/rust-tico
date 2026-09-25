@@ -724,6 +724,7 @@ dependencies = [
  "tree-sitter-scss",
  "tree-sitter-sequel",
  "tree-sitter-swift",
+ "tree-sitter-tcl",
  "tree-sitter-toml-ng",
  "tree-sitter-typescript",
  "tree-sitter-vim",
@@ -1159,6 +1160,15 @@ name = "tree-sitter-swift"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe36052155b9dd69ca82b3b8f1b4ccfb2d867125ac1a4db1dd7331829242668c"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-tcl"
+version = "1.1.0"
+source = "git+https://github.com/tree-sitter-grammars/tree-sitter-tcl?rev=850a72ab6436e06645b33b11cfa60cbdb04b1f01#850a72ab6436e06645b33b11cfa60cbdb04b1f01"
 dependencies = [
  "cc",
  "tree-sitter-language",

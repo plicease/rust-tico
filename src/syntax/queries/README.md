@@ -21,6 +21,7 @@ doesn't land in a Helix top-level scope fails
 | `diff.scm` | [Helix](https://github.com/helix-editor/helix) `runtime/queries/diff/highlights.scm`, commit `737ab17` | **MPL-2.0** — see `LICENSE-MPL-2.0` in the repository root |
 | `vcl.scm` | Started from [ntsk/tree-sitter-vcl](https://github.com/ntsk/tree-sitter-vcl) v0.4.1 `queries/highlights.scm`, extended for the Fastly constructs in tico's fork of the grammar (`grammars/tree-sitter-vcl/`) | MIT (upstream's and tico's) |
 | `groovy.scm` | The [dekobon fork of tree-sitter-groovy](https://github.com/dekobon/tree-sitter-groovy) (the `dekobon-tree-sitter-groovy` crate, not `tree-sitter-groovy` — that one's crates.io package omits its `highlights.scm`), commit `436a405`, `queries/groovy/highlights.scm`, unmodified | MIT (upstream dual-licenses MIT/Apache-2.0; used here under the MIT option) |
+| `tcl.scm` | [tree-sitter-grammars/tree-sitter-tcl](https://github.com/tree-sitter-grammars/tree-sitter-tcl) commit `850a72a`, `queries/tcl/highlights.scm`, with the stacked fallback captures dropped as noted in its header (the grammar is a git dependency, not a crate) | MIT |
 | everything else | The corresponding `tree-sitter-<lang>` crate's `queries/highlights.scm`, unmodified except where noted in a file's header | That grammar's license (MIT for all current ones) |
 
 `diff.scm` is the one file here not under tico's MIT license. MPL-2.0 is a
