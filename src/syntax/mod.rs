@@ -1789,6 +1789,11 @@ mod tests {
                 "default.vcl",
                 "vcl 4.1;\nsub vcl_recv { # hi\n    return (pass);\n}\n",
             ),
+            (
+                "groovy",
+                "a.groovy",
+                "class Foo {\n    def bar() { return 1 } // hi\n}\n",
+            ),
         ];
         for (name, path, source) in cases {
             check(name, path, source, true);
