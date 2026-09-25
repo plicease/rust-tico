@@ -721,6 +721,7 @@ dependencies = [
  "ts-parser-perl",
  "unicode-segmentation",
  "unicode-width",
+ "windows-sys",
 ]
 
 [[package]]
